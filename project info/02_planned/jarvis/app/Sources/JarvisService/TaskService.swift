@@ -12,19 +12,32 @@ public final class TaskService: TaskServiceAPI, @unchecked Sendable {
     private let tasks: any TaskRepository
     private let audits: any AuditRepository
     private let requests: any ToolRequestRepository
+    private let approvals: any ApprovalRepository
     private let uow: any PersistenceUnitOfWork
     private let policy: any PolicyEvaluator
     private let config: PolicyConfig
     private let executor: any ToolExecutor
     private let lock = NSLock()
-    private var executions: [UUID: Swift.Task<Void, Never>] = [:]
+    private var executions: [UUID: Swift.Task<Void, Error>] = [:]
 
-    public init(taskRepository: any TaskRepository, auditRepository: any AuditRepository, policy: any PolicyEvaluator, policyConfig: PolicyConfig = .init(), executor: any ToolExecutor = NoOpToolExecutor(), requestRepository: (any ToolRequestRepository)? = nil, approvalRepository: (any ApprovalRepository)? = nil, unitOfWork: (any PersistenceUnitOfWork)? = nil) {
+    public init(taskRepository: any TaskRepository, auditRepository: any AuditRepository, policy: any PolicyEvaluator, policyConfig: PolicyConfig = .init(), executor: any ToolExecutor = NoOpToolExecutor(), requestRepository: (any ToolRequestRepository)? = nil, approvalRepository: (any ApprovalRepository)? = nil, unitOfWork: (any PersistenceUnitOfWork)? = nil) throws {
+        guard let sqliteTasks = taskRepository as? SQLiteTaskRepository,
+              let sqliteAudits = auditRepository as? SQLiteAuditRepository,
+              sqliteTasks.database === sqliteAudits.database else { throw TaskServiceError.incompatiblePersistence }
+        let database = sqliteTasks.database
+        if let requestRepository {
+            guard let sqlite = requestRepository as? SQLiteToolRequestRepository, sqlite.database === database else { throw TaskServiceError.incompatiblePersistence }
+            self.requests = sqlite
+        } else { self.requests = SQLiteToolRequestRepository(database: database) }
+        if let approvalRepository {
+            guard let sqlite = approvalRepository as? SQLiteApprovalRepository, sqlite.database === database else { throw TaskServiceError.incompatiblePersistence }
+            self.approvals = sqlite
+        } else { self.approvals = SQLiteApprovalRepository(database: database) }
+        if let unitOfWork {
+            guard let sqlite = unitOfWork as? SQLitePersistenceUnitOfWork, sqlite.database === database else { throw TaskServiceError.incompatiblePersistence }
+            self.uow = sqlite
+        } else { self.uow = SQLitePersistenceUnitOfWork(database: database) }
         self.tasks = taskRepository; self.audits = auditRepository; self.policy = policy; self.config = policyConfig; self.executor = executor
-        if let requests = requestRepository, let unitOfWork { self.requests = requests; self.uow = unitOfWork }
-        else if let sqlite = taskRepository as? SQLiteTaskRepository { self.requests = SQLiteToolRequestRepository(database: sqlite.database); self.uow = SQLitePersistenceUnitOfWork(database: sqlite.database) }
-        else { preconditionFailure("TaskService requires a ToolRequestRepository and PersistenceUnitOfWork") }
-        _ = approvalRepository
     }
 
     public func createTask(title: String) async throws -> Task { try lock.withLock { let task = Task(title: title); try uow.createTask(task, audit: event(taskID: task.id, summary: "task created", result: "created")); return task } }
@@ -40,7 +53,7 @@ public final class TaskService: TaskServiceAPI, @unchecked Sendable {
                 try requireRunning(request.taskID)
                 try uow.recordRequest(request, status: .executing, audits: [event(request, summary: "tool request received", result: "received"), event(request, summary: "policy allowed", result: "allowed")])
             }
-            try await execute(request)
+            try await runTracked(request)
         case .requireApproval(let reason):
             try lock.withLock {
                 try requireRunning(request.taskID)
@@ -77,22 +90,42 @@ public final class TaskService: TaskServiceAPI, @unchecked Sendable {
 
     public func cancel(taskID: UUID) async throws {
         try lock.withLock {
-            executions.removeValue(forKey: taskID)?.cancel()
-            let hasExecuting = try requests.list(status: .executing).contains { $0.0.taskID == taskID }
-            if hasExecuting {
-                try uow.cancelExecutingTask(taskID: taskID, audits: [event(taskID: taskID, summary: "task cancelled", result: "cancelled")])
-            } else {
-                let ids = try requests.list(status: .pending).filter { $0.0.taskID == taskID }.map { $0.0.id }
-                try uow.cancelTask(taskID: taskID, requestIDs: ids, audits: [event(taskID: taskID, summary: "task cancelled", result: "cancelled")])
+            for (requestID, job) in executions {
+                if let (request, _) = try requests.fetch(id: requestID), request.taskID == taskID { job.cancel() }
             }
+            try uow.cancelTask(taskID: taskID, requestIDs: [], audits: [event(taskID: taskID, summary: "task cancelled", result: "cancelled")])
         }
     }
 
     public func transition(taskID: UUID, to: TaskStatus) throws { try lock.withLock { let task = try requiredTask(taskID); try transition(task, to: to) } }
 
     private func startExecution(_ request: ToolRequest) {
-        let task = Swift.Task { [weak self] in _ = try? await self?.execute(request) }
-        lock.withLock { executions[request.taskID] = task }
+        let gate = ExecutionGate()
+        let job: Swift.Task<Void, Error> = Swift.Task { [weak self] in
+            await gate.wait()
+            defer { self?.removeExecution(request.id) }
+            guard let self else { return }
+            try await self.execute(request)
+        }
+        lock.withLock { executions[request.id] = job }
+        gate.open()
+    }
+
+    private func runTracked(_ request: ToolRequest) async throws {
+        let gate = ExecutionGate()
+        let job: Swift.Task<Void, Error> = Swift.Task { [weak self] in
+            await gate.wait()
+            defer { self?.removeExecution(request.id) }
+            guard let self else { return }
+            try await self.execute(request)
+        }
+        lock.withLock { executions[request.id] = job }
+        gate.open()
+        try await job.value
+    }
+
+    private func removeExecution(_ requestID: UUID) {
+        _ = lock.withLock { executions.removeValue(forKey: requestID) }
     }
 
     private func execute(_ request: ToolRequest) async throws {
@@ -102,7 +135,6 @@ public final class TaskService: TaskServiceAPI, @unchecked Sendable {
             try lock.withLock {
                 guard let task = try tasks.fetch(id: request.taskID), task.status != .cancelled else { return }
                 try uow.finishRequest(request, status: .completed, taskStatus: nil, audits: [event(request, summary: "tool result", result: bounded(result.summary))])
-                executions.removeValue(forKey: request.taskID)
             }
         } catch is CancellationError {
             // Cancellation transaction already sets request and task to cancelled; never add success/failure after it.
@@ -110,7 +142,6 @@ public final class TaskService: TaskServiceAPI, @unchecked Sendable {
             try lock.withLock {
                 guard let task = try tasks.fetch(id: request.taskID), task.status != .cancelled else { return }
                 try uow.finishRequest(request, status: .failed, taskStatus: .failed, audits: [event(request, summary: "tool failure", result: "failed")])
-                executions.removeValue(forKey: request.taskID)
             }
             throw error
         }
@@ -123,5 +154,31 @@ public final class TaskService: TaskServiceAPI, @unchecked Sendable {
     private func bounded(_ summary: String) -> String { String(redactSecrets(summary).prefix(512)) }
     private func event(_ request: ToolRequest, summary: String, result: String, approvalID: UUID? = nil) -> AuditEvent { event(taskID: request.taskID, sideEffect: request.sideEffect, digest: request.payloadDigest, summary: summary, result: result, approvalID: approvalID, target: request.target) }
     private func event(taskID: UUID, sideEffect: SideEffect = .read, digest: String = "", summary: String, result: String, approvalID: UUID? = nil, target: String = "local task service") -> AuditEvent { AuditEvent(taskID: taskID, worker: "task-service", target: target, sideEffect: sideEffect, actionDigest: digest, summary: summary, result: result, approvalID: approvalID) }
+}
+
+private final class ExecutionGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isOpen = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            let resumeNow = lock.withLock { () -> Bool in
+                guard !isOpen else { return true }
+                self.continuation = continuation
+                return false
+            }
+            if resumeNow { continuation.resume() }
+        }
+    }
+
+    func open() {
+        let continuation = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+            isOpen = true
+            defer { self.continuation = nil }
+            return self.continuation
+        }
+        continuation?.resume()
+    }
 }
 private extension NSLock { func withLock<T>(_ body: () throws -> T) rethrows -> T { lock(); defer { unlock() }; return try body() } }

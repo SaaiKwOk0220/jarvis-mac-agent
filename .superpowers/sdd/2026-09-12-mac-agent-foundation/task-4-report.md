@@ -46,3 +46,17 @@
 - Added a separate upgrade migration for persisted request scope columns, preserving existing installations.
 - Added transactional request receipt/result/failure/cancellation methods, restart-safe injected repositories, task-scoped cooperative cancellation, bounded/redacted result summaries, and malformed-header rejection.
 - Focused service suite now covers 12 tests with zero failures, including restart approval/rejection, executor failure, and cancellation suppression.
+
+### Fourth-round hardening
+
+- `submitRequest` and `recordRequest` now require the task to be `running` inside their SQLite write transaction, so a cancellation cannot be revived by a second service instance.
+- Executions are registered by immutable request ID before they can begin. Cancellation finds and cancels every active request for its task, while its transaction marks both pending and executing requests cancelled.
+- `TaskService` now has a throwing initializer which requires all task, audit, request, approval, and unit-of-work repositories to be SQLite implementations over the identical `Database` instance. This replaces the former ignored audit/approval dependency and fail-fast precondition.
+- Regression coverage now includes a deterministic cross-service cancellation race, direct transactional guards for both request writes, allowed-executor cancellation, multiple concurrent executions for one task, and incompatible database rejection.
+
+## Latest verification
+
+- `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --package-path 'project info/02_planned/jarvis/app' --filter TaskServiceTests`
+  - 17 tests executed, 0 failures.
+- `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --package-path 'project info/02_planned/jarvis/app'`
+  - 55 tests executed, 0 failures.

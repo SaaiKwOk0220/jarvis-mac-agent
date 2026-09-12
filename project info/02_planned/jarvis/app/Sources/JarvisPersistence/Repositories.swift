@@ -188,7 +188,7 @@ public final class SQLiteTaskRepository: TaskRepository, @unchecked Sendable {
 }
 
 public final class SQLiteToolRequestRepository: ToolRequestRepository, @unchecked Sendable {
-    private let database: Database
+    public let database: Database
     public init(database: Database) { self.database = database }
 
     public func insert(_ request: ToolRequest, status: ToolRequestStatus) throws {
@@ -216,7 +216,7 @@ public final class SQLiteToolRequestRepository: ToolRequestRepository, @unchecke
 }
 
 public final class SQLitePersistenceUnitOfWork: PersistenceUnitOfWork, @unchecked Sendable {
-    private let database: Database
+    public let database: Database
     public init(database: Database) { self.database = database }
 
     public func createTask(_ task: Task, audit: AuditEvent) throws {
@@ -226,6 +226,7 @@ public final class SQLitePersistenceUnitOfWork: PersistenceUnitOfWork, @unchecke
     }
     public func submitRequest(_ request: ToolRequest, status: ToolRequestStatus, taskStatus: TaskStatus, audits: [AuditEvent]) throws {
         try database.write { db in
+            try ensureTaskStatus(request.taskID, equals: .running, db: db)
             try updateTask(request.taskID, to: taskStatus, db: db)
             try insertToolRequest(request, status: status, db: db)
             for audit in audits { try insertAudit(audit, db: db) }
@@ -261,6 +262,7 @@ public final class SQLitePersistenceUnitOfWork: PersistenceUnitOfWork, @unchecke
     }
     public func recordRequest(_ request: ToolRequest, status: ToolRequestStatus, audits: [AuditEvent]) throws {
         try database.write { db in
+            try ensureTaskStatus(request.taskID, equals: .running, db: db)
             try insertToolRequest(request, status: status, db: db)
             for audit in audits { try insertAudit(audit, db: db) }
         }
@@ -346,7 +348,7 @@ public final class SQLiteAuditRepository: AuditRepository, @unchecked Sendable {
 }
 
 public final class SQLiteApprovalRepository: ApprovalRepository, @unchecked Sendable {
-    private let database: Database
+    public let database: Database
 
     public init(database: Database) {
         self.database = database
