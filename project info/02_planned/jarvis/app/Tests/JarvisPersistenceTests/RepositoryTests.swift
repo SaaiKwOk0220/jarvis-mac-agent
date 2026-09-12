@@ -114,6 +114,101 @@ final class RepositoryTests: XCTestCase {
         )
     }
 
+    func testRedactSecretsCoversAdditionalAuthorizationURLTokenAndQuotedPasswordForms() {
+        XCTAssertEqual(
+            redactSecrets("Authorization: Basic dXNlcjpwYXNz"),
+            "Authorization: Basic [REDACTED]"
+        )
+        XCTAssertEqual(
+            redactSecrets("https://alice:very-secret@example.com/path"),
+            "https://[REDACTED]@example.com/path"
+        )
+        XCTAssertEqual(redactSecrets("refresh_token=refresh-secret"), "refresh_token=[REDACTED]")
+        XCTAssertEqual(redactSecrets(#"password="secret with spaces""#), #"password="[REDACTED]""#)
+    }
+
+    func testAuditStorageRedactsAdditionalSecretFormsInRawFields() throws {
+        let database = try migratedDatabase()
+        let repository = SQLiteAuditRepository(database: database)
+        let event = AuditEvent(
+            taskID: UUID(),
+            worker: "Authorization: Basic basic-secret",
+            target: "https://alice:very-secret@example.com/path",
+            sideEffect: .externalSend,
+            actionDigest: "refresh_token=refresh-secret",
+            summary: #"password="secret with spaces""#,
+            result: "completed",
+            approvalID: nil
+        )
+
+        try repository.append(event)
+
+        let row = try XCTUnwrap(database.read { db in
+            try Row.fetchOne(
+                db,
+                sql: "SELECT worker, target, action_digest, summary, result FROM audit_events WHERE id = ?",
+                arguments: [event.id.uuidString]
+            )
+        })
+        let rawFields: [String] = try [
+            row.decode(String.self, forColumn: "worker"),
+            row.decode(String.self, forColumn: "target"),
+            row.decode(String.self, forColumn: "action_digest"),
+            row.decode(String.self, forColumn: "summary"),
+            row.decode(String.self, forColumn: "result"),
+        ]
+
+        for secret in ["basic-secret", "alice", "very-secret", "refresh-secret", "secret with spaces"] {
+            XCTAssertFalse(rawFields.joined(separator: " ").contains(secret))
+        }
+    }
+
+    func testApprovalRepositoryRoundTripsApprovalsInDecisionOrder() throws {
+        let repository = SQLiteApprovalRepository(database: try migratedDatabase())
+        let later = Approval(
+            toolRequestID: UUID(),
+            actionDigest: "digest-later",
+            decision: .approved,
+            decidedAt: Date(timeIntervalSince1970: 1_725_000_010)
+        )
+        let earlier = Approval(
+            toolRequestID: UUID(),
+            actionDigest: "digest-earlier",
+            decision: .rejected,
+            decidedAt: Date(timeIntervalSince1970: 1_725_000_005)
+        )
+
+        try repository.insert(later)
+        try repository.insert(earlier)
+
+        XCTAssertEqual(try repository.fetch(id: later.id), later)
+        XCTAssertEqual(try repository.list(), [earlier, later])
+    }
+
+    func testPolicyRuleRepositoryRoundTripsEnabledStateInDeterministicNameOrder() throws {
+        let repository = SQLitePolicyRuleRepository(database: try migratedDatabase())
+        let alpha = PolicyRule(
+            name: "alpha",
+            rule: "allow read-only tools",
+            enabled: false,
+            createdAt: Date(timeIntervalSince1970: 1_725_000_000),
+            updatedAt: Date(timeIntervalSince1970: 1_725_000_001)
+        )
+        let zulu = PolicyRule(
+            name: "Zulu",
+            rule: "require approval for sends",
+            enabled: true,
+            createdAt: Date(timeIntervalSince1970: 1_725_000_000),
+            updatedAt: Date(timeIntervalSince1970: 1_725_000_001)
+        )
+
+        try repository.upsert(zulu)
+        try repository.upsert(alpha)
+
+        XCTAssertEqual(try repository.fetch(id: alpha.id), alpha)
+        XCTAssertEqual(try repository.list(), [alpha, zulu])
+    }
+
     func testTaskRepositoryThrowsForCorruptUUIDEnumAndNullFields() throws {
         let database = try corruptDatabase(with: """
             CREATE TABLE tasks (
