@@ -45,4 +45,38 @@ final class TaskModelsTests: XCTestCase {
 
         XCTAssertNotEqual(original, changedPayload)
     }
+
+    func testToolRequestAlwaysComputesDigestFromItsAction() {
+        let request = ToolRequest(
+            taskID: UUID(),
+            name: "write_file",
+            sideEffect: .localWrite,
+            target: "/tmp/a",
+            payload: "contents"
+        )
+
+        XCTAssertEqual(
+            request.payloadDigest,
+            ToolRequest.actionDigest(
+                name: "write_file",
+                sideEffect: .localWrite,
+                target: "/tmp/a",
+                payload: "contents"
+            )
+        )
+    }
+
+    func testToolRequestDecodingRejectsMismatchedDigest() throws {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "id": UUID().uuidString,
+            "taskID": UUID().uuidString,
+            "name": "write_file",
+            "sideEffect": "local-write",
+            "target": "/tmp/a",
+            "payload": "contents",
+            "payloadDigest": "not-the-real-digest",
+        ])
+
+        XCTAssertThrowsError(try JSONDecoder().decode(ToolRequest.self, from: data))
+    }
 }
