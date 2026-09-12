@@ -163,6 +163,54 @@ final class RepositoryTests: XCTestCase {
         }
     }
 
+    func testRedactSecretsCoversUsernameOnlyCookieAndEscapedJSONForms() {
+        XCTAssertEqual(
+            redactSecrets("https://oauth-token@example.com/path"),
+            "https://[REDACTED]@example.com/path"
+        )
+        XCTAssertEqual(redactSecrets("cookie=secret-cookie"), "cookie=[REDACTED]")
+        XCTAssertEqual(
+            redactSecrets(#"{"password":"prefix\" second-secret"}"#),
+            #"{"password":"[REDACTED]"}"#
+        )
+    }
+
+    func testAuditStorageRedactsUsernameOnlyCookieAndEscapedJSONFormsInRawFields() throws {
+        let database = try migratedDatabase()
+        let repository = SQLiteAuditRepository(database: database)
+        let event = AuditEvent(
+            taskID: UUID(),
+            worker: "https://oauth-token@example.com/path",
+            target: "cookie=secret-cookie",
+            sideEffect: .externalSend,
+            actionDigest: "digest",
+            summary: #"{"password":"prefix\" second-secret"}"#,
+            result: "completed",
+            approvalID: nil
+        )
+
+        try repository.append(event)
+
+        let row = try XCTUnwrap(database.read { db in
+            try Row.fetchOne(
+                db,
+                sql: "SELECT worker, target, action_digest, summary, result FROM audit_events WHERE id = ?",
+                arguments: [event.id.uuidString]
+            )
+        })
+        let rawFields: [String] = try [
+            row.decode(String.self, forColumn: "worker"),
+            row.decode(String.self, forColumn: "target"),
+            row.decode(String.self, forColumn: "action_digest"),
+            row.decode(String.self, forColumn: "summary"),
+            row.decode(String.self, forColumn: "result"),
+        ]
+
+        for secret in ["oauth-token", "secret-cookie", "second-secret"] {
+            XCTAssertFalse(rawFields.joined(separator: " ").contains(secret))
+        }
+    }
+
     func testApprovalRepositoryRoundTripsApprovalsInDecisionOrder() throws {
         let repository = SQLiteApprovalRepository(database: try migratedDatabase())
         let later = Approval(
