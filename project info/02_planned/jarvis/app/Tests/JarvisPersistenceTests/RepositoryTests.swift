@@ -9,6 +9,7 @@ final class RepositoryTests: XCTestCase {
         let database = try JarvisPersistence.Database(path: ":memory:")
 
         try database.migrate()
+        try database.migrate()
 
         let tables = try database.read { db in
             try String.fetchAll(
@@ -68,7 +69,7 @@ final class RepositoryTests: XCTestCase {
             target: "https://example.com",
             sideEffect: .externalSend,
             actionDigest: "digest-earlier",
-            summary: "password=do-not-store",
+            summary: #"{"password":"do-not-store","api_key":"also-do-not-store"}"#,
             result: "api_key=also-do-not-store",
             approvalID: nil
         )
@@ -76,9 +77,22 @@ final class RepositoryTests: XCTestCase {
         try repository.append(later)
         try repository.append(earlier)
 
+        let rawAuditFields = try database.read { db in
+            try Row.fetchOne(
+                db,
+                sql: "SELECT summary, result FROM audit_events WHERE id = ?",
+                arguments: [earlier.id.uuidString]
+            )
+        }
+        XCTAssertEqual(
+            rawAuditFields?["summary"] as String?,
+            #"{"password":"[REDACTED]","api_key":"[REDACTED]"}"#
+        )
+        XCTAssertEqual(rawAuditFields?["result"] as String?, "api_key=[REDACTED]")
+
         let events = try repository.events(for: taskID)
         XCTAssertEqual(events.map(\.id), [earlier.id, later.id])
-        XCTAssertEqual(events[0].summary, "password=[REDACTED]")
+        XCTAssertEqual(events[0].summary, #"{"password":"[REDACTED]","api_key":"[REDACTED]"}"#)
         XCTAssertEqual(events[0].result, "api_key=[REDACTED]")
         XCTAssertEqual(events[1].summary, "Authorization: Bearer [REDACTED]")
         XCTAssertEqual(events[1].result, "cookie=session=[REDACTED]")
@@ -91,9 +105,112 @@ final class RepositoryTests: XCTestCase {
         XCTAssertEqual(redactSecrets("password: hunter2"), "password: [REDACTED]")
     }
 
+    func testRedactSecretsPreservesQuotedJSONStructureWhileRemovingValues() {
+        let input = #"{"password":"hunter2","api_key":"abc123","cookie":"sid=secret"}"#
+
+        XCTAssertEqual(
+            redactSecrets(input),
+            #"{"password":"[REDACTED]","api_key":"[REDACTED]","cookie":"[REDACTED]"}"#
+        )
+    }
+
+    func testTaskRepositoryThrowsForCorruptUUIDEnumAndNullFields() throws {
+        let database = try corruptDatabase(with: """
+            CREATE TABLE tasks (
+                id,
+                title,
+                status,
+                created_at,
+                updated_at
+            )
+            """)
+        let repository = SQLiteTaskRepository(database: database)
+        let date = Date(timeIntervalSince1970: 1_725_000_000)
+
+        try database.write { db in
+            try db.execute(
+                sql: "INSERT INTO tasks VALUES (?, ?, ?, ?, ?)",
+                arguments: ["not-a-uuid", "title", "draft", date, date]
+            )
+        }
+        XCTAssertThrowsError(try repository.list())
+
+        try database.write { db in
+            try db.execute(sql: "DELETE FROM tasks")
+            try db.execute(
+                sql: "INSERT INTO tasks VALUES (?, ?, ?, ?, ?)",
+                arguments: [UUID().uuidString, "title", "not-a-status", date, date]
+            )
+        }
+        XCTAssertThrowsError(try repository.list())
+
+        try database.write { db in
+            try db.execute(sql: "DELETE FROM tasks")
+            try db.execute(
+                sql: "INSERT INTO tasks VALUES (?, ?, ?, ?, ?)",
+                arguments: [UUID().uuidString, nil, "draft", date, date]
+            )
+        }
+        XCTAssertThrowsError(try repository.list())
+    }
+
+    func testAuditRepositoryThrowsForCorruptUUIDEnumAndNullFields() throws {
+        let database = try corruptDatabase(with: """
+            CREATE TABLE audit_events (
+                id,
+                timestamp,
+                task_id,
+                worker,
+                target,
+                side_effect,
+                action_digest,
+                summary,
+                result,
+                approval_id
+            )
+            """)
+        let repository = SQLiteAuditRepository(database: database)
+        let taskID = UUID()
+        let date = Date(timeIntervalSince1970: 1_725_000_000)
+
+        try database.write { db in
+            try db.execute(
+                sql: "INSERT INTO audit_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                arguments: ["not-a-uuid", date, taskID.uuidString, "worker", "target", "read", "digest", "summary", "result", nil]
+            )
+        }
+        XCTAssertThrowsError(try repository.events(for: taskID))
+
+        try database.write { db in
+            try db.execute(sql: "DELETE FROM audit_events")
+            try db.execute(
+                sql: "INSERT INTO audit_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                arguments: [UUID().uuidString, date, taskID.uuidString, "worker", "target", "not-an-effect", "digest", "summary", "result", nil]
+            )
+        }
+        XCTAssertThrowsError(try repository.events(for: taskID))
+
+        try database.write { db in
+            try db.execute(sql: "DELETE FROM audit_events")
+            try db.execute(
+                sql: "INSERT INTO audit_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                arguments: [UUID().uuidString, date, taskID.uuidString, "worker", "target", "read", "digest", nil, "result", nil]
+            )
+        }
+        XCTAssertThrowsError(try repository.events(for: taskID))
+    }
+
     private func migratedDatabase() throws -> JarvisPersistence.Database {
         let database = try JarvisPersistence.Database(path: ":memory:")
         try database.migrate()
+        return database
+    }
+
+    private func corruptDatabase(with tableDefinition: String) throws -> JarvisPersistence.Database {
+        let database = try JarvisPersistence.Database(path: ":memory:")
+        try database.write { db in
+            try db.execute(sql: tableDefinition)
+        }
         return database
     }
 }

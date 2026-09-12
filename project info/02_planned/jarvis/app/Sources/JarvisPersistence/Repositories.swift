@@ -138,44 +138,69 @@ public final class SQLiteAuditRepository: AuditRepository, @unchecked Sendable {
 }
 
 private func task(from row: Row) throws -> Task {
-    guard
-        let id = UUID(uuidString: row["id"] as String),
-        let status = TaskStatus(rawValue: row["status"] as String)
-    else {
+    do {
+        let idText: String = try row.decode(forColumn: "id")
+        let statusText: String = try row.decode(forColumn: "status")
+        guard
+            let id = UUID(uuidString: idText),
+            let status = TaskStatus(rawValue: statusText)
+        else {
+            throw PersistenceError.invalidStoredTask
+        }
+
+        let title: String = try row.decode(forColumn: "title")
+        let createdAt: Date = try row.decode(forColumn: "created_at")
+        let updatedAt: Date = try row.decode(forColumn: "updated_at")
+        return Task(
+            id: id,
+            title: title,
+            status: status,
+            createdAt: createdAt,
+            updatedAt: updatedAt
+        )
+    } catch {
         throw PersistenceError.invalidStoredTask
     }
-
-    return Task(
-        id: id,
-        title: row["title"],
-        status: status,
-        createdAt: row["created_at"],
-        updatedAt: row["updated_at"]
-    )
 }
 
 private func auditEvent(from row: Row) throws -> AuditEvent {
-    guard
-        let id = UUID(uuidString: row["id"] as String),
-        let taskID = UUID(uuidString: row["task_id"] as String),
-        let sideEffect = SideEffect(rawValue: row["side_effect"] as String)
-    else {
+    do {
+        let idText: String = try row.decode(forColumn: "id")
+        let taskIDText: String = try row.decode(forColumn: "task_id")
+        let sideEffectText: String = try row.decode(forColumn: "side_effect")
+        guard
+            let id = UUID(uuidString: idText),
+            let taskID = UUID(uuidString: taskIDText),
+            let sideEffect = SideEffect(rawValue: sideEffectText)
+        else {
+            throw PersistenceError.invalidStoredAuditEvent
+        }
+
+        let approvalIDText: String? = try row.decode(forColumn: "approval_id")
+        let approvalID = try approvalID(from: approvalIDText)
+        return AuditEvent(
+            id: id,
+            timestamp: try row.decode(forColumn: "timestamp"),
+            taskID: taskID,
+            worker: try row.decode(forColumn: "worker"),
+            target: try row.decode(forColumn: "target"),
+            sideEffect: sideEffect,
+            actionDigest: try row.decode(forColumn: "action_digest"),
+            summary: try row.decode(forColumn: "summary"),
+            result: try row.decode(forColumn: "result"),
+            approvalID: approvalID
+        )
+    } catch {
         throw PersistenceError.invalidStoredAuditEvent
     }
+}
 
-    let approvalID = (row["approval_id"] as String?).flatMap(UUID.init(uuidString:))
-    return AuditEvent(
-        id: id,
-        timestamp: row["timestamp"],
-        taskID: taskID,
-        worker: row["worker"],
-        target: row["target"],
-        sideEffect: sideEffect,
-        actionDigest: row["action_digest"],
-        summary: row["summary"],
-        result: row["result"],
-        approvalID: approvalID
-    )
+private func approvalID(from text: String?) throws -> UUID? {
+    guard let text else { return nil }
+    guard let id = UUID(uuidString: text) else {
+        throw PersistenceError.invalidStoredAuditEvent
+    }
+    return id
 }
 
 private enum PersistenceError: Error {
