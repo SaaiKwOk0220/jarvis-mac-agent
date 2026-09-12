@@ -7,6 +7,7 @@ let package = Package(
     products: [
         .library(name: "JarvisDomain", targets: ["JarvisDomain"]),
         .library(name: "JarvisPersistence", targets: ["JarvisPersistence"]),
+        .library(name: "JarvisService", targets: ["JarvisService"]),
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.8.0"),
@@ -21,6 +22,10 @@ let package = Package(
                 .product(name: "GRDB", package: "GRDB.swift"),
             ]
         ),
+        .target(
+            name: "JarvisService",
+            dependencies: ["JarvisDomain", "JarvisPersistence", "JarvisPolicy"]
+        ),
         .testTarget(name: "JarvisDomainTests", dependencies: ["JarvisDomain"]),
         .testTarget(name: "JarvisPolicyTests", dependencies: ["JarvisPolicy", "JarvisDomain"]),
         .testTarget(
@@ -30,6 +35,10 @@ let package = Package(
                 "JarvisDomain",
                 .product(name: "GRDB", package: "GRDB.swift"),
             ]
+        ),
+        .testTarget(
+            name: "JarvisServiceTests",
+            dependencies: ["JarvisService", "JarvisDomain", "JarvisPersistence", "JarvisPolicy"]
         ),
     ]
 )
