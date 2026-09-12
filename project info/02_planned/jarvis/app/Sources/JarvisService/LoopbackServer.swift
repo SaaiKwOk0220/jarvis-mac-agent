@@ -72,7 +72,7 @@ public final class LoopbackServer: @unchecked Sendable {
             switch serviceError {
             case .taskNotFound, .requestNotFound:
                 return self.error(status: 404, message: "resource not found")
-            case .approvalDigestMismatch, .requestNotAwaitingApproval, .illegalTransition:
+            case .approvalDigestMismatch, .requestNotAwaitingApproval, .illegalTransition, .cancelled:
                 return self.error(status: 409, message: "request cannot be completed")
             }
         } catch {
@@ -88,6 +88,7 @@ public final class LoopbackServer: @unchecked Sendable {
     /// Starts a small HTTP/JSON listener bound only to 127.0.0.1.
     public func start() async throws -> UInt16 {
         let listener = try NWListener(using: .tcp, on: .any)
+        listener.parameters.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host("127.0.0.1"), port: .any)
         listener.newConnectionHandler = { [weak self] connection in
             self?.handle(connection: connection)
         }
@@ -140,11 +141,15 @@ public final class LoopbackServer: @unchecked Sendable {
             return false
         }
         let headers = String(text[..<separator.lowerBound])
-        let contentLength = headers
-            .split(separator: "\r\n")
-            .first { $0.lowercased().hasPrefix("content-length:") }
-            .flatMap { Int($0.split(separator: ":", maxSplits: 1)[1].trimmingCharacters(in: .whitespaces)) } ?? 0
-        return data.count >= headers.utf8.count + 4 + contentLength
+        let values = headers.split(separator: "\r\n").filter { $0.lowercased().hasPrefix("content-length:") }
+        guard values.count <= 1 else { return false }
+        let contentLength: Int
+        if let line = values.first {
+            let fields = line.split(separator: ":", maxSplits: 1)
+            guard fields.count == 2, let parsed = Int(fields[1].trimmingCharacters(in: .whitespaces)), parsed >= 0, parsed <= 1_048_576 else { return false }
+            contentLength = parsed
+        } else { contentLength = 0 }
+        return data.count <= 1_048_576 && data.count >= headers.utf8.count + 4 + contentLength
     }
 
     private func handleHTTP(data: Data, peerHost: String) async -> Data {

@@ -98,6 +98,31 @@ public protocol TaskRepository: Sendable {
     func list() throws -> [Task]
 }
 
+public enum ToolRequestStatus: String, Codable, Sendable, Equatable {
+    case pending
+    case executing
+    case completed
+    case failed
+    case rejected
+    case cancelled
+}
+
+public protocol ToolRequestRepository: Sendable {
+    func insert(_ request: ToolRequest, status: ToolRequestStatus) throws
+    func fetch(id: UUID) throws -> (ToolRequest, ToolRequestStatus)?
+    func updateStatus(_ id: UUID, status: ToolRequestStatus) throws
+    func list(status: ToolRequestStatus?) throws -> [(ToolRequest, ToolRequestStatus)]
+}
+
+public protocol PersistenceUnitOfWork: Sendable {
+    func createTask(_ task: Task, audit: AuditEvent) throws
+    func submitRequest(_ request: ToolRequest, status: ToolRequestStatus, taskStatus: TaskStatus, audits: [AuditEvent]) throws
+    func approveRequest(_ request: ToolRequest, approval: Approval, taskStatus: TaskStatus, audits: [AuditEvent]) throws
+    func rejectRequest(_ request: ToolRequest, approval: Approval, taskStatus: TaskStatus, audits: [AuditEvent]) throws
+    func transition(taskID: UUID, from: TaskStatus, to: TaskStatus, audit: AuditEvent) throws
+    func cancelTask(taskID: UUID, requestIDs: [UUID], audits: [AuditEvent]) throws
+}
+
 public protocol AuditRepository: Sendable {
     func append(_ event: AuditEvent) throws
     func events(for taskID: UUID) throws -> [AuditEvent]
@@ -116,7 +141,7 @@ public protocol PolicyRuleRepository: Sendable {
 }
 
 public final class SQLiteTaskRepository: TaskRepository, @unchecked Sendable {
-    private let database: Database
+    public let database: Database
 
     public init(database: Database) {
         self.database = database
@@ -159,8 +184,101 @@ public final class SQLiteTaskRepository: TaskRepository, @unchecked Sendable {
     }
 }
 
-public final class SQLiteAuditRepository: AuditRepository, @unchecked Sendable {
+public final class SQLiteToolRequestRepository: ToolRequestRepository, @unchecked Sendable {
     private let database: Database
+    public init(database: Database) { self.database = database }
+
+    public func insert(_ request: ToolRequest, status: ToolRequestStatus) throws {
+        try database.write { db in
+            try db.execute(sql: "INSERT INTO tool_requests (id, task_id, name, side_effect, target, payload, browser_profile, working_directory, payload_digest, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", arguments: [request.id.uuidString, request.taskID.uuidString, request.name, request.sideEffect.rawValue, request.target, request.payload, request.scope?.browserProfile, request.scope?.workingDirectory, request.payloadDigest, status.rawValue, Date()])
+        }
+    }
+    public func fetch(id: UUID) throws -> (ToolRequest, ToolRequestStatus)? {
+        try database.read { db in
+            guard let row = try Row.fetchOne(db, sql: "SELECT * FROM tool_requests WHERE id = ?", arguments: [id.uuidString]) else { return nil }
+            return try toolRequest(from: row)
+        }
+    }
+    public func updateStatus(_ id: UUID, status: ToolRequestStatus) throws {
+        try database.write { db in try db.execute(sql: "UPDATE tool_requests SET status = ? WHERE id = ?", arguments: [status.rawValue, id.uuidString]) }
+    }
+    public func list(status: ToolRequestStatus? = nil) throws -> [(ToolRequest, ToolRequestStatus)] {
+        try database.read { db in
+            let rows: [Row]
+            if let status { rows = try Row.fetchAll(db, sql: "SELECT * FROM tool_requests WHERE status = ?", arguments: [status.rawValue]) }
+            else { rows = try Row.fetchAll(db, sql: "SELECT * FROM tool_requests") }
+            return try rows.map(toolRequest(from:))
+        }
+    }
+}
+
+public final class SQLitePersistenceUnitOfWork: PersistenceUnitOfWork, @unchecked Sendable {
+    private let database: Database
+    public init(database: Database) { self.database = database }
+
+    public func createTask(_ task: Task, audit: AuditEvent) throws {
+        try database.write { db in
+            try insertTask(task, db: db); try insertAudit(audit, db: db)
+        }
+    }
+    public func submitRequest(_ request: ToolRequest, status: ToolRequestStatus, taskStatus: TaskStatus, audits: [AuditEvent]) throws {
+        try database.write { db in
+            try updateTask(request.taskID, to: taskStatus, db: db)
+            try insertToolRequest(request, status: status, db: db)
+            for audit in audits { try insertAudit(audit, db: db) }
+        }
+    }
+    public func approveRequest(_ request: ToolRequest, approval: Approval, taskStatus: TaskStatus, audits: [AuditEvent]) throws {
+        try database.write { db in
+            try ensureTaskStatus(request.taskID, equals: .awaitingApproval, db: db)
+            try updateTask(request.taskID, to: taskStatus, db: db)
+            try updateToolRequest(request.id, to: .executing, db: db)
+            try insertApproval(approval, db: db)
+            for audit in audits { try insertAudit(audit, db: db) }
+        }
+    }
+    public func rejectRequest(_ request: ToolRequest, approval: Approval, taskStatus: TaskStatus, audits: [AuditEvent]) throws {
+        try database.write { db in
+            try ensureTaskStatus(request.taskID, equals: .awaitingApproval, db: db)
+            try updateTask(request.taskID, to: taskStatus, db: db)
+            try updateToolRequest(request.id, to: .rejected, db: db)
+            try insertApproval(approval, db: db)
+            for audit in audits { try insertAudit(audit, db: db) }
+        }
+    }
+    public func transition(taskID: UUID, from: TaskStatus, to: TaskStatus, audit: AuditEvent) throws {
+        try database.write { db in try ensureTaskStatus(taskID, equals: from, db: db); try updateTask(taskID, to: to, db: db); try insertAudit(audit, db: db) }
+    }
+    public func cancelTask(taskID: UUID, requestIDs: [UUID], audits: [AuditEvent]) throws {
+        try database.write { db in
+            try ensureTaskNotTerminal(taskID, db: db); try updateTask(taskID, to: .cancelled, db: db)
+            for id in requestIDs { try updateToolRequest(id, to: .cancelled, db: db) }
+            for audit in audits { try insertAudit(audit, db: db) }
+        }
+    }
+}
+
+private func toolRequest(from row: Row) throws -> (ToolRequest, ToolRequestStatus) {
+    guard let id = UUID(uuidString: try row.decode(forColumn: "id")), let taskID = UUID(uuidString: try row.decode(forColumn: "task_id")), let effect = SideEffect(rawValue: try row.decode(forColumn: "side_effect")), let status = ToolRequestStatus(rawValue: try row.decode(forColumn: "status")) else { throw PersistenceError.invalidStoredToolRequest }
+    let browserProfile: String? = try row.decode(forColumn: "browser_profile")
+    let workingDirectory: String? = try row.decode(forColumn: "working_directory")
+    let scope = (browserProfile != nil || workingDirectory != nil) ? ToolScope(browserProfile: browserProfile, workingDirectory: workingDirectory) : nil
+    let request = ToolRequest(id: id, taskID: taskID, name: try row.decode(forColumn: "name"), sideEffect: effect, target: try row.decode(forColumn: "target"), payload: try row.decode(forColumn: "payload"), scope: scope)
+    guard request.payloadDigest == (try row.decode(forColumn: "payload_digest") as String) else { throw PersistenceError.invalidStoredToolRequest }
+    return (request, status)
+}
+
+private func insertTask(_ task: Task, db: GRDB.Database) throws { try db.execute(sql: "INSERT INTO tasks (id,title,status,created_at,updated_at) VALUES (?,?,?,?,?)", arguments: [task.id.uuidString,task.title,task.status.rawValue,task.createdAt,task.updatedAt]) }
+private func updateTask(_ id: UUID, to status: TaskStatus, db: GRDB.Database) throws { try db.execute(sql: "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?", arguments: [status.rawValue,Date(),id.uuidString]) }
+private func ensureTaskStatus(_ id: UUID, equals status: TaskStatus, db: GRDB.Database) throws { guard let current: String = try Row.fetchOne(db, sql: "SELECT status FROM tasks WHERE id = ?", arguments: [id.uuidString])?["status"], current == status.rawValue else { throw PersistenceError.invalidStoredTask } }
+private func ensureTaskNotTerminal(_ id: UUID, db: GRDB.Database) throws { guard let current: String = try Row.fetchOne(db, sql: "SELECT status FROM tasks WHERE id = ?", arguments: [id.uuidString])?["status"], current != TaskStatus.cancelled.rawValue, current != TaskStatus.completed.rawValue else { throw PersistenceError.invalidStoredTask } }
+private func insertToolRequest(_ request: ToolRequest, status: ToolRequestStatus, db: GRDB.Database) throws { try db.execute(sql: "INSERT INTO tool_requests (id,task_id,name,side_effect,target,payload,browser_profile,working_directory,payload_digest,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)", arguments: [request.id.uuidString,request.taskID.uuidString,request.name,request.sideEffect.rawValue,request.target,request.payload,request.scope?.browserProfile,request.scope?.workingDirectory,request.payloadDigest,status.rawValue,Date()]) }
+private func updateToolRequest(_ id: UUID, to status: ToolRequestStatus, db: GRDB.Database) throws { try db.execute(sql: "UPDATE tool_requests SET status = ? WHERE id = ?", arguments: [status.rawValue,id.uuidString]) }
+private func insertApproval(_ approval: Approval, db: GRDB.Database) throws { try db.execute(sql: "INSERT INTO approvals (id,tool_request_id,action_digest,decision,decided_at) VALUES (?,?,?,?,?)", arguments: [approval.id.uuidString,approval.toolRequestID.uuidString,approval.actionDigest,approval.decision.rawValue,approval.decidedAt]) }
+private func insertAudit(_ event: AuditEvent, db: GRDB.Database) throws { try db.execute(sql: "INSERT INTO audit_events (id,timestamp,task_id,worker,target,side_effect,action_digest,summary,result,approval_id) VALUES (?,?,?,?,?,?,?,?,?,?)", arguments: [event.id.uuidString,event.timestamp,event.taskID.uuidString,redactSecrets(event.worker),redactSecrets(event.target),event.sideEffect.rawValue,redactSecrets(event.actionDigest),redactSecrets(event.summary),redactSecrets(event.result),event.approvalID?.uuidString]) }
+
+public final class SQLiteAuditRepository: AuditRepository, @unchecked Sendable {
+    public let database: Database
 
     public init(database: Database) {
         self.database = database
@@ -408,4 +526,5 @@ private enum PersistenceError: Error {
     case invalidStoredAuditEvent
     case invalidStoredApproval
     case invalidStoredPolicyRule
+    case invalidStoredToolRequest
 }

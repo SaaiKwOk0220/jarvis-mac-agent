@@ -27,6 +27,8 @@ public final class Database: @unchecked Sendable {
                 table.column("side_effect", .text).notNull()
                 table.column("target", .text).notNull()
                 table.column("payload", .text).notNull()
+                table.column("browser_profile", .text)
+                table.column("working_directory", .text)
                 table.column("payload_digest", .text).notNull()
                 table.column("status", .text).notNull()
                 table.column("created_at", .datetime).notNull()
