@@ -8,6 +8,7 @@ let package = Package(
         .library(name: "JarvisDomain", targets: ["JarvisDomain"]),
         .library(name: "JarvisPersistence", targets: ["JarvisPersistence"]),
         .library(name: "JarvisService", targets: ["JarvisService"]),
+        .executable(name: "JarvisMenuBar", targets: ["JarvisMenuBar"]),
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.8.0"),
@@ -26,6 +27,10 @@ let package = Package(
             name: "JarvisService",
             dependencies: ["JarvisDomain", "JarvisPersistence", "JarvisPolicy"]
         ),
+        .executableTarget(
+            name: "JarvisMenuBar",
+            dependencies: ["JarvisDomain", "JarvisService"]
+        ),
         .testTarget(name: "JarvisDomainTests", dependencies: ["JarvisDomain"]),
         .testTarget(name: "JarvisPolicyTests", dependencies: ["JarvisPolicy", "JarvisDomain"]),
         .testTarget(
@@ -39,6 +44,10 @@ let package = Package(
         .testTarget(
             name: "JarvisServiceTests",
             dependencies: ["JarvisService", "JarvisDomain", "JarvisPersistence", "JarvisPolicy"]
+        ),
+        .testTarget(
+            name: "JarvisMenuBarTests",
+            dependencies: ["JarvisMenuBar", "JarvisDomain"]
         ),
     ]
 )
