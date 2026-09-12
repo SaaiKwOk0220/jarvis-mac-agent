@@ -46,6 +46,19 @@ final class TaskModelsTests: XCTestCase {
         XCTAssertNotEqual(original, changedPayload)
     }
 
+    func testActionDigestChangesWhenScopeChanges() {
+        let original = ToolRequest.actionDigest(
+            name: "open_page", sideEffect: .read, target: "https://example.com", payload: "",
+            scope: ToolScope(browserProfile: "work")
+        )
+        let changedScope = ToolRequest.actionDigest(
+            name: "open_page", sideEffect: .read, target: "https://example.com", payload: "",
+            scope: ToolScope(browserProfile: "personal")
+        )
+
+        XCTAssertNotEqual(original, changedScope)
+    }
+
     func testToolRequestAlwaysComputesDigestFromItsAction() {
         let request = ToolRequest(
             taskID: UUID(),

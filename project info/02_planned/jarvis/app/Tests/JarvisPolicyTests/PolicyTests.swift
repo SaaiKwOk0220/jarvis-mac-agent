@@ -30,6 +30,18 @@ final class PolicyTests: XCTestCase {
         XCTAssertEqual(Policy().evaluate(typo, config: config), .deny(reason: "command is not allowlisted"))
     }
 
+    func testLocalExecuteAllowsOnlyStructuredTestInvocation() {
+        let request = ToolRequest(taskID: taskID, name: "swift", sideEffect: .localExecute,
+                                  target: "/tmp/jarvis-project", payload: "test")
+        XCTAssertEqual(Policy().evaluate(request, config: config), .allow)
+
+        for payload in ["test --package-path /tmp/jarvis-project", "test; rm -rf /tmp/jarvis-project", "test && rm -rf /tmp/jarvis-project", "run script", "test --filter anything", "test --output /tmp/result"] {
+            let unsafe = ToolRequest(taskID: taskID, name: "swift", sideEffect: .localExecute,
+                                     target: "/tmp/jarvis-project", payload: payload)
+            XCTAssertEqual(Policy().evaluate(unsafe, config: config), .deny(reason: "command invocation is not allowlisted"))
+        }
+    }
+
     func testLocalWriteAlwaysRequiresApproval() {
         let request = ToolRequest(taskID: taskID, name: "write_file", sideEffect: .localWrite,
                                   target: "/tmp/jarvis-project/out.txt", payload: "hello")
@@ -37,11 +49,19 @@ final class PolicyTests: XCTestCase {
     }
 
     func testProtectedExternalEffectsRequireApproval() {
-        for effect in [SideEffect.externalSend, .upload, .delete, .credential] {
-            let request = ToolRequest(taskID: taskID, name: "action", sideEffect: effect,
-                                      target: "example.com", payload: "payload")
+        let requests = [
+            ToolRequest(taskID: taskID, name: "action", sideEffect: .externalSend,
+                        target: "https://example.com", payload: "payload"),
+            ToolRequest(taskID: taskID, name: "action", sideEffect: .upload,
+                        target: "example.com", payload: "payload"),
+            ToolRequest(taskID: taskID, name: "action", sideEffect: .delete,
+                        target: "/tmp/jarvis-project/out.txt", payload: "payload"),
+            ToolRequest(taskID: taskID, name: "action", sideEffect: .credential,
+                        target: "example.com", payload: "payload"),
+        ]
+        for request in requests {
             guard case .requireApproval = Policy().evaluate(request, config: config) else {
-                XCTFail("expected approval for \(effect)"); continue
+                XCTFail("expected approval for \(request.sideEffect)"); continue
             }
         }
     }
@@ -61,6 +81,21 @@ final class PolicyTests: XCTestCase {
         let changed = ToolRequest(taskID: taskID, name: request.name, sideEffect: request.sideEffect,
                                   target: request.target, payload: "different")
         XCTAssertFalse(validateApproval(request: changed, approvalDigest: request.payloadDigest))
+    }
+
+    func testApprovalDigestRejectsChangedTargetAndScope() {
+        let request = ToolRequest(taskID: taskID, name: "open_page", sideEffect: .read,
+                                  target: "https://example.com/inbox", payload: "",
+                                  scope: ToolScope(browserProfile: "work"))
+        let changedTarget = ToolRequest(taskID: taskID, name: request.name, sideEffect: request.sideEffect,
+                                        target: "https://example.com/archive", payload: request.payload,
+                                        scope: request.scope)
+        let changedScope = ToolRequest(taskID: taskID, name: request.name, sideEffect: request.sideEffect,
+                                       target: request.target, payload: request.payload,
+                                       scope: ToolScope(browserProfile: "personal"))
+
+        XCTAssertFalse(validateApproval(request: changedTarget, approvalDigest: request.payloadDigest))
+        XCTAssertFalse(validateApproval(request: changedScope, approvalDigest: request.payloadDigest))
     }
 
     func testReadOutsideApprovedDirectoryIsDenied() {
@@ -83,10 +118,68 @@ final class PolicyTests: XCTestCase {
 
     func testAllowlistedSiteAndApplicationAreAllowedForReads() {
         let site = ToolRequest(taskID: taskID, name: "open_page", sideEffect: .read,
-                               target: "https://example.com/inbox", payload: "")
+                               target: "https://example.com/inbox", payload: "",
+                               scope: ToolScope(browserProfile: "work"))
         XCTAssertEqual(Policy().evaluate(site, config: config), .allow)
         let app = ToolRequest(taskID: taskID, name: "focus_app", sideEffect: .read,
                               target: "com.apple.TextEdit", payload: "")
         XCTAssertEqual(Policy().evaluate(app, config: config), .allow)
+    }
+
+    func testBrowserReadRequiresAnAllowlistedStructuredProfile() {
+        let missing = ToolRequest(taskID: taskID, name: "open_page", sideEffect: .read,
+                                  target: "https://example.com/inbox", payload: "profile=work")
+        XCTAssertEqual(Policy().evaluate(missing, config: config), .deny(reason: "browser profile is required"))
+
+        let unknown = ToolRequest(taskID: taskID, name: "open_page", sideEffect: .read,
+                                  target: "https://example.com/inbox", payload: "",
+                                  scope: ToolScope(browserProfile: "personal"))
+        XCTAssertEqual(Policy().evaluate(unknown, config: config), .deny(reason: "browser profile is not allowlisted"))
+    }
+
+    func testBrowserAndSendTargetsRequireExactHTTPSHostWithoutUserInfo() {
+        let browserProfile = ToolScope(browserProfile: "work")
+        for target in ["http://example.com", "https://user@example.com", "https://sub.example.com", "mailto:user@example.com", "not a URL"] {
+            let read = ToolRequest(taskID: taskID, name: "open_page", sideEffect: .read,
+                                   target: target, payload: "", scope: browserProfile)
+            let send = ToolRequest(taskID: taskID, name: "send", sideEffect: .externalSend,
+                                   target: target, payload: "")
+            XCTAssertNotEqual(Policy().evaluate(read, config: config), .allow, "browser target: \(target)")
+            XCTAssertNotEqual(Policy().evaluate(send, config: config), .requireApproval(reason: "external send has an external side effect"), "send target: \(target)")
+        }
+    }
+
+    func testExternalSendAllowsOnlyExactConfiguredHTTPSHostOrBundleID() {
+        let site = ToolRequest(taskID: taskID, name: "send", sideEffect: .externalSend,
+                               target: "https://example.com/messages", payload: "hello")
+        XCTAssertEqual(Policy().evaluate(site, config: config), .requireApproval(reason: "external send has an external side effect"))
+        let app = ToolRequest(taskID: taskID, name: "send", sideEffect: .externalSend,
+                              target: "com.apple.TextEdit", payload: "hello")
+        XCTAssertEqual(Policy().evaluate(app, config: config), .requireApproval(reason: "external send has an external side effect"))
+    }
+
+    func testDeleteResolvesAbsoluteRelativeAndFileURLPathsInsideApprovedDirectory() {
+        let scope = ToolScope(workingDirectory: "/tmp/jarvis-project")
+        for target in ["/tmp/jarvis-project/out.txt", "file:///tmp/jarvis-project/out.txt", "out.txt", "../jarvis-project/out.txt"] {
+            let request = ToolRequest(taskID: taskID, name: "delete_file", sideEffect: .delete,
+                                      target: target, payload: "", scope: scope)
+            XCTAssertEqual(Policy().evaluate(request, config: config), .requireApproval(reason: "delete removes data"), target)
+        }
+    }
+
+    func testDeleteDeniesUnscopedAmbiguousEscapingAndRemoteTargets() {
+        let scoped = ToolScope(workingDirectory: "/tmp/jarvis-project")
+        let cases: [(String, ToolScope?)] = [
+            ("out.txt", nil),
+            ("../other/out.txt", scoped),
+            ("file:///tmp/other/out.txt", scoped),
+            ("file://remote/tmp/jarvis-project/out.txt", scoped),
+            ("https://example.com/out.txt", scoped),
+        ]
+        for (target, scope) in cases {
+            let request = ToolRequest(taskID: taskID, name: "delete_file", sideEffect: .delete,
+                                      target: target, payload: "", scope: scope)
+            XCTAssertEqual(Policy().evaluate(request, config: config), .deny(reason: "delete target is not an approved local path"), target)
+        }
     }
 }

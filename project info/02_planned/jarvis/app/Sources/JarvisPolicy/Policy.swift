@@ -52,8 +52,11 @@ public struct Policy: PolicyEvaluator, Sendable {
             guard config.commandNames.contains(request.name) else {
                 return .deny(reason: "command is not allowlisted")
             }
-            if !isWithinApprovedDirectory(request.target, config: config) {
+            guard isWithinApprovedDirectory(request.target, config: config) else {
                 return .deny(reason: "target is outside approved directories")
+            }
+            guard isAllowedTestInvocation(request) else {
+                return .deny(reason: "command invocation is not allowlisted")
             }
             return .allow
         case .read:
@@ -64,15 +67,15 @@ public struct Policy: PolicyEvaluator, Sendable {
             }
             return .requireApproval(reason: "local write changes local state")
         case .externalSend:
-            guard isAllowlistedExternalTarget(request.target, config: config) else {
+            guard isAllowlistedSendTarget(request.target, config: config) else {
                 return .deny(reason: "site or application is not allowlisted")
             }
             return .requireApproval(reason: "external send has an external side effect")
         case .upload:
             return .requireApproval(reason: "upload transfers data externally")
         case .delete:
-            if looksLikePath(request.target) && !isWithinApprovedDirectory(request.target, config: config) {
-                return .deny(reason: "target is outside approved directories")
+            guard let target = resolvedDeleteTarget(request, config: config), isWithinApprovedDirectory(target, config: config) else {
+                return .deny(reason: "delete target is not an approved local path")
             }
             return .requireApproval(reason: "delete removes data")
         case .credential:
@@ -81,11 +84,14 @@ public struct Policy: PolicyEvaluator, Sendable {
     }
 
     private func evaluateRead(_ request: ToolRequest, config: PolicyConfig) -> PolicyDecision {
-        if let host = URL(string: request.target)?.host, !host.isEmpty {
-            guard config.sites.contains(where: { siteMatches(host: host, configured: $0) }) else {
+        if request.target.contains("://") || request.target.hasPrefix("mailto:") {
+            guard let host = exactHTTPSHost(request.target), config.sites.contains(host) else {
                 return .deny(reason: "site is not allowlisted")
             }
-            if let profile = browserProfile(in: request), !config.browserProfiles.contains(profile) {
+            guard let profile = request.scope?.browserProfile else {
+                return .deny(reason: "browser profile is required")
+            }
+            guard config.browserProfiles.contains(profile) else {
                 return .deny(reason: "browser profile is not allowlisted")
             }
             return .allow
@@ -100,39 +106,66 @@ public struct Policy: PolicyEvaluator, Sendable {
         return .allow
     }
 
-    private func isAllowlistedExternalTarget(_ target: String, config: PolicyConfig) -> Bool {
-        if let host = URL(string: target)?.host { return config.sites.contains(where: { siteMatches(host: host, configured: $0) }) }
-        if target.hasPrefix("com.") { return config.applicationBundleIDs.contains(target) }
-        return true
+    private func isAllowedTestInvocation(_ request: ToolRequest) -> Bool {
+        request.payload == "test" && ["swift", "xcodebuild"].contains(request.name)
     }
 
-    private func siteMatches(host: String, configured: String) -> Bool {
-        let normalized = configured.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
-        let candidate = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
-        return candidate == normalized
+    private func isAllowlistedSendTarget(_ target: String, config: PolicyConfig) -> Bool {
+        if config.applicationBundleIDs.contains(target) { return true }
+        guard let host = exactHTTPSHost(target) else { return false }
+        return config.sites.contains(host)
     }
 
-    private func browserProfile(in request: ToolRequest) -> String? {
-        for part in request.payload.split(whereSeparator: { $0 == "," || $0 == " " || $0 == "\n" }) {
-            let token = String(part)
-            if token.hasPrefix("profile=") { return String(token.dropFirst("profile=".count)) }
-            if token.hasPrefix("profile:") { return String(token.dropFirst("profile:".count)) }
+    private func exactHTTPSHost(_ target: String) -> String? {
+        guard let components = URLComponents(string: target),
+              components.scheme?.lowercased() == "https",
+              let host = components.host,
+              !host.isEmpty,
+              components.user == nil,
+              components.password == nil
+        else { return nil }
+        return host
+    }
+
+    private func resolvedDeleteTarget(_ request: ToolRequest, config: PolicyConfig) -> URL? {
+        let target = request.target
+        if target.hasPrefix("file:") {
+            guard let components = URLComponents(string: target),
+                  components.scheme?.lowercased() == "file",
+                  components.host == nil || components.host == "",
+                  let url = components.url,
+                  url.isFileURL,
+                  !url.path.isEmpty
+            else { return nil }
+            return url.standardizedFileURL.resolvingSymlinksInPath()
         }
-        return nil
+        if URLComponents(string: target)?.scheme != nil || target.hasPrefix("~") || target.isEmpty {
+            return nil
+        }
+        if target.hasPrefix("/") {
+            return URL(fileURLWithPath: target).standardizedFileURL.resolvingSymlinksInPath()
+        }
+        guard let workingDirectory = request.scope?.workingDirectory,
+              isWithinApprovedDirectory(workingDirectory, config: config)
+        else { return nil }
+        return URL(fileURLWithPath: workingDirectory)
+            .appendingPathComponent(target)
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
     }
 
-    private func looksLikePath(_ value: String) -> Bool {
-        value.hasPrefix("/") || value.hasPrefix(".") || value.hasPrefix("~")
-    }
-
-    private func isWithinApprovedDirectory(_ target: String, config: PolicyConfig) -> Bool {
+    private func isWithinApprovedDirectory(_ target: URL, config: PolicyConfig) -> Bool {
         guard !config.approvedDirectories.isEmpty else { return false }
-        let resolvedTarget = URL(fileURLWithPath: target).standardizedFileURL.resolvingSymlinksInPath()
+        let resolvedTarget = target.standardizedFileURL.resolvingSymlinksInPath()
         return config.approvedDirectories.contains { directory in
             let root = URL(fileURLWithPath: directory).standardizedFileURL.resolvingSymlinksInPath()
             let rootPath = root.path.hasSuffix("/") ? root.path : root.path + "/"
             return resolvedTarget.path == root.path || resolvedTarget.path.hasPrefix(rootPath)
         }
+    }
+
+    private func isWithinApprovedDirectory(_ target: String, config: PolicyConfig) -> Bool {
+        isWithinApprovedDirectory(URL(fileURLWithPath: target), config: config)
     }
 }
 
