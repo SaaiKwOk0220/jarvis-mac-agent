@@ -20,7 +20,7 @@ public final class TaskService: TaskServiceAPI, @unchecked Sendable {
     public func submit(request:ToolRequest) async throws -> PolicyDecision {
         try lock.withLock { guard let t=try tasks.fetch(id:request.taskID) else { throw TaskServiceError.taskNotFound }; if t.status == .draft { try transitionLocked(t,to:.planning); try transitionLocked(try tasks.fetch(id:t.id)!,to:.running) } else if t.status == .planning { try transitionLocked(t,to:.running) } else if t.status != .running { throw TaskServiceError.illegalTransition(from:t.status,to:.running) }; try audits.append(audit(request,summary:"tool request received",result:"received")) }
         let d=policy.evaluate(request,config:config)
-        switch d { case .allow: try lock.withLock { try requests.insert(request,status:.executing); try audits.append(audit(request,summary:"policy allowed",result:"allowed")) }; try await execute(request)
+        switch d { case .allow: try lock.withLock { try uow.recordRequest(request,status:.executing,audits:[audit(request,summary:"policy allowed",result:"allowed")]) }; try await execute(request)
         case .requireApproval(let reason): try lock.withLock { try uow.submitRequest(request,status:.pending,taskStatus:.awaitingApproval,audits:[audit(request,summary:"policy requires approval",result:reason)]) }
         case .deny(let reason): try lock.withLock { try audits.append(audit(request,summary:"policy denied",result:reason)); try transitionLocked(try tasks.fetch(id:request.taskID)!,to:.blocked) } }; return d
     }

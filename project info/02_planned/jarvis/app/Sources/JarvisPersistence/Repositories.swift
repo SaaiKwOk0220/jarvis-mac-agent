@@ -121,6 +121,7 @@ public protocol PersistenceUnitOfWork: Sendable {
     func rejectRequest(_ request: ToolRequest, approval: Approval, taskStatus: TaskStatus, audits: [AuditEvent]) throws
     func transition(taskID: UUID, from: TaskStatus, to: TaskStatus, audit: AuditEvent) throws
     func cancelTask(taskID: UUID, requestIDs: [UUID], audits: [AuditEvent]) throws
+    func recordRequest(_ request: ToolRequest, status: ToolRequestStatus, audits: [AuditEvent]) throws
 }
 
 public protocol AuditRepository: Sendable {
@@ -253,6 +254,12 @@ public final class SQLitePersistenceUnitOfWork: PersistenceUnitOfWork, @unchecke
         try database.write { db in
             try ensureTaskNotTerminal(taskID, db: db); try updateTask(taskID, to: .cancelled, db: db)
             for id in requestIDs { try updateToolRequest(id, to: .cancelled, db: db) }
+            for audit in audits { try insertAudit(audit, db: db) }
+        }
+    }
+    public func recordRequest(_ request: ToolRequest, status: ToolRequestStatus, audits: [AuditEvent]) throws {
+        try database.write { db in
+            try insertToolRequest(request, status: status, db: db)
             for audit in audits { try insertAudit(audit, db: db) }
         }
     }

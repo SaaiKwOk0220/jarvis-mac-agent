@@ -115,6 +115,7 @@ public final class LoopbackServer: @unchecked Sendable {
                 if case let .hostPort(host, _) = endpoint { return "\(host)" }
                 return nil
             } ?? ""
+            guard Self.isLoopback(peer) else { connection.cancel(); return }
             self.receive(connection: connection, peerHost: peer)
         }
         connection.start(queue: DispatchQueue(label: "jarvis.loopback.connection"))
@@ -125,7 +126,8 @@ public final class LoopbackServer: @unchecked Sendable {
             guard let self, let data else { connection.cancel(); return }
             var accumulated = buffer
             accumulated.append(data)
-            guard self.completeHTTPRequest(in: accumulated) else {
+            guard accumulated.count <= 1_048_576 else { connection.cancel(); return }
+            if !self.completeHTTPRequest(in: accumulated) {
                 self.receive(connection: connection, peerHost: peerHost, buffer: accumulated)
                 return
             }
@@ -141,7 +143,10 @@ public final class LoopbackServer: @unchecked Sendable {
             return false
         }
         let headers = String(text[..<separator.lowerBound])
-        let values = headers.split(separator: "\r\n").filter { $0.lowercased().hasPrefix("content-length:") }
+        let headerLines = headers.split(separator: "\r\n")
+        guard headerLines.count <= 100, headers.utf8.count <= 32_768 else { return false }
+        guard !headerLines.contains(where: { $0.lowercased().hasPrefix("transfer-encoding:") }) else { return false }
+        let values = headerLines.filter { $0.lowercased().hasPrefix("content-length:") }
         guard values.count <= 1 else { return false }
         let contentLength: Int
         if let line = values.first {
@@ -149,7 +154,8 @@ public final class LoopbackServer: @unchecked Sendable {
             guard fields.count == 2, let parsed = Int(fields[1].trimmingCharacters(in: .whitespaces)), parsed >= 0, parsed <= 1_048_576 else { return false }
             contentLength = parsed
         } else { contentLength = 0 }
-        return data.count <= 1_048_576 && data.count >= headers.utf8.count + 4 + contentLength
+        let headerByteCount = Array(text[..<separator.lowerBound].utf8).count
+        return data.count <= 1_048_576 && data.count >= headerByteCount + 4 + contentLength
     }
 
     private func handleHTTP(data: Data, peerHost: String) async -> Data {
@@ -158,7 +164,9 @@ public final class LoopbackServer: @unchecked Sendable {
         }
         let header = String(text[..<separator.lowerBound])
         let body = Data(text[separator.upperBound...].utf8)
-        let first = header.split(separator: "\r\n", maxSplits: 1).first?.split(separator: " ") ?? []
+        guard body.count <= 1_048_576 else { return httpResponse(LoopbackResponse(status: 400)) }
+        let firstLine = header.components(separatedBy: "\r\n").first ?? ""
+        let first = firstLine.split(separator: " ")
         guard first.count >= 2 else { return httpResponse(LoopbackResponse(status: 400)) }
         let response = await handle(method: String(first[0]), path: String(first[1]), body: body, peerHost: peerHost)
         return httpResponse(response)
