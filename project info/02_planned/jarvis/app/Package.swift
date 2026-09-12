@@ -13,6 +13,7 @@ let package = Package(
     ],
     targets: [
         .target(name: "JarvisDomain"),
+        .target(name: "JarvisPolicy", dependencies: ["JarvisDomain"]),
         .target(
             name: "JarvisPersistence",
             dependencies: [
@@ -21,6 +22,7 @@ let package = Package(
             ]
         ),
         .testTarget(name: "JarvisDomainTests", dependencies: ["JarvisDomain"]),
+        .testTarget(name: "JarvisPolicyTests", dependencies: ["JarvisPolicy", "JarvisDomain"]),
         .testTarget(
             name: "JarvisPersistenceTests",
             dependencies: [
