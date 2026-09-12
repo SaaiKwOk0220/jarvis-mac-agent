@@ -149,6 +149,18 @@ final class PolicyTests: XCTestCase {
         }
     }
 
+    func testEveryURLSchemeIsClassifiedAsABrowserTargetRatherThanALocalPath() {
+        var filesystemConfig = config
+        filesystemConfig.approvedDirectories = [FileManager.default.currentDirectoryPath]
+        let scope = ToolScope(browserProfile: "work")
+
+        for target in ["javascript:alert(1)", "data:text/html,<h1>unsafe</h1>", "https:example.com"] {
+            let request = ToolRequest(taskID: taskID, name: "open_page", sideEffect: .read,
+                                      target: target, payload: "", scope: scope)
+            XCTAssertNotEqual(Policy().evaluate(request, config: filesystemConfig), .allow, target)
+        }
+    }
+
     func testExternalSendAllowsOnlyExactConfiguredHTTPSHostOrBundleID() {
         let site = ToolRequest(taskID: taskID, name: "send", sideEffect: .externalSend,
                                target: "https://example.com/messages", payload: "hello")

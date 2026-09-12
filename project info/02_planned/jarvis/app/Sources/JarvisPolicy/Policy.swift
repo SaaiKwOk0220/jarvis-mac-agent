@@ -84,7 +84,7 @@ public struct Policy: PolicyEvaluator, Sendable {
     }
 
     private func evaluateRead(_ request: ToolRequest, config: PolicyConfig) -> PolicyDecision {
-        if request.target.contains("://") || request.target.hasPrefix("mailto:") {
+        if URLComponents(string: request.target)?.scheme != nil {
             guard let host = exactHTTPSHost(request.target), config.sites.contains(host) else {
                 return .deny(reason: "site is not allowlisted")
             }
