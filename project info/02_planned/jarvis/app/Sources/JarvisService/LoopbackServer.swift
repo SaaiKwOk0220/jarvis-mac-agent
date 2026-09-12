@@ -72,7 +72,7 @@ public final class LoopbackServer: @unchecked Sendable {
             switch serviceError {
             case .taskNotFound, .requestNotFound:
                 return self.error(status: 404, message: "resource not found")
-            case .approvalDigestMismatch, .requestNotAwaitingApproval, .illegalTransition, .cancelled:
+            case .approvalDigestMismatch, .requestNotAwaitingApproval, .illegalTransition, .incompatiblePersistence:
                 return self.error(status: 409, message: "request cannot be completed")
             }
         } catch {
@@ -128,6 +128,11 @@ public final class LoopbackServer: @unchecked Sendable {
             accumulated.append(data)
             guard accumulated.count <= 1_048_576 else { connection.cancel(); return }
             if !self.completeHTTPRequest(in: accumulated) {
+                if self.headerIsMalformed(in: accumulated) {
+                    let response = self.httpResponse(LoopbackResponse(status: 400))
+                    connection.send(content: response, completion: .contentProcessed { _ in connection.cancel() })
+                    return
+                }
                 self.receive(connection: connection, peerHost: peerHost, buffer: accumulated)
                 return
             }
@@ -156,6 +161,20 @@ public final class LoopbackServer: @unchecked Sendable {
         } else { contentLength = 0 }
         let headerByteCount = Array(text[..<separator.lowerBound].utf8).count
         return data.count <= 1_048_576 && data.count >= headerByteCount + 4 + contentLength
+    }
+
+    private func headerIsMalformed(in data: Data) -> Bool {
+        guard let text = String(data: data, encoding: .utf8), let separator = text.range(of: "\r\n\r\n") else { return false }
+        let headers = String(text[..<separator.lowerBound])
+        let lines = headers.split(separator: "\r\n")
+        guard lines.count <= 100, headers.utf8.count <= 32_768 else { return true }
+        if lines.contains(where: { $0.lowercased().hasPrefix("transfer-encoding:") }) { return true }
+        let values = lines.filter { $0.lowercased().hasPrefix("content-length:") }
+        guard values.count <= 1 else { return true }
+        guard let line = values.first else { return false }
+        let fields = line.split(separator: ":", maxSplits: 1)
+        guard fields.count == 2, let parsed = Int(fields[1].trimmingCharacters(in: .whitespaces)), parsed >= 0, parsed <= 1_048_576 else { return true }
+        return false
     }
 
     private func handleHTTP(data: Data, peerHost: String) async -> Data {

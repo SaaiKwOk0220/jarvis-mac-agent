@@ -47,6 +47,66 @@ final class TaskServiceTests: XCTestCase {
         XCTAssertEqual(stored?.status, .awaitingApproval)
     }
 
+    func testServiceRecreationApprovesPersistedRequestAndRecordsApproval() async throws {
+        let fixture = try Fixture()
+        let task = try await fixture.service.createTask(title: "Restart approval")
+        let request = ToolRequest(taskID: task.id, name: "write_file", sideEffect: .localWrite, target: "/tmp/jarvis-service/a", payload: "content", scope: ToolScope(workingDirectory: "/tmp/jarvis-service"))
+        _ = try await fixture.service.submit(request: request)
+        let restarted = fixture.makeService()
+
+        try await restarted.approve(requestID: request.id, digest: request.payloadDigest)
+
+        for _ in 0..<50 {
+            if try fixture.requests.fetch(id: request.id)?.1 == .completed { break }
+            try await Swift.Task.sleep(nanoseconds: 2_000_000)
+        }
+        XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .completed)
+        XCTAssertEqual(try fixture.approvals.list().map(\.decision), [.approved])
+    }
+
+    func testServiceRecreationRejectsPersistedRequestAndRecordsRejection() async throws {
+        let fixture = try Fixture()
+        let task = try await fixture.service.createTask(title: "Restart rejection")
+        let request = ToolRequest(taskID: task.id, name: "write_file", sideEffect: .localWrite, target: "/tmp/jarvis-service/a", payload: "content")
+        _ = try await fixture.service.submit(request: request)
+
+        try await fixture.makeService().reject(requestID: request.id)
+
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .blocked)
+        XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .rejected)
+        XCTAssertEqual(try fixture.approvals.list().map(\.decision), [.rejected])
+    }
+
+    func testExecutorFailurePersistsFailedRequestTaskAndAudit() async throws {
+        let fixture = try Fixture(executor: ThrowingExecutor())
+        let task = try await fixture.service.createTask(title: "Failure")
+        let request = ToolRequest(taskID: task.id, name: "read_file", sideEffect: .read, target: "/tmp/jarvis-service/a", payload: "")
+
+        await XCTAssertThrowsErrorAsync(try await fixture.service.submit(request: request))
+
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .failed)
+        XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .failed)
+        XCTAssertTrue(try fixture.audit.events(for: task.id).contains { $0.summary == "tool failure" })
+    }
+
+    func testCancellationCancelsExecutingRequestAndSuppressesSuccess() async throws {
+        let executor = SuspendingExecutor()
+        let fixture = try Fixture(executor: executor)
+        let task = try await fixture.service.createTask(title: "Cancel running")
+        let request = ToolRequest(taskID: task.id, name: "read_file", sideEffect: .read, target: "/tmp/jarvis-service/a", payload: "")
+        let submission = Swift.Task.detached { try? await fixture.service.submit(request: request) }
+        await executor.started()
+
+        try await fixture.service.cancel(taskID: task.id)
+        executor.resume()
+        _ = await submission.result
+        try await Swift.Task.sleep(nanoseconds: 5_000_000)
+
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .cancelled)
+        XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .cancelled)
+        XCTAssertFalse(try fixture.audit.events(for: task.id).contains { $0.summary == "tool result" })
+    }
+
     func testApprovalDigestMismatchRejectsRequestAndLeavesTaskAwaitingApproval() async throws {
         let fixture = try Fixture()
         let task = try await fixture.service.createTask(title: "Edit document")
@@ -148,24 +208,42 @@ final class TaskServiceTests: XCTestCase {
     }
 }
 
-private final class Fixture {
+private final class Fixture: @unchecked Sendable {
     let database: Database
     let tasks: SQLiteTaskRepository
     let audit: SQLiteAuditRepository
+    let requests: SQLiteToolRequestRepository
+    let approvals: SQLiteApprovalRepository
     let service: TaskService
 
-    init() throws {
+    init(executor: any ToolExecutor = NoOpToolExecutor()) throws {
         database = try Database(path: ":memory:")
         try database.migrate()
         tasks = SQLiteTaskRepository(database: database)
         audit = SQLiteAuditRepository(database: database)
+        requests = SQLiteToolRequestRepository(database: database)
+        approvals = SQLiteApprovalRepository(database: database)
         service = TaskService(
             taskRepository: tasks,
             auditRepository: audit,
             policy: Policy(),
-            policyConfig: PolicyConfig(approvedDirectories: ["/tmp/jarvis-service"])
+            policyConfig: PolicyConfig(approvedDirectories: ["/tmp/jarvis-service"]), executor: executor,
+            requestRepository: requests, approvalRepository: approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: database)
         )
     }
+
+    func makeService() -> TaskService {
+        TaskService(taskRepository: tasks, auditRepository: audit, policy: Policy(), policyConfig: PolicyConfig(approvedDirectories: ["/tmp/jarvis-service"]), requestRepository: requests, approvalRepository: approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: database))
+    }
+}
+
+private struct ThrowingExecutor: ToolExecutor { func execute(_ request: ToolRequest) async throws -> ToolResult { struct Expected: Error {}; throw Expected() } }
+
+private final class SuspendingExecutor: ToolExecutor, @unchecked Sendable {
+    private let lock = NSLock(); private var continuation: CheckedContinuation<ToolResult, Never>?
+    func execute(_ request: ToolRequest) async throws -> ToolResult { await withCheckedContinuation { continuation in lock.withLock { self.continuation = continuation } } }
+    func started() async { for _ in 0..<100 { if lock.withLock({ continuation != nil }) { return }; try? await Swift.Task.sleep(nanoseconds: 1_000_000) } }
+    func resume() { lock.withLock { continuation?.resume(returning: ToolResult(summary: "late")); continuation = nil } }
 }
 
 private func XCTAssertThrowsErrorAsync<T>(

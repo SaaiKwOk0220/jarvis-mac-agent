@@ -27,8 +27,6 @@ public final class Database: @unchecked Sendable {
                 table.column("side_effect", .text).notNull()
                 table.column("target", .text).notNull()
                 table.column("payload", .text).notNull()
-                table.column("browser_profile", .text)
-                table.column("working_directory", .text)
                 table.column("payload_digest", .text).notNull()
                 table.column("status", .text).notNull()
                 table.column("created_at", .datetime).notNull()
@@ -62,6 +60,17 @@ public final class Database: @unchecked Sendable {
                 table.column("enabled", .boolean).notNull().defaults(to: true)
                 table.column("created_at", .datetime).notNull()
                 table.column("updated_at", .datetime).notNull()
+            }
+        }
+
+        // Kept separate from the foundation migration so existing installations upgrade safely.
+        migrator.registerMigration("persist tool request scope") { database in
+            let existing = Set(try database.columns(in: "tool_requests").map(\.name))
+            if !existing.contains("browser_profile") {
+                try database.alter(table: "tool_requests") { $0.add(column: "browser_profile", .text) }
+            }
+            if !existing.contains("working_directory") {
+                try database.alter(table: "tool_requests") { $0.add(column: "working_directory", .text) }
             }
         }
 

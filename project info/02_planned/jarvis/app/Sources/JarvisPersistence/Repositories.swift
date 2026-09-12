@@ -119,9 +119,11 @@ public protocol PersistenceUnitOfWork: Sendable {
     func submitRequest(_ request: ToolRequest, status: ToolRequestStatus, taskStatus: TaskStatus, audits: [AuditEvent]) throws
     func approveRequest(_ request: ToolRequest, approval: Approval, taskStatus: TaskStatus, audits: [AuditEvent]) throws
     func rejectRequest(_ request: ToolRequest, approval: Approval, taskStatus: TaskStatus, audits: [AuditEvent]) throws
-    func transition(taskID: UUID, from: TaskStatus, to: TaskStatus, audit: AuditEvent) throws
+    func transition(taskID: UUID, from: TaskStatus, to: TaskStatus, audits: [AuditEvent]) throws
     func cancelTask(taskID: UUID, requestIDs: [UUID], audits: [AuditEvent]) throws
     func recordRequest(_ request: ToolRequest, status: ToolRequestStatus, audits: [AuditEvent]) throws
+    func finishRequest(_ request: ToolRequest, status: ToolRequestStatus, taskStatus: TaskStatus?, audits: [AuditEvent]) throws
+    func cancelExecutingTask(taskID: UUID, audits: [AuditEvent]) throws
 }
 
 public protocol AuditRepository: Sendable {
@@ -247,19 +249,36 @@ public final class SQLitePersistenceUnitOfWork: PersistenceUnitOfWork, @unchecke
             for audit in audits { try insertAudit(audit, db: db) }
         }
     }
-    public func transition(taskID: UUID, from: TaskStatus, to: TaskStatus, audit: AuditEvent) throws {
-        try database.write { db in try ensureTaskStatus(taskID, equals: from, db: db); try updateTask(taskID, to: to, db: db); try insertAudit(audit, db: db) }
+    public func transition(taskID: UUID, from: TaskStatus, to: TaskStatus, audits: [AuditEvent]) throws {
+        try database.write { db in try ensureTaskStatus(taskID, equals: from, db: db); try updateTask(taskID, to: to, db: db); for audit in audits { try insertAudit(audit, db: db) } }
     }
     public func cancelTask(taskID: UUID, requestIDs: [UUID], audits: [AuditEvent]) throws {
         try database.write { db in
             try ensureTaskNotTerminal(taskID, db: db); try updateTask(taskID, to: .cancelled, db: db)
-            for id in requestIDs { try updateToolRequest(id, to: .cancelled, db: db) }
+            try db.execute(sql: "UPDATE tool_requests SET status = ? WHERE task_id = ? AND status IN (?, ?)", arguments: [ToolRequestStatus.cancelled.rawValue, taskID.uuidString, ToolRequestStatus.pending.rawValue, ToolRequestStatus.executing.rawValue])
             for audit in audits { try insertAudit(audit, db: db) }
         }
     }
     public func recordRequest(_ request: ToolRequest, status: ToolRequestStatus, audits: [AuditEvent]) throws {
         try database.write { db in
             try insertToolRequest(request, status: status, db: db)
+            for audit in audits { try insertAudit(audit, db: db) }
+        }
+    }
+    public func finishRequest(_ request: ToolRequest, status: ToolRequestStatus, taskStatus: TaskStatus?, audits: [AuditEvent]) throws {
+        try database.write { db in
+            guard let current: String = try Row.fetchOne(db, sql: "SELECT status FROM tool_requests WHERE id = ?", arguments: [request.id.uuidString])?["status"], current == ToolRequestStatus.executing.rawValue else { throw PersistenceError.invalidStoredToolRequest }
+            guard let task: String = try Row.fetchOne(db, sql: "SELECT status FROM tasks WHERE id = ?", arguments: [request.taskID.uuidString])?["status"], task != TaskStatus.cancelled.rawValue else { throw PersistenceError.invalidStoredTask }
+            try updateToolRequest(request.id, to: status, db: db)
+            if let taskStatus { try updateTask(request.taskID, to: taskStatus, db: db) }
+            for audit in audits { try insertAudit(audit, db: db) }
+        }
+    }
+    public func cancelExecutingTask(taskID: UUID, audits: [AuditEvent]) throws {
+        try database.write { db in
+            try ensureTaskNotTerminal(taskID, db: db)
+            try updateTask(taskID, to: .cancelled, db: db)
+            try db.execute(sql: "UPDATE tool_requests SET status = ? WHERE task_id = ? AND status = ?", arguments: [ToolRequestStatus.cancelled.rawValue, taskID.uuidString, ToolRequestStatus.executing.rawValue])
             for audit in audits { try insertAudit(audit, db: db) }
         }
     }
