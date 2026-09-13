@@ -38,6 +38,11 @@ struct ApprovalView: View {
                     .disabled(submitting || request == nil || digest.isEmpty)
             }
         }
-        .onAppear { digest = client.approvalRequests.values.first(where: { $0.taskID == task.id })?.digest ?? "" }
+        .onAppear { updateDigest() }
+        .onChange(of: client.approvalRequests) { _, _ in updateDigest() }
+    }
+
+    private func updateDigest() {
+        digest = client.approvalRequests.values.first(where: { $0.taskID == task.id })?.digest ?? ""
     }
 }

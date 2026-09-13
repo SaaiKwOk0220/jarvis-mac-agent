@@ -44,6 +44,21 @@ public final class TaskService: TaskServiceAPI, @unchecked Sendable {
     public func getTask(id: UUID) async throws -> Task? { try lock.withLock { try tasks.fetch(id: id) } }
     public func listTasks() async throws -> [Task] { try lock.withLock { try tasks.list() } }
 
+    public func listPendingApprovalRequests(taskID: UUID) async throws -> [PendingApprovalRequest] {
+        try lock.withLock {
+            guard try tasks.fetch(id: taskID) != nil else { throw TaskServiceError.taskNotFound }
+            let pending = try requests.list(status: .pending).filter { $0.0.taskID == taskID }
+            return try pending.map { request, _ in
+                let reason = (try? audits.events(for: taskID).reversed().first(where: {
+                    $0.actionDigest == request.payloadDigest && $0.summary == "policy requires approval"
+                })?.result) ?? "Approval requested by policy"
+                let redactedPayload = redactSecrets(request.payload)
+                return PendingApprovalRequest(id: request.id, taskID: request.taskID, reason: reason,
+                    target: request.target, payload: redactedPayload == request.payload ? redactedPayload : "[REDACTED]", digest: request.payloadDigest)
+            }
+        }
+    }
+
     public func submit(request: ToolRequest) async throws -> PolicyDecision {
         try lock.withLock { try ensureRunning(request.taskID) }
         let decision = policy.evaluate(request, config: config)

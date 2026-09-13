@@ -142,4 +142,19 @@ public protocol TaskServiceAPI: Sendable {
     func approve(requestID: UUID, digest: String) async throws
     func reject(requestID: UUID) async throws
     func cancel(taskID: UUID) async throws
+    func listPendingApprovalRequests(taskID: UUID) async throws -> [PendingApprovalRequest]
+}
+
+/// Digest-bound metadata exposed to the local approval UI. Payload is already redacted.
+public struct PendingApprovalRequest: Codable, Equatable, Sendable, Identifiable {
+    public let id: UUID
+    public let taskID: UUID
+    public let reason: String
+    public let target: String
+    public let payload: String
+    public let digest: String
+
+    public init(id: UUID, taskID: UUID, reason: String, target: String, payload: String, digest: String) {
+        self.id = id; self.taskID = taskID; self.reason = reason; self.target = target; self.payload = payload; self.digest = digest
+    }
 }

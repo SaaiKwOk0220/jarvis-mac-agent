@@ -63,7 +63,7 @@ public final class ServiceClient: ObservableObject {
     @Published public private(set) var approvalRequests: [UUID: ApprovalRequest] = [:]
     @Published public private(set) var serviceError: ServiceClientError?
 
-    private let baseURL: URL
+    private var baseURL: URL
     private let session: URLSession
     private var previousStatuses: [UUID: TaskStatus] = [:]
 
@@ -75,6 +75,11 @@ public final class ServiceClient: ObservableObject {
             Swift.Task { _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) }
         }
         #endif
+    }
+
+    public func configure(baseURL: URL) {
+        guard baseURL.scheme?.lowercased() == "http", (baseURL.host == "127.0.0.1" || baseURL.host == "localhost") else { return }
+        self.baseURL = baseURL
     }
 
     @discardableResult
