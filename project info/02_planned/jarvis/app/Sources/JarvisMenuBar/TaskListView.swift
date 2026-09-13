@@ -10,7 +10,7 @@ struct TaskListView: View {
             HStack {
                 Label("Jarvis", systemImage: "bolt.horizontal.circle")
                 Spacer()
-                Button { Swift.Task { try? await client.refresh() } } label: { Image(systemName: "arrow.clockwise") }
+                Button { Task { try? await client.refresh() } } label: { Image(systemName: "arrow.clockwise") }
                     .buttonStyle(.borderless)
             }
             Divider()

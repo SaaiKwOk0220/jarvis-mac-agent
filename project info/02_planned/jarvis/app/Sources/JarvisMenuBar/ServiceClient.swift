@@ -81,7 +81,7 @@ public final class ServiceClient: ObservableObject {
         #if canImport(UserNotifications)
         // `swift run` is a bare executable, which UserNotifications cannot register. A packaged app can.
         if Self.notificationsAreAvailable {
-            Swift.Task { _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) }
+            Task { _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) }
         }
         #endif
     }

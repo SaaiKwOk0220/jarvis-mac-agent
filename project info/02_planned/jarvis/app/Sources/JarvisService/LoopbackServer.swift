@@ -111,7 +111,7 @@ public final class LoopbackServer: @unchecked Sendable {
         listener.start(queue: queue)
         for _ in 0..<100 {
             if let port = listener.port, port.rawValue != 0 { return port.rawValue }
-            try await Swift.Task.sleep(nanoseconds: 10_000_000)
+            try await Task.sleep(nanoseconds: 10_000_000)
         }
         listener.cancel()
         throw NSError(domain: "JarvisService", code: 1, userInfo: [NSLocalizedDescriptionKey: "loopback listener failed to start"])
@@ -150,7 +150,7 @@ public final class LoopbackServer: @unchecked Sendable {
                 self.receive(connection: connection, peerHost: peerHost, buffer: accumulated)
                 return
             }
-            Swift.Task {
+            Task {
                 let response = await self.handleHTTP(data: accumulated, peerHost: peerHost)
                 connection.send(content: response, completion: .contentProcessed { _ in connection.cancel() })
             }

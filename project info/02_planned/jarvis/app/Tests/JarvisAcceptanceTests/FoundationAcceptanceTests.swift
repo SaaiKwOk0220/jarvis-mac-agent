@@ -24,7 +24,7 @@ final class FoundationAcceptanceTests: XCTestCase {
         XCTAssertEqual(readDecision, .allow)
         for _ in 0..<50 {
             if try await service.getTask(id: readTask.id)?.status == .completed { break }
-            try await Swift.Task.sleep(nanoseconds: 2_000_000)
+            try await Task.sleep(nanoseconds: 2_000_000)
         }
         let readStatus = try await service.getTask(id: readTask.id)?.status
         XCTAssertEqual(readStatus, .completed)
@@ -46,7 +46,7 @@ final class FoundationAcceptanceTests: XCTestCase {
         do { try await service.approve(requestID: write.id, digest: ToolRequest.actionDigest(name: write.name, sideEffect: write.sideEffect, target: write.target, payload: "changed")); XCTFail("changed digest must fail") }
         catch { XCTAssertEqual(error as? TaskServiceError, .approvalDigestMismatch) }
         try await service.approve(requestID: write.id, digest: write.payloadDigest)
-        for _ in 0..<50 { if try requests.fetch(id: write.id)?.1 == .completed { break }; try await Swift.Task.sleep(nanoseconds: 2_000_000) }
+        for _ in 0..<50 { if try requests.fetch(id: write.id)?.1 == .completed { break }; try await Task.sleep(nanoseconds: 2_000_000) }
         XCTAssertEqual(try requests.fetch(id: write.id)?.1, .completed)
         let writeStatus = try await service.getTask(id: writeTask.id)?.status
         XCTAssertEqual(writeStatus, .completed)
@@ -67,8 +67,8 @@ final class FoundationAcceptanceTests: XCTestCase {
         let runningTask = try await slowService.createTask(title: "Cancellation")
         let running = ToolRequest(taskID: runningTask.id, name: "read_file", sideEffect: .read,
             target: "/tmp/jarvis-service/slow", payload: "")
-        let submission = Swift.Task { try? await slowService.submit(request: running) }
-        try await Swift.Task.sleep(nanoseconds: 10_000_000)
+        let submission = Task { try? await slowService.submit(request: running) }
+        try await Task.sleep(nanoseconds: 10_000_000)
         try await slowService.cancel(taskID: runningTask.id); _ = await submission.value
         let cancelledStatus = try await slowService.getTask(id: runningTask.id)?.status
         XCTAssertEqual(cancelledStatus, .cancelled)
@@ -77,7 +77,7 @@ final class FoundationAcceptanceTests: XCTestCase {
 
 private struct SlowExecutor: ToolExecutor {
     func execute(_ request: ToolRequest) async throws -> ToolResult {
-        try await Swift.Task.sleep(nanoseconds: 500_000_000)
+        try await Task.sleep(nanoseconds: 500_000_000)
         return ToolResult(summary: "slow complete")
     }
 }

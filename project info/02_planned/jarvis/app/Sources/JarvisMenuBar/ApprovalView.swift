@@ -32,7 +32,7 @@ struct ApprovalView: View {
                     guard let request else { return }
                     submitting = true
                     client.clearActionError()
-                    Swift.Task {
+                    Task {
                         defer { submitting = false }
                         do {
                             try await client.reject(request)
@@ -48,7 +48,7 @@ struct ApprovalView: View {
                     guard let request, !request.digest.isEmpty else { return }
                     submitting = true
                     client.clearActionError()
-                    Swift.Task {
+                    Task {
                         defer { submitting = false }
                         do {
                             try await client.approve(request)

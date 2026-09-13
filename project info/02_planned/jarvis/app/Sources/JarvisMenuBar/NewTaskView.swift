@@ -39,7 +39,7 @@ struct NewTaskView: View {
         let submittedTitle = title
         isCreating = true
         errorMessage = nil
-        Swift.Task {
+        Task {
             defer { isCreating = false }
             do {
                 let task = try await client.createTask(title: submittedTitle)

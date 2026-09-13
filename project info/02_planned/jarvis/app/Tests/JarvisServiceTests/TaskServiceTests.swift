@@ -58,7 +58,7 @@ final class TaskServiceTests: XCTestCase {
 
         for _ in 0..<50 {
             if try fixture.requests.fetch(id: request.id)?.1 == .completed { break }
-            try await Swift.Task.sleep(nanoseconds: 2_000_000)
+            try await Task.sleep(nanoseconds: 2_000_000)
         }
         XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .completed)
         XCTAssertEqual(try fixture.approvals.list().map(\.decision), [.approved])
@@ -94,13 +94,13 @@ final class TaskServiceTests: XCTestCase {
         let fixture = try Fixture(executor: executor)
         let task = try await fixture.service.createTask(title: "Cancel running")
         let request = ToolRequest(taskID: task.id, name: "read_file", sideEffect: .read, target: "/tmp/jarvis-service/a", payload: "")
-        let submission = Swift.Task.detached { try? await fixture.service.submit(request: request) }
+        let submission = Task.detached { try? await fixture.service.submit(request: request) }
         await executor.started()
 
         try await fixture.service.cancel(taskID: task.id)
         executor.resume()
         _ = await submission.result
-        try await Swift.Task.sleep(nanoseconds: 5_000_000)
+        try await Task.sleep(nanoseconds: 5_000_000)
 
         XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .cancelled)
         XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .cancelled)
@@ -146,7 +146,7 @@ final class TaskServiceTests: XCTestCase {
         let policy = BlockingAllowPolicy()
         let second = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: policy, policyConfig: PolicyConfig(approvedDirectories: ["/tmp/jarvis-service"]), requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
         let request = ToolRequest(taskID: task.id, name: "read_file", sideEffect: .read, target: "/tmp/jarvis-service/a", payload: "")
-        let submission = Swift.Task.detached { try? await second.submit(request: request) }
+        let submission = Task.detached { try? await second.submit(request: request) }
 
         XCTAssertTrue(policy.waitForEvaluation())
         try await fixture.service.cancel(taskID: task.id)
@@ -162,7 +162,7 @@ final class TaskServiceTests: XCTestCase {
         let fixture = try Fixture(executor: executor)
         let task = try await fixture.service.createTask(title: "Cancel allowed execution")
         let request = ToolRequest(taskID: task.id, name: "read_file", sideEffect: .read, target: "/tmp/jarvis-service/a", payload: "")
-        let submission = Swift.Task.detached { try? await fixture.service.submit(request: request) }
+        let submission = Task.detached { try? await fixture.service.submit(request: request) }
         await executor.started()
 
         try await fixture.service.cancel(taskID: task.id)
@@ -177,7 +177,7 @@ final class TaskServiceTests: XCTestCase {
         let fixture = try Fixture(executor: executor)
         let task = try await fixture.service.createTask(title: "Cancel multiple executions")
         let requests = (0..<2).map { ToolRequest(taskID: task.id, name: "read_file", sideEffect: .read, target: "/tmp/jarvis-service/\($0)", payload: "") }
-        let submissions = requests.map { request in Swift.Task.detached { try? await fixture.service.submit(request: request) } }
+        let submissions = requests.map { request in Task.detached { try? await fixture.service.submit(request: request) } }
         await executor.started(ids: Set(requests.map(\.id)))
 
         try await fixture.service.cancel(taskID: task.id)
@@ -199,7 +199,7 @@ final class TaskServiceTests: XCTestCase {
 
         for _ in 0..<100 {
             if try fixture.tasks.fetch(id: task.id)?.status == .completed { break }
-            try await Swift.Task.sleep(nanoseconds: 10_000_000)
+            try await Task.sleep(nanoseconds: 10_000_000)
         }
 
         XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .completed,
@@ -366,7 +366,7 @@ private struct ThrowingExecutor: ToolExecutor { func execute(_ request: ToolRequ
 private final class SuspendingExecutor: ToolExecutor, @unchecked Sendable {
     private let lock = NSLock(); private var continuation: CheckedContinuation<ToolResult, Never>?
     func execute(_ request: ToolRequest) async throws -> ToolResult { await withCheckedContinuation { continuation in lock.withLock { self.continuation = continuation } } }
-    func started() async { for _ in 0..<100 { if lock.withLock({ continuation != nil }) { return }; try? await Swift.Task.sleep(nanoseconds: 1_000_000) } }
+    func started() async { for _ in 0..<100 { if lock.withLock({ continuation != nil }) { return }; try? await Task.sleep(nanoseconds: 1_000_000) } }
     func resume() { lock.withLock { continuation?.resume(returning: ToolResult(summary: "late")); continuation = nil } }
 }
 
@@ -379,7 +379,7 @@ private final class MultiSuspendingExecutor: ToolExecutor, @unchecked Sendable {
     func started(ids: Set<UUID>) async {
         for _ in 0..<100 {
             if lock.withLock({ Set(continuations.keys).isSuperset(of: ids) }) { return }
-            try? await Swift.Task.sleep(nanoseconds: 1_000_000)
+            try? await Task.sleep(nanoseconds: 1_000_000)
         }
     }
     func resume(id: UUID) {

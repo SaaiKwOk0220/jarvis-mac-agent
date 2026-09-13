@@ -23,7 +23,7 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     private let config: PolicyConfig
     private let executor: any ToolExecutor
     private let lock = NSLock()
-    private var executions: [UUID: Swift.Task<Void, Error>] = [:]
+    private var executions: [UUID: Task<Void, Error>] = [:]
 
     public init(taskRepository: any TaskRepository, auditRepository: any AuditRepository, policy: any PolicyEvaluator, policyConfig: PolicyConfig = .init(), executor: any ToolExecutor = NoOpToolExecutor(), requestRepository: (any ToolRequestRepository)? = nil, approvalRepository: (any ApprovalRepository)? = nil, unitOfWork: (any PersistenceUnitOfWork)? = nil) throws {
         guard let sqliteTasks = taskRepository as? SQLiteTaskRepository,
@@ -145,7 +145,7 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
 
     private func startExecution(_ request: ToolRequest) {
         let gate = ExecutionGate()
-        let job: Swift.Task<Void, Error> = Swift.Task { [weak self] in
+        let job: Task<Void, Error> = Task { [weak self] in
             await gate.wait()
             defer { self?.removeExecution(request.id) }
             guard let self else { return }
@@ -157,7 +157,7 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
 
     private func runTracked(_ request: ToolRequest) async throws {
         let gate = ExecutionGate()
-        let job: Swift.Task<Void, Error> = Swift.Task { [weak self] in
+        let job: Task<Void, Error> = Task { [weak self] in
             await gate.wait()
             defer { self?.removeExecution(request.id) }
             guard let self else { return }

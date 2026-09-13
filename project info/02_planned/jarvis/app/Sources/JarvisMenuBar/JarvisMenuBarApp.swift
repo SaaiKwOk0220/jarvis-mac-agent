@@ -48,7 +48,7 @@ private final class Runtime {
                 policyConfig: PolicyConfig(approvedDirectories: [appSupport.path]), executor: NoOpToolExecutor())
             let server = LoopbackServer(service: service)
             self.server = server
-            Swift.Task { @MainActor in
+            Task { @MainActor in
                 if let port = try? await server.start() {
                     client.configure(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
                     _ = try? await client.refresh()

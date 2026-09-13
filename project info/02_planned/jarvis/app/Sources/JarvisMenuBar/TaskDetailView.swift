@@ -23,7 +23,7 @@ struct TaskDetailView: View {
                             Button {
                                 isStartingDemo = true
                                 client.clearActionError()
-                                Swift.Task {
+                                Task {
                                     defer { isStartingDemo = false }
                                     do {
                                         try await client.startDemoApproval(taskID: task.id)
@@ -43,7 +43,7 @@ struct TaskDetailView: View {
                             Button(role: .destructive) {
                                 isCancelling = true
                                 client.clearActionError()
-                                Swift.Task {
+                                Task {
                                     defer { isCancelling = false }
                                     do {
                                         try await client.cancel(taskID: task.id)
@@ -69,7 +69,7 @@ struct TaskDetailView: View {
                     if [.completed, .failed, .cancelled].contains(initialStatus) { return }
                     let deadline = Date().addingTimeInterval(6.0)
                     while Date() < deadline {
-                        do { try await Swift.Task.sleep(nanoseconds: 250_000_000) } catch { return }
+                        do { try await Task.sleep(nanoseconds: 250_000_000) } catch { return }
                         _ = try? await client.refresh()
                         _ = try? await client.loadTimeline(taskID: task.id)
                         if let current = client.tasks.first(where: { $0.id == task.id }),
