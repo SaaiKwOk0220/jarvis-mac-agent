@@ -278,6 +278,25 @@ final class TaskServiceTests: XCTestCase {
         XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 201)
         XCTAssertEqual(try JSONDecoder().decode(Task.self, from: data).title, "Socket task")
     }
+
+    func testLoopbackServerServesPersistedPendingApprovalMetadata() async throws {
+        let fixture = try Fixture()
+        let task = try await fixture.service.createTask(title: "Approval metadata")
+        let request = ToolRequest(taskID: task.id, name: "write_file", sideEffect: .localWrite, target: "/tmp/jarvis-service/secret.txt", payload: "api_key=do-not-leak")
+        _ = try await fixture.service.submit(request: request)
+        let server = LoopbackServer(service: fixture.service)
+        let response = await server.handle(method: "GET", path: "/tasks/\(task.id.uuidString)/requests", body: Data(), peerHost: "127.0.0.1")
+
+        XCTAssertEqual(response.status, 200)
+        let json = try JSONSerialization.jsonObject(with: response.body) as? [[String: Any]]
+        let item = try XCTUnwrap(json?.first)
+        XCTAssertEqual(item["id"] as? String, request.id.uuidString)
+        XCTAssertEqual(item["taskID"] as? String, task.id.uuidString)
+        XCTAssertEqual(item["digest"] as? String, request.payloadDigest)
+        XCTAssertEqual(item["target"] as? String, request.target)
+        XCTAssertEqual(item["reason"] as? String, "local write changes local state")
+        XCTAssertEqual(item["payload"] as? String, "[REDACTED]")
+    }
 }
 
 private final class Fixture: @unchecked Sendable {

@@ -1,6 +1,9 @@
 import XCTest
 @testable import JarvisMenuBar
 import JarvisDomain
+import JarvisPersistence
+import JarvisPolicy
+import JarvisService
 
 @MainActor
 final class ServiceClientTests: XCTestCase {
@@ -33,5 +36,48 @@ final class ServiceClientTests: XCTestCase {
         XCTAssertThrowsError(try ServiceClient.decodeTaskList(Data("{}".utf8), decoder: decoder)) {
             XCTAssertEqual($0 as? ServiceClientError, .decoding)
         }
+    }
+
+    func testRefreshReportsServiceUnavailableWhenLoopbackIsNotListening() async {
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:1")!)
+        do {
+            _ = try await client.refresh()
+            XCTFail("Expected an unavailable service")
+        } catch {
+            XCTAssertEqual(error as? ServiceClientError, .unavailable)
+            XCTAssertEqual(client.serviceError, .unavailable)
+        }
+    }
+
+    func testLoadsApprovalMetadataFromRealLoopbackServer() async throws {
+        let database = try Database(path: ":memory:")
+        try database.migrate()
+        let tasks = SQLiteTaskRepository(database: database)
+        let audit = SQLiteAuditRepository(database: database)
+        let service = try TaskService(
+            taskRepository: tasks,
+            auditRepository: audit,
+            policy: Policy(),
+            policyConfig: PolicyConfig(approvedDirectories: ["/tmp/jarvis-service"]),
+            requestRepository: SQLiteToolRequestRepository(database: database),
+            approvalRepository: SQLiteApprovalRepository(database: database),
+            unitOfWork: SQLitePersistenceUnitOfWork(database: database)
+        )
+        let task = try await service.createTask(title: "Network approval")
+        let request = ToolRequest(taskID: task.id, name: "write_file", sideEffect: .localWrite, target: "/tmp/jarvis-service/network.txt", payload: "safe")
+        _ = try await service.submit(request: request)
+        let server = LoopbackServer(service: service)
+        let port = try await server.start()
+        defer { server.stop() }
+
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let requests = try await client.loadApprovalRequests(taskID: task.id)
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests[0].id, request.id)
+        XCTAssertEqual(requests[0].digest, request.payloadDigest)
+        XCTAssertEqual(requests[0].target, request.target)
+
+        try await client.approve(requests[0])
+        XCTAssertNil(client.serviceError)
     }
 }
