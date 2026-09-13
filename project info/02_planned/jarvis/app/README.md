@@ -25,6 +25,12 @@ Protected actions pause in `awaiting_approval` and require an explicit approval
 for the exact action digest. Approval and rejection never happen implicitly from
 notifications. Audit events are persisted with secret-shaped values redacted.
 
+To exercise the foundation without a planner or worker, create a task from the
+menu bar, open its detail window, and choose **Start demo approval**. This creates
+a local-draft proposal under Jarvis application support, pauses for an exact-digest
+approval, and then runs only the no-op demo executor. The timeline records each
+state transition, policy decision, approval, and result.
+
 The bundled `NoOpToolExecutor` is a demo executor used to exercise the complete
 state and approval flow. Terminal workers, browser workers, and Accessibility or
 ScreenCaptureKit GUI workers are intentionally not included yet.
