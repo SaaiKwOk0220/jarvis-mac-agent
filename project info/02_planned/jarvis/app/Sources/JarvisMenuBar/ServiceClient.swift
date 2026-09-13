@@ -62,7 +62,15 @@ public final class ServiceClient: ObservableObject {
     @Published public private(set) var selectedTask: Task?
     @Published public private(set) var approvalRequests: [UUID: ApprovalRequest] = [:]
     @Published public private(set) var timelineEvents: [UUID: [TimelineEvent]] = [:]
+    /// Read-side failures (refresh / createTask / loadTimeline /
+    /// loadApprovalRequests). Write-side failures populate `actionError`
+    /// instead.
     @Published public private(set) var serviceError: ServiceClientError?
+    /// Write-side failures (approve / reject / cancel / startDemoApproval).
+    /// Cleared automatically on the next successful mutation and on the
+    /// next button press in the view layer. Read-side failures populate
+    /// `serviceError` instead.
+    @Published public private(set) var actionError: String?
 
     private var baseURL: URL
     private let session: URLSession
@@ -102,6 +110,9 @@ public final class ServiceClient: ObservableObject {
     }
 
     public func select(_ task: Task?) { selectedTask = task }
+
+    /// Clears the last published action error (e.g. when the user retries a button).
+    public func clearActionError() { actionError = nil }
 
     @discardableResult
     public func createTask(title: String) async throws -> Task {
@@ -154,29 +165,65 @@ public final class ServiceClient: ObservableObject {
     }
 
     public func approve(requestID: UUID, digest: String) async throws {
-        try await mutate(path: "/requests/\(requestID.uuidString)/approve", body: ["digest": digest])
-        try await refresh()
+        do {
+            try await mutate(path: "/requests/\(requestID.uuidString)/approve", body: ["digest": digest])
+            try await refresh()
+            actionError = nil
+        } catch let error as ServiceClientError {
+            actionError = error.localizedDescription
+            throw error
+        } catch {
+            actionError = ServiceClientError.unavailable.localizedDescription
+            throw ServiceClientError.unavailable
+        }
     }
 
     public func approve(_ request: ApprovalRequest) async throws { try await approve(requestID: request.id, digest: request.digest) }
 
     public func reject(requestID: UUID) async throws {
-        try await mutate(path: "/requests/\(requestID.uuidString)/reject")
-        try await refresh()
+        do {
+            try await mutate(path: "/requests/\(requestID.uuidString)/reject")
+            try await refresh()
+            actionError = nil
+        } catch let error as ServiceClientError {
+            actionError = error.localizedDescription
+            throw error
+        } catch {
+            actionError = ServiceClientError.unavailable.localizedDescription
+            throw ServiceClientError.unavailable
+        }
     }
 
     public func reject(_ request: ApprovalRequest) async throws { try await reject(requestID: request.id) }
 
     public func cancel(taskID: UUID) async throws {
-        try await mutate(path: "/tasks/\(taskID.uuidString)/cancel")
-        try await refresh()
+        do {
+            try await mutate(path: "/tasks/\(taskID.uuidString)/cancel")
+            try await refresh()
+            actionError = nil
+        } catch let error as ServiceClientError {
+            actionError = error.localizedDescription
+            throw error
+        } catch {
+            actionError = ServiceClientError.unavailable.localizedDescription
+            throw ServiceClientError.unavailable
+        }
     }
 
     public func startDemoApproval(taskID: UUID) async throws {
-        try await mutate(path: "/tasks/\(taskID.uuidString)/demo-approval")
-        _ = try await refresh()
-        _ = try await loadTimeline(taskID: taskID)
-        _ = try await loadApprovalRequests(taskID: taskID)
+        do {
+            try await mutate(path: "/tasks/\(taskID.uuidString)/demo-approval")
+            _ = try await refresh()
+            _ = try await loadTimeline(taskID: taskID)
+            _ = try await loadApprovalRequests(taskID: taskID)
+            actionError = nil
+        } catch let error as ServiceClientError {
+            actionError = error.localizedDescription
+            throw error
+        } catch {
+            actionError = ServiceClientError.unavailable.localizedDescription
+            throw ServiceClientError.unavailable
+        }
     }
 
     private func mutate(path: String, body: [String: String]? = nil) async throws {

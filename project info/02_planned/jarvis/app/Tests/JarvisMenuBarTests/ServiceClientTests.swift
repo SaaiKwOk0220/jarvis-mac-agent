@@ -113,6 +113,80 @@ final class ServiceClientTests: XCTestCase {
         XCTAssertEqual(client.tasks.map(\.id), [task.id])
     }
 
+    func testApproveSurfacesActionErrorOnConflict() async throws {
+        let database = try Database(path: ":memory:")
+        try database.migrate()
+        let service = try TaskService(taskRepository: SQLiteTaskRepository(database: database),
+            auditRepository: SQLiteAuditRepository(database: database), policy: Policy(),
+            policyConfig: PolicyConfig(approvedDirectories: ["/tmp/jarvis-service"]))
+        let server = LoopbackServer(service: service)
+        let port = try await server.start()
+        defer { server.stop() }
+
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let task = try await client.createTask(title: "Conflict approve")
+        try await client.startDemoApproval(taskID: task.id)
+        let request = try XCTUnwrap(client.approvalRequests.values.first)
+
+        try await client.approve(request)
+        XCTAssertNil(client.actionError)
+
+        do {
+            try await client.approve(request)
+            XCTFail("Expected approve to throw after the request is no longer pending")
+        } catch {
+            // Expected
+        }
+        XCTAssertNotNil(client.actionError)
+        XCTAssertTrue(client.actionError?.contains("409") == true,
+            "actionError should describe the 409 conflict, got: \(client.actionError ?? "nil")")
+    }
+
+    func testCancelSurfacesActionErrorOnConflict() async throws {
+        let database = try Database(path: ":memory:")
+        try database.migrate()
+        let service = try TaskService(taskRepository: SQLiteTaskRepository(database: database),
+            auditRepository: SQLiteAuditRepository(database: database), policy: Policy(),
+            policyConfig: PolicyConfig(approvedDirectories: ["/tmp/jarvis-service"]))
+        let server = LoopbackServer(service: service)
+        let port = try await server.start()
+        defer { server.stop() }
+
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let task = try await client.createTask(title: "Conflict cancel")
+
+        try await client.cancel(taskID: task.id)
+        XCTAssertNil(client.actionError)
+
+        do {
+            try await client.cancel(taskID: task.id)
+            XCTFail("Expected cancel to throw after the task is already cancelled")
+        } catch {
+            // Expected
+        }
+        XCTAssertNotNil(client.actionError)
+    }
+
+    func testClearActionErrorResetsPublishedValue() async throws {
+        let database = try Database(path: ":memory:")
+        try database.migrate()
+        let service = try TaskService(taskRepository: SQLiteTaskRepository(database: database),
+            auditRepository: SQLiteAuditRepository(database: database), policy: Policy(),
+            policyConfig: PolicyConfig(approvedDirectories: ["/tmp/jarvis-service"]))
+        let server = LoopbackServer(service: service)
+        let port = try await server.start()
+        defer { server.stop() }
+
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let task = try await client.createTask(title: "Clear action error")
+        try await client.cancel(taskID: task.id)
+        do { try await client.cancel(taskID: task.id); XCTFail("Expected throw") } catch { }
+
+        XCTAssertNotNil(client.actionError)
+        client.clearActionError()
+        XCTAssertNil(client.actionError)
+    }
+
     func testRunsDemoApprovalFlowThroughRealLoopbackServer() async throws {
         let database = try Database(path: ":memory:")
         try database.migrate()

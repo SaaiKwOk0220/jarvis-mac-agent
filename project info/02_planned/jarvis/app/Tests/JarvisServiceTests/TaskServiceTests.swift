@@ -187,6 +187,27 @@ final class TaskServiceTests: XCTestCase {
         XCTAssertFalse(try fixture.audit.events(for: task.id).contains { $0.summary == "tool result" })
     }
 
+    func testApprovedRequestCompletesTaskAfterNoOpExecutor() async throws {
+        let fixture = try Fixture()
+        let task = try await fixture.service.createTask(title: "Approve demo completion")
+        let request = ToolRequest(taskID: task.id, name: "demo_write", sideEffect: .localWrite,
+            target: "/tmp/jarvis-service/draft.txt", payload: "Create a local demo draft")
+        _ = try await fixture.service.submit(request: request)
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .awaitingApproval)
+
+        try await fixture.service.approve(requestID: request.id, digest: request.payloadDigest)
+
+        for _ in 0..<100 {
+            if try fixture.tasks.fetch(id: task.id)?.status == .completed { break }
+            try await Swift.Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .completed,
+            "Task should reach .completed once NoOpToolExecutor finishes; the demo executor must not leave the task in .running")
+        XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .completed)
+        XCTAssertTrue(try fixture.audit.events(for: task.id).contains { $0.summary == "tool result" })
+    }
+
     func testRejectsRepositoriesFromDifferentDatabases() throws {
         let first = try Database(path: ":memory:"); try first.migrate()
         let second = try Database(path: ":memory:"); try second.migrate()
