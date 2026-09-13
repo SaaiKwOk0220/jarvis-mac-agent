@@ -4,8 +4,6 @@ import JarvisDomain
 struct TaskListView: View {
     @ObservedObject var client: ServiceClient
     @Environment(\.openWindow) private var openWindow
-    @State private var newTaskTitle = ""
-    @State private var isCreating = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -16,12 +14,8 @@ struct TaskListView: View {
                     .buttonStyle(.borderless)
             }
             Divider()
-            HStack {
-                TextField("New task", text: $newTaskTitle)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit { createTask() }
-                Button("Add") { createTask() }
-                    .disabled(isCreating || newTaskTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            Button { openWindow(id: "new-task") } label: {
+                Label("New task…", systemImage: "plus.circle")
             }
             if client.tasks.isEmpty {
                 Text(client.serviceError?.localizedDescription ?? "No tasks yet")
@@ -58,15 +52,4 @@ struct TaskListView: View {
         switch status { case .completed: return .green; case .failed, .blocked: return .red; case .awaitingApproval: return .orange; case .cancelled: return .gray; default: return .blue }
     }
 
-    private func createTask() {
-        let title = newTaskTitle
-        isCreating = true
-        Swift.Task {
-            defer { isCreating = false }
-            guard let task = try? await client.createTask(title: title) else { return }
-            newTaskTitle = ""
-            client.select(task)
-            openWindow(id: "task-detail")
-        }
-    }
 }
