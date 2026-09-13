@@ -59,6 +59,18 @@ public final class TaskService: TaskServiceAPI, @unchecked Sendable {
         }
     }
 
+    public func listTimelineEvents(taskID: UUID) async throws -> [TimelineEvent] {
+        try lock.withLock {
+            guard try tasks.fetch(id: taskID) != nil else { throw TaskServiceError.taskNotFound }
+            return try audits.events(for: taskID).map { event in
+                TimelineEvent(id: event.id, timestamp: event.timestamp, worker: event.worker,
+                    target: redactSecrets(event.target), sideEffect: event.sideEffect,
+                    actionDigest: event.actionDigest, summary: event.summary, result: event.result,
+                    approvalID: event.approvalID)
+            }
+        }
+    }
+
     public func submit(request: ToolRequest) async throws -> PolicyDecision {
         try lock.withLock { try ensureRunning(request.taskID) }
         let decision = policy.evaluate(request, config: config)

@@ -50,6 +50,10 @@ public final class LoopbackServer: @unchecked Sendable {
                 guard let taskID = UUID(uuidString: parts[1]) else { return error(status: 400, message: "invalid task id") }
                 return try response(status: 200, value: await service.listPendingApprovalRequests(taskID: taskID))
             }
+            if verb == "GET", parts.count == 3, parts[0] == "tasks", parts[2] == "timeline" {
+                guard let taskID = UUID(uuidString: parts[1]) else { return error(status: 400, message: "invalid task id") }
+                return try response(status: 200, value: await service.listTimelineEvents(taskID: taskID))
+            }
             if verb == "POST", parts.count == 3, parts[0] == "tasks", parts[2] == "cancel" {
                 let id = parts[1]
                 guard let taskID = UUID(uuidString: id) else { return error(status: 400, message: "invalid task id") }

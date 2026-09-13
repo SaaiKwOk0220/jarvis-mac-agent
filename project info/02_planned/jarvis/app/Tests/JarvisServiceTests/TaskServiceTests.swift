@@ -297,6 +297,18 @@ final class TaskServiceTests: XCTestCase {
         XCTAssertEqual(item["reason"] as? String, "local write changes local state")
         XCTAssertEqual(item["payload"] as? String, "[REDACTED]")
     }
+
+    func testLoopbackServerServesRedactedTaskTimeline() async throws {
+        let fixture = try Fixture()
+        let task = try await fixture.service.createTask(title: "Timeline")
+        let response = await LoopbackServer(service: fixture.service).handle(
+            method: "GET", path: "/tasks/\(task.id.uuidString)/timeline", body: Data(), peerHost: "127.0.0.1")
+
+        XCTAssertEqual(response.status, 200)
+        let events = try JSONDecoder().decode([TimelineEvent].self, from: response.body)
+        XCTAssertEqual(events.map(\.summary), ["task created"])
+        XCTAssertEqual(events.first?.target, "local task service")
+    }
 }
 
 private final class Fixture: @unchecked Sendable {

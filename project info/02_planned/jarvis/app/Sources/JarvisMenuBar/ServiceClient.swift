@@ -61,6 +61,7 @@ public final class ServiceClient: ObservableObject {
     @Published public private(set) var tasks: [Task] = []
     @Published public private(set) var selectedTask: Task?
     @Published public private(set) var approvalRequests: [UUID: ApprovalRequest] = [:]
+    @Published public private(set) var timelineEvents: [UUID: [TimelineEvent]] = [:]
     @Published public private(set) var serviceError: ServiceClientError?
 
     private var baseURL: URL
@@ -102,6 +103,27 @@ public final class ServiceClient: ObservableObject {
 
     public func select(_ task: Task?) { selectedTask = task }
 
+    @discardableResult
+    public func createTask(title: String) async throws -> Task {
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty else { throw ServiceClientError.http(status: 400, message: "task title is required") }
+        var request = URLRequest(url: baseURL.appendingPathComponent("tasks"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(["title": trimmedTitle])
+        do {
+            let (data, response) = try await session.data(for: request)
+            try Self.validate(response: response, data: data)
+            let task: Task
+            do { task = try Self.decoder.decode(Task.self, from: data) }
+            catch { throw ServiceClientError.decoding }
+            selectedTask = task
+            _ = try await refresh()
+            return task
+        } catch let error as ServiceClientError { serviceError = error; throw error }
+        catch { serviceError = .unavailable; throw ServiceClientError.unavailable }
+    }
+
     public func loadTask(id: UUID) async throws -> Task {
         let (data, _) = try await request(path: "/tasks/\(id.uuidString)", method: "GET")
         let task: Task
@@ -116,7 +138,18 @@ public final class ServiceClient: ObservableObject {
         do {
             let requests = try Self.decoder.decode([ApprovalRequest].self, from: data)
             approvalRequests = Dictionary(uniqueKeysWithValues: requests.map { ($0.id, $0) })
+            serviceError = nil
             return requests
+        } catch { throw ServiceClientError.decoding }
+    }
+
+    public func loadTimeline(taskID: UUID) async throws -> [TimelineEvent] {
+        let (data, _) = try await request(path: "/tasks/\(taskID.uuidString)/timeline", method: "GET")
+        do {
+            let events = try Self.decoder.decode([TimelineEvent].self, from: data)
+            timelineEvents[taskID] = events
+            serviceError = nil
+            return events
         } catch { throw ServiceClientError.decoding }
     }
 

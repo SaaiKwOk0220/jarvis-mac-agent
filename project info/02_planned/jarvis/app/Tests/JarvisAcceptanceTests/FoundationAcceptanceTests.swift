@@ -47,7 +47,16 @@ final class FoundationAcceptanceTests: XCTestCase {
         XCTAssertEqual(cancelledStatus, .cancelled)
 
         let events = try audits.events(for: task.id)
-        XCTAssertTrue(events.contains { $0.summary == "approval accepted" })
+        XCTAssertEqual(events.map(\.summary), [
+            "task created", "task transitioned", "task transitioned", "tool request received",
+            "policy allowed", "tool result", "tool request received", "policy requires approval",
+            "approval rejected", "approval accepted", "tool result"
+        ])
+        XCTAssertEqual(events.map(\.result), [
+            "created", "draft -> planning", "planning -> running", "received", "allowed",
+            "demo executor completed", "received", "local write changes local state", "digest mismatch",
+            "approved", "demo executor completed"
+        ])
         XCTAssertFalse(events.contains { $0.result.contains("should-redact") })
     }
 }

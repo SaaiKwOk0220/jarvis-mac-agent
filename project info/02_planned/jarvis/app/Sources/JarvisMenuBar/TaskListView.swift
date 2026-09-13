@@ -3,7 +3,9 @@ import JarvisDomain
 
 struct TaskListView: View {
     @ObservedObject var client: ServiceClient
-    @Binding var showingDetail: Bool
+    @Environment(\.openWindow) private var openWindow
+    @State private var newTaskTitle = ""
+    @State private var isCreating = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -14,6 +16,13 @@ struct TaskListView: View {
                     .buttonStyle(.borderless)
             }
             Divider()
+            HStack {
+                TextField("New task", text: $newTaskTitle)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { createTask() }
+                Button("Add") { createTask() }
+                    .disabled(isCreating || newTaskTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
             if client.tasks.isEmpty {
                 Text(client.serviceError?.localizedDescription ?? "No tasks yet")
                     .foregroundStyle(.secondary)
@@ -21,7 +30,8 @@ struct TaskListView: View {
             } else {
                 ForEach(client.tasks) { task in
                     Button {
-                        client.select(task); showingDetail = true
+                        client.select(task)
+                        openWindow(id: "task-detail")
                     } label: {
                         HStack {
                             Circle().fill(color(for: task.status)).frame(width: 8, height: 8)
@@ -46,5 +56,17 @@ struct TaskListView: View {
 
     private func color(for status: TaskStatus) -> Color {
         switch status { case .completed: return .green; case .failed, .blocked: return .red; case .awaitingApproval: return .orange; case .cancelled: return .gray; default: return .blue }
+    }
+
+    private func createTask() {
+        let title = newTaskTitle
+        isCreating = true
+        Swift.Task {
+            defer { isCreating = false }
+            guard let task = try? await client.createTask(title: title) else { return }
+            newTaskTitle = ""
+            client.select(task)
+            openWindow(id: "task-detail")
+        }
     }
 }

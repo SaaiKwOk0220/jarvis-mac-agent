@@ -80,4 +80,36 @@ final class ServiceClientTests: XCTestCase {
         try await client.approve(requests[0])
         XCTAssertNil(client.serviceError)
     }
+
+    func testLoadsTimelineFromRealLoopbackServer() async throws {
+        let database = try Database(path: ":memory:")
+        try database.migrate()
+        let service = try TaskService(taskRepository: SQLiteTaskRepository(database: database),
+            auditRepository: SQLiteAuditRepository(database: database), policy: Policy())
+        let task = try await service.createTask(title: "Network timeline")
+        let server = LoopbackServer(service: service)
+        let port = try await server.start()
+        defer { server.stop() }
+
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let events = try await client.loadTimeline(taskID: task.id)
+        XCTAssertEqual(events.map(\.summary), ["task created"])
+        XCTAssertEqual(client.timelineEvents[task.id]?.count, 1)
+    }
+
+    func testCreatesAndSelectsTaskThroughRealLoopbackServer() async throws {
+        let database = try Database(path: ":memory:")
+        try database.migrate()
+        let service = try TaskService(taskRepository: SQLiteTaskRepository(database: database),
+            auditRepository: SQLiteAuditRepository(database: database), policy: Policy())
+        let server = LoopbackServer(service: service)
+        let port = try await server.start()
+        defer { server.stop() }
+
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let task = try await client.createTask(title: "Created from menu")
+        XCTAssertEqual(task.title, "Created from menu")
+        XCTAssertEqual(client.selectedTask?.id, task.id)
+        XCTAssertEqual(client.tasks.map(\.id), [task.id])
+    }
 }

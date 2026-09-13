@@ -143,6 +143,7 @@ public protocol TaskServiceAPI: Sendable {
     func reject(requestID: UUID) async throws
     func cancel(taskID: UUID) async throws
     func listPendingApprovalRequests(taskID: UUID) async throws -> [PendingApprovalRequest]
+    func listTimelineEvents(taskID: UUID) async throws -> [TimelineEvent]
 }
 
 /// Digest-bound metadata exposed to the local approval UI. Payload is already redacted.
@@ -156,5 +157,25 @@ public struct PendingApprovalRequest: Codable, Equatable, Sendable, Identifiable
 
     public init(id: UUID, taskID: UUID, reason: String, target: String, payload: String, digest: String) {
         self.id = id; self.taskID = taskID; self.reason = reason; self.target = target; self.payload = payload; self.digest = digest
+    }
+}
+
+/// Redacted, user-visible record of a task transition or tool decision.
+public struct TimelineEvent: Codable, Equatable, Sendable, Identifiable {
+    public let id: UUID
+    public let timestamp: Date
+    public let worker: String
+    public let target: String
+    public let sideEffect: SideEffect
+    public let actionDigest: String
+    public let summary: String
+    public let result: String
+    public let approvalID: UUID?
+
+    public init(id: UUID, timestamp: Date, worker: String, target: String, sideEffect: SideEffect,
+                actionDigest: String, summary: String, result: String, approvalID: UUID?) {
+        self.id = id; self.timestamp = timestamp; self.worker = worker; self.target = target
+        self.sideEffect = sideEffect; self.actionDigest = actionDigest; self.summary = summary
+        self.result = result; self.approvalID = approvalID
     }
 }

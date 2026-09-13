@@ -74,6 +74,16 @@ public final class Database: @unchecked Sendable {
             }
         }
 
+        // Timestamps can share a clock tick; retain append order for a reliable UI timeline.
+        migrator.registerMigration("persist audit event order") { database in
+            let existing = Set(try database.columns(in: "audit_events").map(\.name))
+            if !existing.contains("event_order") {
+                try database.alter(table: "audit_events") { $0.add(column: "event_order", .integer) }
+                try database.execute(sql: "UPDATE audit_events SET event_order = rowid WHERE event_order IS NULL")
+            }
+            try database.execute(sql: "CREATE UNIQUE INDEX IF NOT EXISTS audit_events_event_order ON audit_events(event_order)")
+        }
+
         try migrator.migrate(queue)
     }
 

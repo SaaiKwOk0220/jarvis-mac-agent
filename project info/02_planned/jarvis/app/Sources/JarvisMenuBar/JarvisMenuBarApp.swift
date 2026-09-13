@@ -8,7 +8,6 @@ import JarvisService
 struct JarvisMenuBarApp: App {
     @StateObject private var client: ServiceClient
     private let runtime: Runtime
-    @State private var showingDetail = false
 
     init() {
         let client = ServiceClient()
@@ -18,7 +17,7 @@ struct JarvisMenuBarApp: App {
 
     var body: some Scene {
         MenuBarExtra("Jarvis", systemImage: "bolt.horizontal.circle") {
-            TaskListView(client: client, showingDetail: $showingDetail)
+            TaskListView(client: client)
         }
         Window("Jarvis Task", id: "task-detail") {
             TaskDetailView(client: client)

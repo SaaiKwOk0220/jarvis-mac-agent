@@ -303,7 +303,10 @@ private func ensureTaskNotTerminal(_ id: UUID, db: GRDB.Database) throws { guard
 private func insertToolRequest(_ request: ToolRequest, status: ToolRequestStatus, db: GRDB.Database) throws { try db.execute(sql: "INSERT INTO tool_requests (id,task_id,name,side_effect,target,payload,browser_profile,working_directory,payload_digest,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)", arguments: [request.id.uuidString,request.taskID.uuidString,request.name,request.sideEffect.rawValue,request.target,request.payload,request.scope?.browserProfile,request.scope?.workingDirectory,request.payloadDigest,status.rawValue,Date()]) }
 private func updateToolRequest(_ id: UUID, to status: ToolRequestStatus, db: GRDB.Database) throws { try db.execute(sql: "UPDATE tool_requests SET status = ? WHERE id = ?", arguments: [status.rawValue,id.uuidString]) }
 private func insertApproval(_ approval: Approval, db: GRDB.Database) throws { try db.execute(sql: "INSERT INTO approvals (id,tool_request_id,action_digest,decision,decided_at) VALUES (?,?,?,?,?)", arguments: [approval.id.uuidString,approval.toolRequestID.uuidString,approval.actionDigest,approval.decision.rawValue,approval.decidedAt]) }
-private func insertAudit(_ event: AuditEvent, db: GRDB.Database) throws { try db.execute(sql: "INSERT INTO audit_events (id,timestamp,task_id,worker,target,side_effect,action_digest,summary,result,approval_id) VALUES (?,?,?,?,?,?,?,?,?,?)", arguments: [event.id.uuidString,event.timestamp,event.taskID.uuidString,redactSecrets(event.worker),redactSecrets(event.target),event.sideEffect.rawValue,redactSecrets(event.actionDigest),redactSecrets(event.summary),redactSecrets(event.result),event.approvalID?.uuidString]) }
+private func nextAuditOrder(db: GRDB.Database) throws -> Int64 {
+    try Int64.fetchOne(db, sql: "SELECT COALESCE(MAX(event_order), 0) + 1 FROM audit_events") ?? 1
+}
+private func insertAudit(_ event: AuditEvent, db: GRDB.Database) throws { try db.execute(sql: "INSERT INTO audit_events (id,timestamp,task_id,worker,target,side_effect,action_digest,summary,result,approval_id,event_order) VALUES (?,?,?,?,?,?,?,?,?,?,?)", arguments: [event.id.uuidString,event.timestamp,event.taskID.uuidString,redactSecrets(event.worker),redactSecrets(event.target),event.sideEffect.rawValue,redactSecrets(event.actionDigest),redactSecrets(event.summary),redactSecrets(event.result),event.approvalID?.uuidString,try nextAuditOrder(db: db)]) }
 
 public final class SQLiteAuditRepository: AuditRepository, @unchecked Sendable {
     public let database: Database
@@ -317,8 +320,8 @@ public final class SQLiteAuditRepository: AuditRepository, @unchecked Sendable {
             try db.execute(
                 sql: """
                     INSERT INTO audit_events
-                    (id, timestamp, task_id, worker, target, side_effect, action_digest, summary, result, approval_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, timestamp, task_id, worker, target, side_effect, action_digest, summary, result, approval_id, event_order)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                 arguments: [
                     event.id.uuidString,
@@ -331,6 +334,7 @@ public final class SQLiteAuditRepository: AuditRepository, @unchecked Sendable {
                     redactSecrets(event.summary),
                     redactSecrets(event.result),
                     event.approvalID?.uuidString,
+                    try nextAuditOrder(db: db),
                 ]
             )
         }
@@ -340,7 +344,7 @@ public final class SQLiteAuditRepository: AuditRepository, @unchecked Sendable {
         try database.read { db in
             try Row.fetchAll(
                 db,
-                sql: "SELECT * FROM audit_events WHERE task_id = ? ORDER BY timestamp ASC, id ASC",
+                sql: "SELECT * FROM audit_events WHERE task_id = ? ORDER BY timestamp ASC, event_order ASC",
                 arguments: [taskID.uuidString]
             ).map(auditEvent(from:))
         }

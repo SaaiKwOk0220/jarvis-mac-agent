@@ -98,6 +98,22 @@ final class RepositoryTests: XCTestCase {
         XCTAssertEqual(events[1].result, "cookie=session=[REDACTED]")
     }
 
+    func testAuditEventsWithTheSameTimestampKeepAppendOrder() throws {
+        let database = try migratedDatabase()
+        let repository = SQLiteAuditRepository(database: database)
+        let taskID = UUID()
+        let timestamp = Date(timeIntervalSince1970: 1_725_000_000)
+        let first = AuditEvent(timestamp: timestamp, taskID: taskID, worker: "worker", target: "one",
+            sideEffect: .read, actionDigest: "one", summary: "first", result: "one", approvalID: nil)
+        let second = AuditEvent(timestamp: timestamp, taskID: taskID, worker: "worker", target: "two",
+            sideEffect: .read, actionDigest: "two", summary: "second", result: "two", approvalID: nil)
+
+        try repository.append(first)
+        try repository.append(second)
+
+        XCTAssertEqual(try repository.events(for: taskID).map(\.id), [first.id, second.id])
+    }
+
     func testRedactSecretsCoversRepresentativeSecretShapes() {
         XCTAssertEqual(redactSecrets("api_key=abc123"), "api_key=[REDACTED]")
         XCTAssertEqual(redactSecrets("Cookie: sid=secret"), "Cookie: [REDACTED]")
