@@ -19,6 +19,7 @@ struct JarvisMenuBarApp: App {
         MenuBarExtra("Jarvis", systemImage: "bolt.horizontal.circle") {
             TaskListView(client: client)
         }
+        .menuBarExtraStyle(.window)
         Window("Jarvis Task", id: "task-detail") {
             TaskDetailView(client: client)
                 .frame(minWidth: 420, minHeight: 360)
