@@ -11,6 +11,9 @@ struct ApprovalView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            if let actionError = client.actionError {
+                Text(actionError).font(.caption).foregroundStyle(.red)
+            }
             Label("Approval required", systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
             Text("The requested action is paused until you explicitly approve or reject it.")
                 .font(.callout)
@@ -26,21 +29,33 @@ struct ApprovalView: View {
             }
             HStack {
                 Button("Reject", role: .destructive) {
-                    guard let request else { return }; submitting = true
+                    guard let request else { return }
+                    submitting = true
+                    client.clearActionError()
                     Swift.Task {
                         defer { submitting = false }
-                        try? await client.reject(request)
-                        _ = try? await client.loadTimeline(taskID: task.id)
+                        do {
+                            try await client.reject(request)
+                            _ = try? await client.loadTimeline(taskID: task.id)
+                        } catch {
+                            // client.actionError already published by ServiceClient
+                        }
                     }
                 }
                     .disabled(submitting)
                 Spacer()
                 Button("Approve") {
-                    guard let request, !request.digest.isEmpty else { return }; submitting = true
+                    guard let request, !request.digest.isEmpty else { return }
+                    submitting = true
+                    client.clearActionError()
                     Swift.Task {
                         defer { submitting = false }
-                        try? await client.approve(request)
-                        _ = try? await client.loadTimeline(taskID: task.id)
+                        do {
+                            try await client.approve(request)
+                            _ = try? await client.loadTimeline(taskID: task.id)
+                        } catch {
+                            // client.actionError already published by ServiceClient
+                        }
                     }
                 }
                     .disabled(submitting || request == nil || digest.isEmpty)

@@ -130,6 +130,10 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
 
     public func cancel(taskID: UUID) async throws {
         try lock.withLock {
+            let task = try requiredTask(taskID)
+            if task.status == .cancelled || task.status == .completed || task.status == .failed {
+                throw TaskServiceError.illegalTransition(from: task.status, to: .cancelled)
+            }
             for (requestID, job) in executions {
                 if let (request, _) = try requests.fetch(id: requestID), request.taskID == taskID { job.cancel() }
             }
@@ -168,13 +172,17 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
         _ = lock.withLock { executions.removeValue(forKey: requestID) }
     }
 
+    /// On a successful executor run the task transitions to `.completed`.
+    /// Further `submit(request:)` calls on this task will throw
+    /// `TaskServiceError.illegalTransition(from: .completed, to: .running)`,
+    /// so each task carries at most one tool request in this foundation.
     private func execute(_ request: ToolRequest) async throws {
         do {
             try lock.withLock { guard let (_, status) = try requests.fetch(id: request.id), status == .executing else { throw TaskServiceError.requestNotAwaitingApproval }; try requireRunning(request.taskID) }
             let result = try await executor.execute(request)
             try lock.withLock {
                 guard let task = try tasks.fetch(id: request.taskID), task.status != .cancelled else { return }
-                try uow.finishRequest(request, status: .completed, taskStatus: nil, audits: [event(request, summary: "tool result", result: bounded(result.summary))])
+                try uow.finishRequest(request, status: .completed, taskStatus: .completed, audits: [event(request, summary: "tool result", result: bounded(result.summary))])
             }
         } catch is CancellationError {
             // Cancellation transaction already sets request and task to cancelled; never add success/failure after it.
