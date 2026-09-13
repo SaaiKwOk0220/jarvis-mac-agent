@@ -130,6 +130,10 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
 
     public func cancel(taskID: UUID) async throws {
         try lock.withLock {
+            let task = try requiredTask(taskID)
+            if task.status == .cancelled || task.status == .completed || task.status == .failed {
+                throw TaskServiceError.illegalTransition(from: task.status, to: .cancelled)
+            }
             for (requestID, job) in executions {
                 if let (request, _) = try requests.fetch(id: requestID), request.taskID == taskID { job.cancel() }
             }

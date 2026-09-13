@@ -165,6 +165,8 @@ final class ServiceClientTests: XCTestCase {
             // Expected
         }
         XCTAssertNotNil(client.actionError)
+        XCTAssertTrue(client.actionError?.contains("409") == true,
+                      "expected 409 in error message, got: \(client.actionError ?? "<nil>")")
     }
 
     func testClearActionErrorResetsPublishedValue() async throws {
