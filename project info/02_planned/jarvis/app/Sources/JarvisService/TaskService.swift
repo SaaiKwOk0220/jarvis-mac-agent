@@ -45,9 +45,9 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
         self.tasks = taskRepository; self.audits = auditRepository; self.policy = policy; self.config = policyConfig; self.executor = executor
     }
 
-    public func createTask(title: String) async throws -> Task { try lock.withLock { let task = Task(title: title); try uow.createTask(task, audit: event(taskID: task.id, summary: "task created", result: "created")); return task } }
-    public func getTask(id: UUID) async throws -> Task? { try lock.withLock { try tasks.fetch(id: id) } }
-    public func listTasks() async throws -> [Task] { try lock.withLock { try tasks.list() } }
+    public func createTask(title: String) async throws -> JarvisTask { try lock.withLock { let task = JarvisTask(title: title); try uow.createTask(task, audit: event(taskID: task.id, summary: "task created", result: "created")); return task } }
+    public func getTask(id: UUID) async throws -> JarvisTask? { try lock.withLock { try tasks.fetch(id: id) } }
+    public func listTasks() async throws -> [JarvisTask] { try lock.withLock { try tasks.list() } }
 
     public func listPendingApprovalRequests(taskID: UUID) async throws -> [PendingApprovalRequest] {
         try lock.withLock {
@@ -197,8 +197,8 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
 
     private func ensureRunning(_ id: UUID) throws { let task = try requiredTask(id); switch task.status { case .draft: try transition(task, to: .planning); try transition(try requiredTask(id), to: .running); case .planning: try transition(task, to: .running); case .running: return; default: throw TaskServiceError.illegalTransition(from: task.status, to: .running) } }
     private func requireRunning(_ id: UUID) throws { guard (try requiredTask(id)).status == .running else { throw TaskServiceError.illegalTransition(from: try requiredTask(id).status, to: .running) } }
-    private func requiredTask(_ id: UUID) throws -> Task { guard let task = try tasks.fetch(id: id) else { throw TaskServiceError.taskNotFound }; return task }
-    private func transition(_ task: Task, to: TaskStatus) throws { do { try TaskStateMachine.validate(from: task.status, to: to) } catch { throw TaskServiceError.illegalTransition(from: task.status, to: to) }; try uow.transition(taskID: task.id, from: task.status, to: to, audits: [event(taskID: task.id, summary: "task transitioned", result: "\(task.status.rawValue) -> \(to.rawValue)")]) }
+    private func requiredTask(_ id: UUID) throws -> JarvisTask { guard let task = try tasks.fetch(id: id) else { throw TaskServiceError.taskNotFound }; return task }
+    private func transition(_ task: JarvisTask, to: TaskStatus) throws { do { try TaskStateMachine.validate(from: task.status, to: to) } catch { throw TaskServiceError.illegalTransition(from: task.status, to: to) }; try uow.transition(taskID: task.id, from: task.status, to: to, audits: [event(taskID: task.id, summary: "task transitioned", result: "\(task.status.rawValue) -> \(to.rawValue)")]) }
     private func bounded(_ summary: String) -> String { String(redactSecrets(summary).prefix(512)) }
     private func event(_ request: ToolRequest, summary: String, result: String, approvalID: UUID? = nil) -> AuditEvent { event(taskID: request.taskID, sideEffect: request.sideEffect, digest: request.payloadDigest, summary: summary, result: result, approvalID: approvalID, target: request.target) }
     private func event(taskID: UUID, sideEffect: SideEffect = .read, digest: String = "", summary: String, result: String, approvalID: UUID? = nil, target: String = "local task service") -> AuditEvent { AuditEvent(taskID: taskID, worker: "task-service", target: target, sideEffect: sideEffect, actionDigest: digest, summary: summary, result: result, approvalID: approvalID) }

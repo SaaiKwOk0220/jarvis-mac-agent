@@ -92,10 +92,10 @@ public struct PolicyRule: Codable, Identifiable, Sendable, Equatable {
 }
 
 public protocol TaskRepository: Sendable {
-    func insert(_ task: Task) throws
+    func insert(_ task: JarvisTask) throws
     func updateStatus(_ id: UUID, status: TaskStatus, updatedAt: Date) throws
-    func fetch(id: UUID) throws -> Task?
-    func list() throws -> [Task]
+    func fetch(id: UUID) throws -> JarvisTask?
+    func list() throws -> [JarvisTask]
 }
 
 public enum ToolRequestStatus: String, Codable, Sendable, Equatable {
@@ -115,7 +115,7 @@ public protocol ToolRequestRepository: Sendable {
 }
 
 public protocol PersistenceUnitOfWork: Sendable {
-    func createTask(_ task: Task, audit: AuditEvent) throws
+    func createTask(_ task: JarvisTask, audit: AuditEvent) throws
     func submitRequest(_ request: ToolRequest, status: ToolRequestStatus, taskStatus: TaskStatus, audits: [AuditEvent]) throws
     func approveRequest(_ request: ToolRequest, approval: Approval, taskStatus: TaskStatus, audits: [AuditEvent]) throws
     func rejectRequest(_ request: ToolRequest, approval: Approval, taskStatus: TaskStatus, audits: [AuditEvent]) throws
@@ -150,7 +150,7 @@ public final class SQLiteTaskRepository: TaskRepository, @unchecked Sendable {
         self.database = database
     }
 
-    public func insert(_ task: Task) throws {
+    public func insert(_ task: JarvisTask) throws {
         try database.write { db in
             try db.execute(
                 sql: """
@@ -171,7 +171,7 @@ public final class SQLiteTaskRepository: TaskRepository, @unchecked Sendable {
         }
     }
 
-    public func fetch(id: UUID) throws -> Task? {
+    public func fetch(id: UUID) throws -> JarvisTask? {
         try database.read { db in
             guard let row = try Row.fetchOne(db, sql: "SELECT * FROM tasks WHERE id = ?", arguments: [id.uuidString]) else {
                 return nil
@@ -180,7 +180,7 @@ public final class SQLiteTaskRepository: TaskRepository, @unchecked Sendable {
         }
     }
 
-    public func list() throws -> [Task] {
+    public func list() throws -> [JarvisTask] {
         try database.read { db in
             try Row.fetchAll(db, sql: "SELECT * FROM tasks ORDER BY updated_at DESC, id ASC").map(task(from:))
         }
@@ -219,7 +219,7 @@ public final class SQLitePersistenceUnitOfWork: PersistenceUnitOfWork, @unchecke
     public let database: Database
     public init(database: Database) { self.database = database }
 
-    public func createTask(_ task: Task, audit: AuditEvent) throws {
+    public func createTask(_ task: JarvisTask, audit: AuditEvent) throws {
         try database.write { db in
             try insertTask(task, db: db); try insertAudit(audit, db: db)
         }
@@ -296,7 +296,7 @@ private func toolRequest(from row: Row) throws -> (ToolRequest, ToolRequestStatu
     return (request, status)
 }
 
-private func insertTask(_ task: Task, db: GRDB.Database) throws { try db.execute(sql: "INSERT INTO tasks (id,title,status,created_at,updated_at) VALUES (?,?,?,?,?)", arguments: [task.id.uuidString,task.title,task.status.rawValue,task.createdAt,task.updatedAt]) }
+private func insertTask(_ task: JarvisTask, db: GRDB.Database) throws { try db.execute(sql: "INSERT INTO tasks (id,title,status,created_at,updated_at) VALUES (?,?,?,?,?)", arguments: [task.id.uuidString,task.title,task.status.rawValue,task.createdAt,task.updatedAt]) }
 private func updateTask(_ id: UUID, to status: TaskStatus, db: GRDB.Database) throws { try db.execute(sql: "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?", arguments: [status.rawValue,Date(),id.uuidString]) }
 private func ensureTaskStatus(_ id: UUID, equals status: TaskStatus, db: GRDB.Database) throws { guard let current: String = try Row.fetchOne(db, sql: "SELECT status FROM tasks WHERE id = ?", arguments: [id.uuidString])?["status"], current == status.rawValue else { throw PersistenceError.invalidStoredTask } }
 private func ensureTaskNotTerminal(_ id: UUID, db: GRDB.Database) throws { guard let current: String = try Row.fetchOne(db, sql: "SELECT status FROM tasks WHERE id = ?", arguments: [id.uuidString])?["status"], current != TaskStatus.cancelled.rawValue, current != TaskStatus.completed.rawValue else { throw PersistenceError.invalidStoredTask } }
@@ -442,7 +442,7 @@ public final class SQLitePolicyRuleRepository: PolicyRuleRepository, @unchecked 
     }
 }
 
-private func task(from row: Row) throws -> Task {
+private func task(from row: Row) throws -> JarvisTask {
     do {
         let idText: String = try row.decode(forColumn: "id")
         let statusText: String = try row.decode(forColumn: "status")
@@ -456,7 +456,7 @@ private func task(from row: Row) throws -> Task {
         let title: String = try row.decode(forColumn: "title")
         let createdAt: Date = try row.decode(forColumn: "created_at")
         let updatedAt: Date = try row.decode(forColumn: "updated_at")
-        return Task(
+        return JarvisTask(
             id: id,
             title: title,
             status: status,

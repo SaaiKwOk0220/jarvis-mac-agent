@@ -265,15 +265,15 @@ final class TaskServiceTests: XCTestCase {
             peerHost: "127.0.0.1"
         )
         XCTAssertEqual(create.status, 201)
-        let task = try JSONDecoder().decode(Task.self, from: create.body)
+        let task = try JSONDecoder().decode(JarvisTask.self, from: create.body)
 
         let list = await server.handle(method: "GET", path: "/tasks", body: Data(), peerHost: "::1")
         XCTAssertEqual(list.status, 200)
-        XCTAssertEqual(try JSONDecoder().decode([Task].self, from: list.body).map(\.id), [task.id])
+        XCTAssertEqual(try JSONDecoder().decode([JarvisTask].self, from: list.body).map(\.id), [task.id])
 
         let detail = await server.handle(method: "GET", path: "/tasks/\(task.id.uuidString)", body: Data(), peerHost: "127.0.0.1")
         XCTAssertEqual(detail.status, 200)
-        XCTAssertEqual(try JSONDecoder().decode(Task.self, from: detail.body).id, task.id)
+        XCTAssertEqual(try JSONDecoder().decode(JarvisTask.self, from: detail.body).id, task.id)
 
         let cancel = await server.handle(method: "POST", path: "/tasks/\(task.id.uuidString)/cancel", body: Data(), peerHost: "127.0.0.1")
         XCTAssertEqual(cancel.status, 204)
@@ -297,7 +297,7 @@ final class TaskServiceTests: XCTestCase {
         let (data, response) = try await URLSession.shared.data(for: request)
 
         XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 201)
-        XCTAssertEqual(try JSONDecoder().decode(Task.self, from: data).title, "Socket task")
+        XCTAssertEqual(try JSONDecoder().decode(JarvisTask.self, from: data).title, "Socket task")
     }
 
     func testLoopbackServerServesPersistedPendingApprovalMetadata() async throws {

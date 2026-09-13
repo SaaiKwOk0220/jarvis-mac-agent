@@ -3,7 +3,7 @@ import JarvisDomain
 
 struct ApprovalView: View {
     @ObservedObject var client: ServiceClient
-    let task: Task
+    let task: JarvisTask
     @State private var digest = ""
     @State private var submitting = false
 

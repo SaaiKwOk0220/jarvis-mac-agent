@@ -58,8 +58,8 @@ public enum ServiceClientError: Error, Equatable, LocalizedError, Sendable {
 
 @MainActor
 public final class ServiceClient: ObservableObject {
-    @Published public private(set) var tasks: [Task] = []
-    @Published public private(set) var selectedTask: Task?
+    @Published public private(set) var tasks: [JarvisTask] = []
+    @Published public private(set) var selectedTask: JarvisTask?
     @Published public private(set) var approvalRequests: [UUID: ApprovalRequest] = [:]
     @Published public private(set) var timelineEvents: [UUID: [TimelineEvent]] = [:]
     /// Read-side failures (refresh / createTask / loadTimeline /
@@ -92,7 +92,7 @@ public final class ServiceClient: ObservableObject {
     }
 
     @discardableResult
-    public func refresh() async throws -> [Task] {
+    public func refresh() async throws -> [JarvisTask] {
         do {
             let (data, _) = try await request(path: "/tasks", method: "GET")
             let decoded = try Self.decodeTaskList(data, decoder: Self.decoder)
@@ -109,13 +109,13 @@ public final class ServiceClient: ObservableObject {
         }
     }
 
-    public func select(_ task: Task?) { selectedTask = task }
+    public func select(_ task: JarvisTask?) { selectedTask = task }
 
     /// Clears the last published action error (e.g. when the user retries a button).
     public func clearActionError() { actionError = nil }
 
     @discardableResult
-    public func createTask(title: String) async throws -> Task {
+    public func createTask(title: String) async throws -> JarvisTask {
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedTitle.isEmpty else { throw ServiceClientError.http(status: 400, message: "task title is required") }
         var request = URLRequest(url: baseURL.appendingPathComponent("tasks"))
@@ -125,8 +125,8 @@ public final class ServiceClient: ObservableObject {
         do {
             let (data, response) = try await session.data(for: request)
             try Self.validate(response: response, data: data)
-            let task: Task
-            do { task = try Self.decoder.decode(Task.self, from: data) }
+            let task: JarvisTask
+            do { task = try Self.decoder.decode(JarvisTask.self, from: data) }
             catch { throw ServiceClientError.decoding }
             selectedTask = task
             _ = try await refresh()
@@ -135,10 +135,10 @@ public final class ServiceClient: ObservableObject {
         catch { serviceError = .unavailable; throw ServiceClientError.unavailable }
     }
 
-    public func loadTask(id: UUID) async throws -> Task {
+    public func loadTask(id: UUID) async throws -> JarvisTask {
         let (data, _) = try await request(path: "/tasks/\(id.uuidString)", method: "GET")
-        let task: Task
-        do { task = try Self.decoder.decode(Task.self, from: data) } catch { throw ServiceClientError.decoding }
+        let task: JarvisTask
+        do { task = try Self.decoder.decode(JarvisTask.self, from: data) } catch { throw ServiceClientError.decoding }
         selectedTask = task
         return task
     }
@@ -276,8 +276,8 @@ public final class ServiceClient: ObservableObject {
         }
     }
 
-    public static func decodeTaskList(_ data: Data, decoder: JSONDecoder = JSONDecoder()) throws -> [Task] {
-        do { return try decoder.decode([Task].self, from: data) } catch { throw ServiceClientError.decoding }
+    public static func decodeTaskList(_ data: Data, decoder: JSONDecoder = JSONDecoder()) throws -> [JarvisTask] {
+        do { return try decoder.decode([JarvisTask].self, from: data) } catch { throw ServiceClientError.decoding }
     }
 
     public static func decodeApprovalRequest(_ data: Data, decoder: JSONDecoder = JSONDecoder()) throws -> ApprovalRequest {

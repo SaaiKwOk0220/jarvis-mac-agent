@@ -26,7 +26,7 @@ final class RepositoryTests: XCTestCase {
         let createdAt = Date(timeIntervalSince1970: 1_725_000_000)
         let initialUpdate = Date(timeIntervalSince1970: 1_725_000_001)
         let updatedAt = Date(timeIntervalSince1970: 1_725_000_002)
-        let task = Task(
+        let task = JarvisTask(
             title: "Prepare a release",
             status: .planning,
             createdAt: createdAt,

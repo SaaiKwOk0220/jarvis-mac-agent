@@ -11,7 +11,7 @@ public enum TaskStatus: String, Codable, CaseIterable, Equatable, Sendable {
     case completed
 }
 
-public struct Task: Codable, Identifiable, Sendable {
+public struct JarvisTask: Codable, Identifiable, Sendable {
     public let id: UUID
     public var title: String
     public var status: TaskStatus

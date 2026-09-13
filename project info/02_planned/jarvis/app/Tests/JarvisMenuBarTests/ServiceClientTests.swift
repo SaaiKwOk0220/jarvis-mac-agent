@@ -11,7 +11,7 @@ final class ServiceClientTests: XCTestCase {
 
     func testDecodesTaskList() throws {
         let id = UUID()
-        let body = try JSONEncoder().encode([Task(id: id, title: "demo")])
+        let body = try JSONEncoder().encode([JarvisTask(id: id, title: "demo")])
         let tasks = try ServiceClient.decodeTaskList(body, decoder: decoder)
         XCTAssertEqual(tasks.first?.id, id)
         XCTAssertEqual(tasks.first?.title, "demo")

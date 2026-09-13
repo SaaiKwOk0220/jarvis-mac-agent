@@ -136,9 +136,9 @@ public struct ToolRequest: Codable, Identifiable, Sendable {
 }
 
 public protocol TaskServiceAPI: Sendable {
-    func createTask(title: String) async throws -> Task
-    func getTask(id: UUID) async throws -> Task?
-    func listTasks() async throws -> [Task]
+    func createTask(title: String) async throws -> JarvisTask
+    func getTask(id: UUID) async throws -> JarvisTask?
+    func listTasks() async throws -> [JarvisTask]
     func approve(requestID: UUID, digest: String) async throws
     func reject(requestID: UUID) async throws
     func cancel(taskID: UUID) async throws

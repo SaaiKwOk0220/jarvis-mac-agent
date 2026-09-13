@@ -86,7 +86,7 @@ struct TaskDetailView: View {
             .background(.quaternary, in: Capsule())
     }
 
-    @ViewBuilder private func timeline(for selectedTask: Task) -> some View {
+    @ViewBuilder private func timeline(for selectedTask: JarvisTask) -> some View {
         let events = client.timelineEvents[selectedTask.id] ?? []
         if events.isEmpty {
             Text("No events have been recorded yet.").font(.caption).foregroundStyle(.secondary)
