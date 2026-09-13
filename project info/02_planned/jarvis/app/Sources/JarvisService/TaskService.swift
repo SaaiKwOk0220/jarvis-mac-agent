@@ -8,7 +8,12 @@ public protocol ToolExecutor: Sendable { func execute(_ request: ToolRequest) as
 public struct NoOpToolExecutor: ToolExecutor { public init() {} ; public func execute(_ request: ToolRequest) async throws -> ToolResult { ToolResult(summary: "demo executor completed") } }
 public enum TaskServiceError: Error, Equatable, Sendable { case taskNotFound, requestNotFound, requestNotAwaitingApproval, approvalDigestMismatch, illegalTransition(from: TaskStatus, to: TaskStatus), incompatiblePersistence }
 
-public final class TaskService: TaskServiceAPI, @unchecked Sendable {
+/// Narrow capability used only by the bundled UI to exercise the approval flow.
+public protocol DemoTaskServiceAPI: TaskServiceAPI {
+    func submitDemoApproval(taskID: UUID) async throws
+}
+
+public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     private let tasks: any TaskRepository
     private let audits: any AuditRepository
     private let requests: any ToolRequestRepository
@@ -69,6 +74,14 @@ public final class TaskService: TaskServiceAPI, @unchecked Sendable {
                     approvalID: event.approvalID)
             }
         }
+    }
+
+    public func submitDemoApproval(taskID: UUID) async throws {
+        guard let directory = config.approvedDirectories.first else { throw TaskServiceError.incompatiblePersistence }
+        let target = URL(fileURLWithPath: directory).appendingPathComponent("Jarvis demo draft.txt").path
+        let request = ToolRequest(taskID: taskID, name: "demo_write", sideEffect: .localWrite,
+            target: target, payload: "Create a local demo draft")
+        _ = try await submit(request: request)
     }
 
     public func submit(request: ToolRequest) async throws -> PolicyDecision {

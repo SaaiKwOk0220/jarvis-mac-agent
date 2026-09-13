@@ -4,6 +4,7 @@ import JarvisDomain
 struct TaskDetailView: View {
     @ObservedObject var client: ServiceClient
     @State private var isCancelling = false
+    @State private var isStartingDemo = false
 
     var body: some View {
         Group {
@@ -15,11 +16,29 @@ struct TaskDetailView: View {
                         Divider()
                         Text("Approval timeline").font(.headline)
                         timeline(for: task)
+                        if task.status == .draft {
+                            Button {
+                                isStartingDemo = true
+                                Swift.Task {
+                                    defer { isStartingDemo = false }
+                                    try? await client.startDemoApproval(taskID: task.id)
+                                }
+                            } label: {
+                                Label(isStartingDemo ? "Starting demo…" : "Start demo approval", systemImage: "play.circle")
+                            }
+                            .disabled(isStartingDemo)
+                            Text("Creates a local draft proposal and pauses for your digest-bound approval. The demo executor does not write files.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                         if task.status == .awaitingApproval { ApprovalView(client: client, task: task) }
                         if [.draft, .planning, .running, .awaitingApproval].contains(task.status) {
                             Button(role: .destructive) {
                                 isCancelling = true
-                                Swift.Task { defer { isCancelling = false }; try? await client.cancel(taskID: task.id) }
+                                Swift.Task {
+                                    defer { isCancelling = false }
+                                    try? await client.cancel(taskID: task.id)
+                                    _ = try? await client.loadTimeline(taskID: task.id)
+                                }
                             } label: { Label(isCancelling ? "Cancelling…" : "Cancel task", systemImage: "xmark.circle") }
                             .disabled(isCancelling)
                         }

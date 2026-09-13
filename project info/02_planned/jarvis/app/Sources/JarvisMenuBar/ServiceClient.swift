@@ -172,6 +172,13 @@ public final class ServiceClient: ObservableObject {
         try await refresh()
     }
 
+    public func startDemoApproval(taskID: UUID) async throws {
+        try await mutate(path: "/tasks/\(taskID.uuidString)/demo-approval")
+        _ = try await refresh()
+        _ = try await loadTimeline(taskID: taskID)
+        _ = try await loadApprovalRequests(taskID: taskID)
+    }
+
     private func mutate(path: String, body: [String: String]? = nil) async throws {
         var request = URLRequest(url: baseURL.appendingPathComponent(path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))))
         request.httpMethod = "POST"

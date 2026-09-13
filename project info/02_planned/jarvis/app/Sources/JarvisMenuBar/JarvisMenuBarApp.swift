@@ -40,7 +40,7 @@ private final class Runtime {
             try database.migrate()
             let service = try TaskService(taskRepository: SQLiteTaskRepository(database: database),
                 auditRepository: SQLiteAuditRepository(database: database), policy: Policy(),
-                executor: NoOpToolExecutor())
+                policyConfig: PolicyConfig(approvedDirectories: [appSupport.path]), executor: NoOpToolExecutor())
             let server = LoopbackServer(service: service)
             self.server = server
             Swift.Task { @MainActor in

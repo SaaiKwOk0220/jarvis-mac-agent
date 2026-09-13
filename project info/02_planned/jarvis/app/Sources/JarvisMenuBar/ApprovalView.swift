@@ -27,13 +27,21 @@ struct ApprovalView: View {
             HStack {
                 Button("Reject", role: .destructive) {
                     guard let request else { return }; submitting = true
-                    Swift.Task { defer { submitting = false }; try? await client.reject(request) }
+                    Swift.Task {
+                        defer { submitting = false }
+                        try? await client.reject(request)
+                        _ = try? await client.loadTimeline(taskID: task.id)
+                    }
                 }
                     .disabled(submitting)
                 Spacer()
                 Button("Approve") {
                     guard let request, !request.digest.isEmpty else { return }; submitting = true
-                    Swift.Task { defer { submitting = false }; try? await client.approve(request) }
+                    Swift.Task {
+                        defer { submitting = false }
+                        try? await client.approve(request)
+                        _ = try? await client.loadTimeline(taskID: task.id)
+                    }
                 }
                     .disabled(submitting || request == nil || digest.isEmpty)
             }

@@ -112,4 +112,26 @@ final class ServiceClientTests: XCTestCase {
         XCTAssertEqual(client.selectedTask?.id, task.id)
         XCTAssertEqual(client.tasks.map(\.id), [task.id])
     }
+
+    func testRunsDemoApprovalFlowThroughRealLoopbackServer() async throws {
+        let database = try Database(path: ":memory:")
+        try database.migrate()
+        let service = try TaskService(taskRepository: SQLiteTaskRepository(database: database),
+            auditRepository: SQLiteAuditRepository(database: database), policy: Policy(),
+            policyConfig: PolicyConfig(approvedDirectories: ["/tmp/jarvis-demo"]))
+        let server = LoopbackServer(service: service)
+        let port = try await server.start()
+        defer { server.stop() }
+
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let task = try await client.createTask(title: "Demo approval")
+        try await client.startDemoApproval(taskID: task.id)
+        let request = try XCTUnwrap(client.approvalRequests.values.first)
+        XCTAssertEqual(client.selectedTask?.status, .awaitingApproval)
+        XCTAssertEqual(request.reason, "local write changes local state")
+
+        try await client.approve(request)
+        _ = try await client.loadTimeline(taskID: task.id)
+        XCTAssertTrue(client.timelineEvents[task.id]?.contains { $0.summary == "approval accepted" } == true)
+    }
 }
