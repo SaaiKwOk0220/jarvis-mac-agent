@@ -1,0 +1,85 @@
+import Foundation
+import XCTest
+import JarvisDomain
+import JarvisPersistence
+import JarvisPolicy
+import JarvisService
+
+final class LoopbackServerTests: XCTestCase {
+    private func makeService() throws -> (TaskService, Database, SQLiteTaskRepository, SQLiteAuditRepository, SQLiteToolRequestRepository, SQLiteApprovalRepository) {
+        let database = try Database(path: ":memory:")
+        try database.migrate()
+        let tasks = SQLiteTaskRepository(database: database)
+        let audit = SQLiteAuditRepository(database: database)
+        let requests = SQLiteToolRequestRepository(database: database)
+        let approvals = SQLiteApprovalRepository(database: database)
+        let service = try TaskService(
+            taskRepository: tasks,
+            auditRepository: audit,
+            policy: Policy(),
+            policyConfig: PolicyConfig(
+                approvedDirectories: ["/tmp/jarvis-loopback"],
+                commandNames: ["shell", "swift", "xcodebuild"]
+            ),
+            requestRepository: requests,
+            approvalRepository: approvals,
+            unitOfWork: SQLitePersistenceUnitOfWork(database: database)
+        )
+        return (service, database, tasks, audit, requests, approvals)
+    }
+
+    func testLoopbackServerAcceptsPOSTTaskRequests() async throws {
+        let (service, _, _, _, _, _) = try makeService()
+        let task = try await service.createTask(title: "POST /requests happy path")
+        let server = LoopbackServer(service: service)
+
+        let request = ToolRequest(
+            taskID: task.id,
+            name: "shell",
+            sideEffect: .localExecute,
+            target: "/tmp/jarvis-loopback",
+            payload: "echo posted"
+        )
+        let body = try JSONEncoder().encode(request)
+
+        let response = await server.handle(
+            method: "POST",
+            path: "/tasks/\(task.id.uuidString)/requests",
+            body: body,
+            peerHost: "127.0.0.1"
+        )
+
+        XCTAssertEqual(response.status, 200)
+        let json = try JSONSerialization.jsonObject(with: response.body) as? [String: Any]
+        let decision = try XCTUnwrap(json?["decision"] as? [String: Any])
+        // requireApproval encodes as {"requireApproval":{"_0":"..."}} for the
+        // associated value in Foundation's default Codable representation.
+        XCTAssertNotNil(decision["requireApproval"],
+                        "decision must be requireApproval for a shell request; got: \(decision)")
+    }
+
+    func testLoopbackServerRejectsRequestForUnknownTask() async throws {
+        let (service, _, _, _, _, _) = try makeService()
+        let server = LoopbackServer(service: service)
+        let ghostTaskID = UUID()
+
+        let request = ToolRequest(
+            taskID: ghostTaskID,
+            name: "shell",
+            sideEffect: .localExecute,
+            target: "/tmp/jarvis-loopback",
+            payload: "echo ghost"
+        )
+        let body = try JSONEncoder().encode(request)
+
+        let response = await server.handle(
+            method: "POST",
+            path: "/tasks/\(ghostTaskID.uuidString)/requests",
+            body: body,
+            peerHost: "127.0.0.1"
+        )
+
+        XCTAssertEqual(response.status, 404,
+                       "POST /tasks/{unknown}/requests must return 404; got \(response.status)")
+    }
+}

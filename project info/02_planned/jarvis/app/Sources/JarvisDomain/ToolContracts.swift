@@ -139,11 +139,21 @@ public protocol TaskServiceAPI: Sendable {
     func createTask(title: String) async throws -> JarvisTask
     func getTask(id: UUID) async throws -> JarvisTask?
     func listTasks() async throws -> [JarvisTask]
+    func submit(request: ToolRequest) async throws -> PolicyDecision
     func approve(requestID: UUID, digest: String) async throws
     func reject(requestID: UUID) async throws
     func cancel(taskID: UUID) async throws
     func listPendingApprovalRequests(taskID: UUID) async throws -> [PendingApprovalRequest]
     func listTimelineEvents(taskID: UUID) async throws -> [TimelineEvent]
+}
+
+/// Outcome returned by `TaskServiceAPI.submit(request:)`. Declared in
+/// `JarvisDomain` so the API protocol (which lives here) can refer to it
+/// without forcing `JarvisDomain` to depend on `JarvisPolicy`.
+public enum PolicyDecision: Equatable, Sendable, Codable {
+    case allow
+    case requireApproval(reason: String)
+    case deny(reason: String)
 }
 
 /// Digest-bound metadata exposed to the local approval UI. Payload is already redacted.

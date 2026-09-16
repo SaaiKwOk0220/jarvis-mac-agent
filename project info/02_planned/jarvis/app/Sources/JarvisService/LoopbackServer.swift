@@ -1,6 +1,7 @@
 import Foundation
 import Network
 import JarvisDomain
+import JarvisPolicy
 
 public struct LoopbackResponse: Sendable {
     public let status: Int
@@ -59,6 +60,23 @@ public final class LoopbackServer: @unchecked Sendable {
                 guard let demoService = service as? any DemoTaskServiceAPI else { return error(status: 404, message: "demo executor unavailable") }
                 try await demoService.submitDemoApproval(taskID: taskID)
                 return LoopbackResponse(status: 204)
+            }
+            if verb == "POST", parts.count == 3, parts[0] == "tasks", parts[2] == "requests" {
+                guard let taskID = UUID(uuidString: parts[1]) else { return error(status: 400, message: "invalid task id") }
+                let input = try decoder.decode(ToolRequest.self, from: body)
+                // Force taskID from URL so a client cannot accidentally target
+                // the wrong task by sending a mismatched body.
+                let request = ToolRequest(
+                    id: input.id,
+                    taskID: taskID,
+                    name: input.name,
+                    sideEffect: input.sideEffect,
+                    target: input.target,
+                    payload: input.payload,
+                    scope: input.scope
+                )
+                let decision = try await service.submit(request: request)
+                return try response(status: 200, value: SubmitResponse(decision: decision))
             }
             if verb == "POST", parts.count == 3, parts[0] == "tasks", parts[2] == "cancel" {
                 let id = parts[1]
@@ -229,6 +247,10 @@ private struct CreateTaskRequest: Decodable {
 
 private struct ApprovalRequest: Decodable {
     let digest: String
+}
+
+private struct SubmitResponse: Codable, Sendable {
+    let decision: PolicyDecision
 }
 
 private struct APIError: Encodable {
