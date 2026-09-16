@@ -210,4 +210,88 @@ final class ServiceClientTests: XCTestCase {
         _ = try await client.loadTimeline(taskID: task.id)
         XCTAssertTrue(client.timelineEvents[task.id]?.contains { $0.summary == "approval accepted" } == true)
     }
+
+    /// Bug C: ApprovalView used `approvalRequests.values.first(where:)`, which is
+    /// non-deterministic when multiple requests exist for the same task. The fix
+    /// re-keys the dictionary by `taskID` so `approvalRequests[task.id]` is the
+    /// canonical lookup the view relies on.
+    func testLoadApprovalRequestsStoresRequestsKeyedByTaskID() async throws {
+        let database = try Database(path: ":memory:")
+        try database.migrate()
+        let service = try TaskService(
+            taskRepository: SQLiteTaskRepository(database: database),
+            auditRepository: SQLiteAuditRepository(database: database),
+            policy: Policy(),
+            policyConfig: PolicyConfig(approvedDirectories: ["/tmp/jarvis-c-keying"]),
+            requestRepository: SQLiteToolRequestRepository(database: database),
+            approvalRepository: SQLiteApprovalRepository(database: database),
+            unitOfWork: SQLitePersistenceUnitOfWork(database: database)
+        )
+        let task = try await service.createTask(title: "C-keying")
+        let request = ToolRequest(taskID: task.id, name: "write_file", sideEffect: .localWrite,
+            target: "/tmp/jarvis-c-keying/out.txt", payload: "safe payload")
+        _ = try await service.submit(request: request)
+
+        let server = LoopbackServer(service: service)
+        let port = try await server.start()
+        defer { server.stop() }
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+
+        _ = try await client.loadApprovalRequests(taskID: task.id)
+        XCTAssertEqual(client.approvalRequests.count, 1)
+        XCTAssertNotNil(client.approvalRequests[task.id],
+            "approvalRequests must be keyed by taskID so ApprovalView can resolve with [task.id]")
+        XCTAssertEqual(client.approvalRequests[task.id]?.id, request.id)
+        XCTAssertEqual(client.approvalRequests[task.id]?.digest, request.payloadDigest)
+    }
+
+    /// Bug D: NewTaskView used to call `client.select(task)` after `createTask`,
+    /// which already sets `selectedTask` internally. The redundant call
+    /// triggered a second `@Published` re-render. The view layer fix relies on
+    /// `createTask` being sufficient on its own.
+    func testCreateTaskSetsSelectedTaskWithoutExplicitSelectCall() async throws {
+        let database = try Database(path: ":memory:")
+        try database.migrate()
+        let service = try TaskService(taskRepository: SQLiteTaskRepository(database: database),
+            auditRepository: SQLiteAuditRepository(database: database), policy: Policy())
+        let server = LoopbackServer(service: service)
+        let port = try await server.start()
+        defer { server.stop() }
+
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        // NewTaskView flow: just call createTask; do not call select.
+        let task = try await client.createTask(title: "From new task view")
+        XCTAssertEqual(client.selectedTask?.id, task.id,
+            "createTask must set selectedTask on its own; NewTaskView relies on this and does not call select again")
+        XCTAssertEqual(client.tasks.map(\.id), [task.id])
+    }
+
+    /// Bug E: `previousStatuses` should never grow beyond the set of tasks
+    /// returned by the current refresh. Stale entries for deleted tasks must
+    /// be pruned so the diff stays bounded over a long-running session.
+    func testRefreshPrunesStalePreviousStatusEntries() async throws {
+        let database = try Database(path: ":memory:")
+        try database.migrate()
+        let service = try TaskService(taskRepository: SQLiteTaskRepository(database: database),
+            auditRepository: SQLiteAuditRepository(database: database), policy: Policy())
+        let server = LoopbackServer(service: service)
+        let port = try await server.start()
+        defer { server.stop() }
+
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        // Inject stale entries that no longer correspond to any task on the server.
+        let stale1 = UUID()
+        let stale2 = UUID()
+        client.previousStatuses[stale1] = .completed
+        client.previousStatuses[stale2] = .failed
+        XCTAssertEqual(client.previousStatuses.count, 2)
+
+        _ = try await client.refresh()
+        XCTAssertNil(client.previousStatuses[stale1],
+            "stale previousStatuses entry for a task no longer in /tasks must be pruned")
+        XCTAssertNil(client.previousStatuses[stale2],
+            "stale previousStatuses entry for a task no longer in /tasks must be pruned")
+        XCTAssertEqual(client.previousStatuses.count, client.tasks.count,
+            "previousStatuses size must equal current task count after every refresh")
+    }
 }
