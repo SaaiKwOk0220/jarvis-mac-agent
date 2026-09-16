@@ -120,6 +120,16 @@ final class PolicyTests: XCTestCase {
         XCTAssertEqual(Policy().evaluate(request, config: config), .deny(reason: "target is outside approved directories"))
     }
 
+    func testLocalExecuteRejectsScopeWorkingDirectoryOutsideApprovedDirectories() {
+        var scopedConfig = config
+        scopedConfig.approvedDirectories = ["/tmp"]
+        let request = ToolRequest(taskID: taskID, name: "swift", sideEffect: .localExecute,
+                                  target: "/tmp", payload: "test",
+                                  scope: ToolScope(workingDirectory: "/etc"))
+        XCTAssertEqual(Policy().evaluate(request, config: scopedConfig),
+                       .deny(reason: "shell working directory is outside approved directories"))
+    }
+
     func testAllowlistedSiteAndApplicationAreAllowedForReads() {
         let site = ToolRequest(taskID: taskID, name: "open_page", sideEffect: .read,
                                target: "https://example.com/inbox", payload: "",
