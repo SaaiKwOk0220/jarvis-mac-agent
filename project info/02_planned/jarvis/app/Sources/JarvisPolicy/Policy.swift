@@ -55,10 +55,7 @@ public struct Policy: PolicyEvaluator, Sendable {
             guard isWithinApprovedDirectory(request.target, config: config) else {
                 return .deny(reason: "target is outside approved directories")
             }
-            guard isAllowedTestInvocation(request) else {
-                return .deny(reason: "command invocation is not allowlisted")
-            }
-            return .allow
+            return .requireApproval(reason: "shell command requires explicit approval")
         case .read:
             return evaluateRead(request, config: config)
         case .localWrite:
@@ -104,10 +101,6 @@ public struct Policy: PolicyEvaluator, Sendable {
             return .deny(reason: "target is outside approved directories")
         }
         return .allow
-    }
-
-    private func isAllowedTestInvocation(_ request: ToolRequest) -> Bool {
-        request.payload == "test" && ["swift", "xcodebuild"].contains(request.name)
     }
 
     private func isAllowlistedSendTarget(_ target: String, config: PolicyConfig) -> Bool {

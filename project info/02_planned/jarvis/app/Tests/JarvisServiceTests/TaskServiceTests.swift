@@ -330,6 +330,53 @@ final class TaskServiceTests: XCTestCase {
         XCTAssertEqual(events.map(\.summary), ["task created"])
         XCTAssertEqual(events.first?.target, "local task service")
     }
+
+    func testShellRequestRoutesToTerminalExecutor() async throws {
+        let fixture = try Fixture(terminal: TerminalToolExecutor(timeout: .seconds(5)))
+        let task = try await fixture.service.createTask(title: "Run shell through service")
+        let request = ToolRequest(
+            taskID: task.id,
+            name: "shell",
+            sideEffect: .localExecute,
+            target: "/tmp/jarvis-service",
+            payload: "echo routed"
+        )
+
+        let decision = try await fixture.service.submit(request: request)
+        XCTAssertEqual(decision, .requireApproval(reason: "shell command requires explicit approval"))
+
+        try await fixture.service.approve(requestID: request.id, digest: request.payloadDigest)
+
+        for _ in 0..<100 {
+            if try fixture.tasks.fetch(id: task.id)?.status == .completed { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .completed)
+        XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .completed)
+        XCTAssertTrue(
+            try fixture.audit.events(for: task.id).contains { $0.summary == "tool result" && $0.result.contains("routed") },
+            "audit must show TerminalToolExecutor output, not NoOp"
+        )
+    }
+
+    func testShellRequestRequiresExplicitApproval() async throws {
+        let fixture = try Fixture(terminal: TerminalToolExecutor(timeout: .seconds(5)))
+        let task = try await fixture.service.createTask(title: "Shell awaits approval")
+        let request = ToolRequest(
+            taskID: task.id,
+            name: "shell",
+            sideEffect: .localExecute,
+            target: "/tmp/jarvis-service",
+            payload: "echo not-yet"
+        )
+
+        let decision = try await fixture.service.submit(request: request)
+
+        XCTAssertEqual(decision, .requireApproval(reason: "shell command requires explicit approval"))
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .awaitingApproval)
+        XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .pending)
+    }
 }
 
 private final class Fixture: @unchecked Sendable {
@@ -340,18 +387,22 @@ private final class Fixture: @unchecked Sendable {
     let approvals: SQLiteApprovalRepository
     let service: TaskService
 
-    init(executor: any ToolExecutor = NoOpToolExecutor()) throws {
+    init(executor: any ToolExecutor = NoOpToolExecutor(), terminal: TerminalToolExecutor? = nil) throws {
         database = try Database(path: ":memory:")
         try database.migrate()
         tasks = SQLiteTaskRepository(database: database)
         audit = SQLiteAuditRepository(database: database)
         requests = SQLiteToolRequestRepository(database: database)
         approvals = SQLiteApprovalRepository(database: database)
+        let policyConfig = PolicyConfig(
+            approvedDirectories: ["/tmp/jarvis-service"],
+            commandNames: ["shell", "swift", "xcodebuild"]
+        )
         service = try TaskService(
             taskRepository: tasks,
             auditRepository: audit,
             policy: Policy(),
-            policyConfig: PolicyConfig(approvedDirectories: ["/tmp/jarvis-service"]), executor: executor,
+            policyConfig: policyConfig, executor: executor, terminal: terminal,
             requestRepository: requests, approvalRepository: approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: database)
         )
     }

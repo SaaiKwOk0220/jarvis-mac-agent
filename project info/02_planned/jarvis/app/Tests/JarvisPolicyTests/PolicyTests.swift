@@ -23,22 +23,26 @@ final class PolicyTests: XCTestCase {
     func testApprovedLocalCommandIsAllowedOnlyByExactName() {
         let request = ToolRequest(taskID: taskID, name: "swift", sideEffect: .localExecute,
                                   target: "/tmp/jarvis-project", payload: "test")
-        XCTAssertEqual(Policy().evaluate(request, config: config), .allow)
+        XCTAssertEqual(Policy().evaluate(request, config: config),
+                       .requireApproval(reason: "shell command requires explicit approval"))
 
         let typo = ToolRequest(taskID: taskID, name: "swiftc && rm", sideEffect: .localExecute,
                                target: "/tmp/jarvis-project", payload: "test")
         XCTAssertEqual(Policy().evaluate(typo, config: config), .deny(reason: "command is not allowlisted"))
     }
 
-    func testLocalExecuteAllowsOnlyStructuredTestInvocation() {
+    func testLocalExecuteRequiresExplicitApprovalForAnyAllowlistedPayload() {
         let request = ToolRequest(taskID: taskID, name: "swift", sideEffect: .localExecute,
                                   target: "/tmp/jarvis-project", payload: "test")
-        XCTAssertEqual(Policy().evaluate(request, config: config), .allow)
+        XCTAssertEqual(Policy().evaluate(request, config: config),
+                       .requireApproval(reason: "shell command requires explicit approval"))
 
         for payload in ["test --package-path /tmp/jarvis-project", "test; rm -rf /tmp/jarvis-project", "test && rm -rf /tmp/jarvis-project", "run script", "test --filter anything", "test --output /tmp/result"] {
-            let unsafe = ToolRequest(taskID: taskID, name: "swift", sideEffect: .localExecute,
-                                     target: "/tmp/jarvis-project", payload: payload)
-            XCTAssertEqual(Policy().evaluate(unsafe, config: config), .deny(reason: "command invocation is not allowlisted"))
+            let allowedButRequiresApproval = ToolRequest(taskID: taskID, name: "swift", sideEffect: .localExecute,
+                                                         target: "/tmp/jarvis-project", payload: payload)
+            XCTAssertEqual(Policy().evaluate(allowedButRequiresApproval, config: config),
+                           .requireApproval(reason: "shell command requires explicit approval"),
+                           "payload \(payload) should pass allowlist and require explicit approval")
         }
     }
 
