@@ -7,7 +7,7 @@ struct ApprovalView: View {
     @State private var digest = ""
     @State private var submitting = false
 
-    private var request: ApprovalRequest? { client.approvalRequests.values.first(where: { $0.taskID == task.id }) }
+    private var request: ApprovalRequest? { client.approvalRequests[task.id] }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -66,6 +66,6 @@ struct ApprovalView: View {
     }
 
     private func updateDigest() {
-        digest = client.approvalRequests.values.first(where: { $0.taskID == task.id })?.digest ?? ""
+        digest = client.approvalRequests[task.id]?.digest ?? ""
     }
 }

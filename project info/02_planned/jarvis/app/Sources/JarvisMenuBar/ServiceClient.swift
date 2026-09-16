@@ -74,7 +74,12 @@ public final class ServiceClient: ObservableObject {
 
     private var baseURL: URL
     private let session: URLSession
-    private var previousStatuses: [UUID: TaskStatus] = [:]
+    /// Tracks the last-known status for every task returned by `refresh`, so
+    /// `notifyTransitions` can diff and emit notifications. Exposed as
+    /// `internal` so the `ServiceClientTests` can verify the prune invariant;
+    /// callers outside this module should treat it as read-only via the
+    /// public observable surface.
+    var previousStatuses: [UUID: TaskStatus] = [:]
 
     public init(baseURL: URL = URL(string: "http://127.0.0.1:8080")!, session: URLSession = .shared) {
         self.baseURL = baseURL; self.session = session
@@ -96,8 +101,18 @@ public final class ServiceClient: ObservableObject {
         do {
             let (data, _) = try await request(path: "/tasks", method: "GET")
             let decoded = try Self.decodeTaskList(data, decoder: Self.decoder)
-            notifyTransitions(from: previousStatuses, to: Dictionary(uniqueKeysWithValues: decoded.map { ($0.id, $0.status) }))
-            previousStatuses = Dictionary(uniqueKeysWithValues: decoded.map { ($0.id, $0.status) })
+            let newStatuses = Dictionary(uniqueKeysWithValues: decoded.map { ($0.id, $0.status) })
+            notifyTransitions(from: previousStatuses, to: newStatuses)
+            // Prune entries for tasks no longer present in /tasks before merging
+            // the new statuses in, so the diff stays bounded even after long
+            // sessions with many task deletions.
+            let currentIDs = Set(decoded.map(\.id))
+            for oldID in previousStatuses.keys where !currentIDs.contains(oldID) {
+                previousStatuses.removeValue(forKey: oldID)
+            }
+            for (id, status) in newStatuses {
+                previousStatuses[id] = status
+            }
             tasks = decoded
             if let id = selectedTask?.id { selectedTask = decoded.first(where: { $0.id == id }) }
             serviceError = nil
@@ -148,7 +163,14 @@ public final class ServiceClient: ObservableObject {
         let (data, _) = try await request(path: "/tasks/\(taskID.uuidString)/requests", method: "GET")
         do {
             let requests = try Self.decoder.decode([ApprovalRequest].self, from: data)
-            approvalRequests = Dictionary(uniqueKeysWithValues: requests.map { ($0.id, $0) })
+            // Key by taskID so the UI can resolve the active pending request for a
+            // task with `approvalRequests[task.id]`. `TaskService.submit(request:)`
+            // enforces "one task, one pending request at a time", but if the
+            // response ever carries multiple entries for the same taskID the
+            // last one wins, which is the safe choice for the approver UI.
+            for request in requests {
+                approvalRequests[request.taskID] = request
+            }
             serviceError = nil
             return requests
         } catch { throw ServiceClientError.decoding }

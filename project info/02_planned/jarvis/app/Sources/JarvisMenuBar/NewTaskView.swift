@@ -42,8 +42,8 @@ struct NewTaskView: View {
         Task {
             defer { isCreating = false }
             do {
-                let task = try await client.createTask(title: submittedTitle)
-                client.select(task)
+                // `createTask` already sets `selectedTask` internally, so no extra `select(task)` is needed here.
+                _ = try await client.createTask(title: submittedTitle)
                 openWindow(id: "task-detail")
                 dismiss()
             } catch {
