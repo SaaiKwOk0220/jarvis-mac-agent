@@ -49,16 +49,35 @@ public struct TerminalToolExecutor: ToolExecutor, Sendable {
             throw TerminalToolExecutorError.launchFailed(underlying: String(describing: error))
         }
 
+        // Start draining stdout/stderr concurrently on detached tasks so a chatty
+        // child cannot deadlock on write() when its output exceeds the 64KB pipe
+        // buffer. The main task still polls waitForExit below; both finish in
+        // parallel and we await their results before returning.
+        async let stdoutTask = Self.readPipe(stdoutPipe)
+        async let stderrTask = Self.readPipe(stderrPipe)
+
         defer {
+            // When the parent task is cancelled (or otherwise exits early),
+            // ensure the child process is not left as a short-lived orphan:
+            // SIGTERM, wait up to one second for graceful exit, then SIGKILL.
+            // We use Darwin's usleep() instead of Thread.sleep because
+            // Thread.sleep is unavailable from this async context.
             if process.isRunning {
                 process.terminate()
+                let deadline = Date().addingTimeInterval(1.0)
+                while process.isRunning && Date() < deadline {
+                    usleep(50_000) // 50ms in microseconds
+                }
+                if process.isRunning {
+                    kill(process.processIdentifier, SIGKILL)
+                }
             }
         }
 
         try await Self.waitForExit(process, timeout: timeout)
 
-        let stdout = Self.readPipe(stdoutPipe)
-        let stderr = Self.readPipe(stderrPipe)
+        let stdout = await stdoutTask
+        let stderr = await stderrTask
         let exitCode = process.terminationStatus
         let summary = Self.formatSummary(exitCode: exitCode, stdout: stdout, stderr: stderr)
 
@@ -88,9 +107,15 @@ public struct TerminalToolExecutor: ToolExecutor, Sendable {
         }
     }
 
-    private static func readPipe(_ pipe: Pipe) -> String {
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8) ?? ""
+    /// Reads a pipe to EOF on a detached task so the blocking syscall never
+    /// stalls the executor's cooperative thread. The detached task also does
+    /// not inherit the parent task's cancellation, so it can finish draining
+    /// even when the executor is cancelled.
+    private static func readPipe(_ pipe: Pipe) async -> String {
+        await Task.detached {
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            return String(data: data, encoding: .utf8) ?? ""
+        }.value
     }
 
     private static func formatSummary(exitCode: Int32, stdout: String, stderr: String) -> String {

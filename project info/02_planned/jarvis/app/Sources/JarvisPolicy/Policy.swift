@@ -55,6 +55,11 @@ public struct Policy: PolicyEvaluator, Sendable {
             guard isWithinApprovedDirectory(request.target, config: config) else {
                 return .deny(reason: "target is outside approved directories")
             }
+            if let workingDirectory = request.scope?.workingDirectory {
+                guard isWithinApprovedDirectory(workingDirectory, config: config) else {
+                    return .deny(reason: "shell working directory is outside approved directories")
+                }
+            }
             return .requireApproval(reason: "shell command requires explicit approval")
         case .read:
             return evaluateRead(request, config: config)
