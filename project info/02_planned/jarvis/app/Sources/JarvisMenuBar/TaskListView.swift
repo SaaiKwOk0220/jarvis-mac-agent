@@ -23,6 +23,9 @@ struct TaskListView: View {
             Button { openWindow(id: "fetch-url") } label: {
                 Label("Fetch URL…", systemImage: "globe")
             }
+            Button { openWindow(id: "screenshot") } label: {
+                Label("Capture screenshot…", systemImage: "camera")
+            }
             if client.tasks.isEmpty {
                 Text(client.serviceError?.localizedDescription ?? "No tasks yet")
                     .foregroundStyle(.secondary)

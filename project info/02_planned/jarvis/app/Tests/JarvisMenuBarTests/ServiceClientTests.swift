@@ -409,4 +409,95 @@ final class ServiceClientTests: XCTestCase {
         XCTAssertNil(client.actionError,
             "submitFetchURL must not leave actionError populated on success")
     }
+
+    /// Drives `submitScreenshot` against a real LoopbackServer so the
+    /// end-to-end wiring (URLSession POST, JSON encode of the ToolRequest,
+    /// server-side submit, service-side persistence) is exercised. Mirrors
+    /// the `testSubmitFetchURLPostsFetchRequestToLoopbackServer` pattern but
+    /// pins the screenshot wire format: name=screenshot, sideEffect=read,
+    /// payload="screen", and the target's basename matches the user-supplied
+    /// filename. The screenshot is a `.read` action and must not produce a
+    /// pending approval row.
+    func testSubmitScreenshotPostsScreenshotRequestToLoopbackServer() async throws {
+        let database = try Database(path: ":memory:")
+        try database.migrate()
+        let tasks = SQLiteTaskRepository(database: database)
+        let audit = SQLiteAuditRepository(database: database)
+        let requests = SQLiteToolRequestRepository(database: database)
+        let approvals = SQLiteApprovalRepository(database: database)
+        let service = try TaskService(
+            taskRepository: tasks,
+            auditRepository: audit,
+            policy: Policy(),
+            policyConfig: PolicyConfig(
+                approvedDirectories: [ServiceClient.screenshotsApprovedDirectory.path]
+            ),
+            requestRepository: requests,
+            approvalRepository: approvals,
+            unitOfWork: SQLitePersistenceUnitOfWork(database: database)
+        )
+        let server = LoopbackServer(service: service)
+        let port = try await server.start()
+        defer { server.stop() }
+
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let task = try await client.createTask(title: "Menu screenshot")
+
+        try await client.submitScreenshot(
+            taskID: task.id,
+            outputFilename: "screenshot-2026-09-17.png"
+        )
+
+        // screenshot is a .read action and must not produce a pending
+        // approval row; the request lands in .executing (or already
+        // .completed) and the loopback server returns 200 with the policy
+        // decision.
+        let pending = try await service.listPendingApprovalRequests(taskID: task.id)
+        XCTAssertEqual(pending.count, 0,
+            "screenshot is a .read action and must not produce a pending approval row")
+
+        let stored = try await service.getTask(id: task.id)
+        XCTAssertNotEqual(stored?.status, .awaitingApproval,
+            "screenshot should not leave the task in awaitingApproval")
+
+        // Find the screenshot request the client just submitted. The order
+        // by status isn't guaranteed, so we look across all terminal states
+        // for the row whose name matches "screenshot".
+        let completedRequests = try requests.list(status: .completed).map(\.0)
+        let executingRequests = try requests.list(status: .executing).map(\.0)
+        let failedRequests = try requests.list(status: .failed).map(\.0)
+        let allRequests = completedRequests + executingRequests + failedRequests
+        let storedRequest = try XCTUnwrap(
+            allRequests.first(where: { $0.taskID == task.id && $0.name == "screenshot" }),
+            "expected the screenshot request to be persisted with name=screenshot"
+        )
+        XCTAssertEqual(storedRequest.taskID, task.id)
+        XCTAssertEqual(storedRequest.name, "screenshot")
+        XCTAssertEqual(storedRequest.sideEffect, .read)
+        XCTAssertEqual(storedRequest.payload, "screen")
+        XCTAssertEqual(
+            (storedRequest.target as NSString).lastPathComponent,
+            "screenshot-2026-09-17.png",
+            "target's basename must echo the user-supplied filename"
+        )
+        XCTAssertTrue(
+            storedRequest.target.hasPrefix(ServiceClient.screenshotsApprovedDirectory.path),
+            "target must resolve inside the appSupport screenshots directory; got: \(storedRequest.target)"
+        )
+
+        // Recompute the digest on the client side and verify it matches the
+        // server-side digest. This confirms the wire format (the body the
+        // client encoded) survived the round-trip without mangling.
+        let expectedDigest = ToolRequest.actionDigest(
+            name: "screenshot",
+            sideEffect: .read,
+            target: storedRequest.target,
+            payload: "screen"
+        )
+        XCTAssertEqual(storedRequest.payloadDigest, expectedDigest,
+            "digest from server must equal the one the client computed")
+
+        XCTAssertNil(client.actionError,
+            "submitScreenshot must not leave actionError populated on success")
+    }
 }

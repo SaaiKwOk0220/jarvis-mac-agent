@@ -34,6 +34,11 @@ struct JarvisMenuBarApp: App {
                 .frame(minWidth: 480, minHeight: 220)
         }
         .defaultSize(width: 540, height: 260)
+        Window("Capture Screenshot", id: "screenshot") {
+            NewScreenshotView(client: client)
+                .frame(minWidth: 480, minHeight: 220)
+        }
+        .defaultSize(width: 540, height: 260)
         Window("Jarvis Task", id: "task-detail") {
             TaskDetailView(client: client)
                 .frame(minWidth: 420, minHeight: 360)
@@ -63,7 +68,8 @@ private final class Runtime {
                 ),
                 executor: NoOpToolExecutor(),
                 terminal: TerminalToolExecutor(),
-                webFetch: WebFetchToolExecutor())
+                webFetch: WebFetchToolExecutor(),
+                screenshot: ScreenshotToolExecutor())
             let server = LoopbackServer(service: service)
             self.server = server
             Task { @MainActor in

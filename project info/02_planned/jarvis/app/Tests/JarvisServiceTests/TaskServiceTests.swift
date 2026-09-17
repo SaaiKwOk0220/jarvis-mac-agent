@@ -463,6 +463,49 @@ final class TaskServiceTests: XCTestCase {
             "audit must carry the fetched body so the user can see it; got: \(toolResultAudit?.result ?? "<nil>")"
         )
     }
+
+    /// Pins the executor dispatch contract for screenshots: a
+    /// `name == "screenshot"` request with `sideEffect == .read` must reach
+    /// the `ScreenshotToolExecutor` when one is installed. The mock closure
+    /// returns the PNG magic bytes so we can detect fall-through to a
+    /// different executor (the NoOpToolExecutor would produce
+    /// "demo executor completed"). The audit log carries the
+    /// `ScreenshotToolExecutor`'s own summary format so the assertion
+    /// pins the executor identity, not just that *some* tool ran.
+    func testScreenshotRequestRoutesToScreenshotExecutor() async throws {
+        let executor = ScreenshotToolExecutor(capture: { Data([0x89, 0x50, 0x4E, 0x47]) })
+        let fixture = try Fixture(screenshot: executor)
+        let task = try await fixture.service.createTask(title: "Screenshot through service")
+        let request = ToolRequest(
+            taskID: task.id,
+            name: "screenshot",
+            sideEffect: .read,
+            target: "/tmp/jarvis-service/test.png",
+            payload: "screen"
+        )
+
+        let decision = try await fixture.service.submit(request: request)
+        XCTAssertEqual(decision, .allow,
+            "screenshot is a .read action that lands inside an approved directory; policy should allow without approval")
+
+        for _ in 0..<100 {
+            if try fixture.tasks.fetch(id: task.id)?.status == .completed { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .completed,
+            "task should reach .completed once ScreenshotToolExecutor finishes")
+        XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .completed)
+        let toolResultAudit = try fixture.audit.events(for: task.id).first { $0.summary == "tool result" }
+        XCTAssertNotNil(toolResultAudit, "expected a 'tool result' audit after Screenshot executor finishes")
+        XCTAssertTrue(
+            toolResultAudit?.result.contains("Screenshot saved") == true,
+            "audit must carry ScreenshotToolExecutor's summary marker; got: \(toolResultAudit?.result ?? "<nil>")"
+        )
+        XCTAssertFalse(
+            toolResultAudit?.result.contains("demo executor completed") == true,
+            "audit must not show the NoOp executor's marker; got: \(toolResultAudit?.result ?? "<nil>")"
+        )
+    }
 }
 
 private final class Fixture: @unchecked Sendable {
@@ -473,7 +516,7 @@ private final class Fixture: @unchecked Sendable {
     let approvals: SQLiteApprovalRepository
     let service: TaskService
 
-    init(executor: any ToolExecutor = NoOpToolExecutor(), terminal: TerminalToolExecutor? = nil, webFetch: WebFetchToolExecutor? = nil) throws {
+    init(executor: any ToolExecutor = NoOpToolExecutor(), terminal: TerminalToolExecutor? = nil, webFetch: WebFetchToolExecutor? = nil, screenshot: ScreenshotToolExecutor? = nil) throws {
         database = try Database(path: ":memory:")
         try database.migrate()
         tasks = SQLiteTaskRepository(database: database)
@@ -490,7 +533,7 @@ private final class Fixture: @unchecked Sendable {
             taskRepository: tasks,
             auditRepository: audit,
             policy: Policy(),
-            policyConfig: policyConfig, executor: executor, terminal: terminal, webFetch: webFetch,
+            policyConfig: policyConfig, executor: executor, terminal: terminal, webFetch: webFetch, screenshot: screenshot,
             requestRepository: requests, approvalRepository: approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: database)
         )
     }
