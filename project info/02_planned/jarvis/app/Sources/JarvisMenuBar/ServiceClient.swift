@@ -292,6 +292,52 @@ public final class ServiceClient: ObservableObject {
         }
     }
 
+    /// Submits a fetch URL tool request for an existing task. The host must
+    /// already be present in the policy allowlist (`PolicyConfig.sites`); the
+    /// request is otherwise denied at the policy layer. A successful call
+    /// records the request as `.executing` immediately — `.read` requests do
+    /// not need an approval step — so the user can simply watch the task
+    /// transition to `.completed` in the task-detail window.
+    ///
+    /// The request always carries `scope.browserProfile = "default"` because
+    /// the read-side policy gate requires a configured browser profile for any
+    /// URL target; the underlying URLSession fetcher does not actually use
+    /// the profile, but the policy treats it as a mandatory audit attribute.
+    public func submitFetchURL(
+        taskID: UUID,
+        urlString: String
+    ) async throws {
+        let trimmedURL = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedURL.isEmpty else {
+            throw ServiceClientError.http(status: 400, message: "url is required")
+        }
+        let request = ToolRequest(
+            taskID: taskID,
+            name: "fetch",
+            sideEffect: .read,
+            target: trimmedURL,
+            payload: trimmedURL,
+            scope: ToolScope(browserProfile: "default")
+        )
+        do {
+            var urlRequest = URLRequest(url: baseURL.appendingPathComponent("tasks/\(taskID.uuidString)/requests"))
+            urlRequest.httpMethod = "POST"
+            urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            urlRequest.httpBody = try JSONEncoder().encode(request)
+            let (data, response) = try await session.data(for: urlRequest)
+            try Self.validate(response: response, data: data)
+            _ = try await refresh()
+            _ = try await loadApprovalRequests(taskID: taskID)
+            actionError = nil
+        } catch let error as ServiceClientError {
+            actionError = error.localizedDescription
+            throw error
+        } catch {
+            actionError = ServiceClientError.unavailable.localizedDescription
+            throw ServiceClientError.unavailable
+        }
+    }
+
     private func mutate(path: String, body: [String: String]? = nil) async throws {
         var request = URLRequest(url: baseURL.appendingPathComponent(path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))))
         request.httpMethod = "POST"

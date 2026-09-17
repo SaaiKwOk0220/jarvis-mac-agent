@@ -29,6 +29,11 @@ struct JarvisMenuBarApp: App {
                 .frame(minWidth: 480, minHeight: 320)
         }
         .defaultSize(width: 540, height: 380)
+        Window("Fetch URL", id: "fetch-url") {
+            NewFetchURLView(client: client)
+                .frame(minWidth: 480, minHeight: 220)
+        }
+        .defaultSize(width: 540, height: 260)
         Window("Jarvis Task", id: "task-detail") {
             TaskDetailView(client: client)
                 .frame(minWidth: 420, minHeight: 360)
@@ -52,10 +57,13 @@ private final class Runtime {
                 auditRepository: SQLiteAuditRepository(database: database), policy: Policy(),
                 policyConfig: PolicyConfig(
                     approvedDirectories: [appSupport.path],
-                    commandNames: ["shell", "swift", "xcodebuild"]
+                    commandNames: ["shell", "swift", "xcodebuild"],
+                    browserProfiles: ["default"],
+                    sites: []
                 ),
                 executor: NoOpToolExecutor(),
-                terminal: TerminalToolExecutor())
+                terminal: TerminalToolExecutor(),
+                webFetch: WebFetchToolExecutor())
             let server = LoopbackServer(service: service)
             self.server = server
             Task { @MainActor in

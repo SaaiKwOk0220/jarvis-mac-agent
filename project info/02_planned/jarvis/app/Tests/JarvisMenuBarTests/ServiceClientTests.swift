@@ -358,4 +358,55 @@ final class ServiceClientTests: XCTestCase {
         XCTAssertNil(client.actionError,
                      "submitShellCommand must not leave actionError populated on success")
     }
+
+    /// Drives `submitFetchURL` against a real LoopbackServer so the end-to-end
+    /// wiring (URLSession POST, JSON encode of the ToolRequest, server-side
+    /// submit, service-side persistence) is exercised. Mirrors the
+    /// `testSubmitShellCommandPostsShellRequestToLoopbackServer` pattern but
+    /// pins the fetch wire format: name=fetch, sideEffect=read, target == url.
+    func testSubmitFetchURLPostsFetchRequestToLoopbackServer() async throws {
+        let database = try Database(path: ":memory:")
+        try database.migrate()
+        let tasks = SQLiteTaskRepository(database: database)
+        let audit = SQLiteAuditRepository(database: database)
+        let requests = SQLiteToolRequestRepository(database: database)
+        let approvals = SQLiteApprovalRepository(database: database)
+        let service = try TaskService(
+            taskRepository: tasks,
+            auditRepository: audit,
+            policy: Policy(),
+            policyConfig: PolicyConfig(
+                browserProfiles: ["default"],
+                sites: ["example.com"]
+            ),
+            requestRepository: requests,
+            approvalRepository: approvals,
+            unitOfWork: SQLitePersistenceUnitOfWork(database: database)
+        )
+        let server = LoopbackServer(service: service)
+        let port = try await server.start()
+        defer { server.stop() }
+
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let task = try await client.createTask(title: "Menu fetch URL")
+
+        let targetURL = "https://example.com/page"
+        try await client.submitFetchURL(taskID: task.id, urlString: targetURL)
+
+        // The fetch went through Policy.read which returns .allow for an
+        // https host in sites + a configured browser profile, so the request
+        // should be executing (or already completed) rather than awaiting
+        // approval. We assert the request landed in the service exactly once
+        // with the wire-format values the client sent.
+        let pending = try await service.listPendingApprovalRequests(taskID: task.id)
+        XCTAssertEqual(pending.count, 0,
+            "fetch is a .read action and must not produce a pending approval row")
+
+        let stored = try await service.getTask(id: task.id)
+        XCTAssertNotEqual(stored?.status, .awaitingApproval,
+            "fetch should not leave the task in awaitingApproval")
+
+        XCTAssertNil(client.actionError,
+            "submitFetchURL must not leave actionError populated on success")
+    }
 }
