@@ -338,6 +338,74 @@ public final class ServiceClient: ObservableObject {
         }
     }
 
+    /// Submits a screenshot tool request for an existing task. The target
+    /// resolves to `<appSupport>/Jarvis/screenshots/<outputFilename>`, which
+    /// is also the directory Runtime passes to `PolicyConfig.approvedDirectories`
+    /// (the executor takes care of creating the directory on first write).
+    ///
+    /// The `outputFilename` is validated to be a basename only — slashes
+    /// and `..` segments are rejected so a hostile paste can never escape
+    /// the screenshots directory. Like `submitFetchURL`, the request is a
+    /// `.read` action and does not require an approval step; the
+    /// task-detail window will show the capture progressing straight
+    /// through to `.completed`.
+    public func submitScreenshot(
+        taskID: UUID,
+        outputFilename: String
+    ) async throws {
+        let trimmed = outputFilename.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw ServiceClientError.http(status: 400, message: "filename is required")
+        }
+        guard !trimmed.contains("/"), !trimmed.contains("..") else {
+            throw ServiceClientError.http(status: 400, message: "filename must be a basename")
+        }
+        let target = Self.screenshotsApprovedDirectory
+            .appendingPathComponent(trimmed, isDirectory: false)
+            .path
+        let request = ToolRequest(
+            taskID: taskID,
+            name: "screenshot",
+            sideEffect: .read,
+            target: target,
+            payload: "screen"
+        )
+        do {
+            var urlRequest = URLRequest(url: baseURL.appendingPathComponent("tasks/\(taskID.uuidString)/requests"))
+            urlRequest.httpMethod = "POST"
+            urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            urlRequest.httpBody = try JSONEncoder().encode(request)
+            let (data, response) = try await session.data(for: urlRequest)
+            try Self.validate(response: response, data: data)
+            _ = try await refresh()
+            _ = try await loadApprovalRequests(taskID: taskID)
+            actionError = nil
+        } catch let error as ServiceClientError {
+            actionError = error.localizedDescription
+            throw error
+        } catch {
+            actionError = ServiceClientError.unavailable.localizedDescription
+            throw ServiceClientError.unavailable
+        }
+    }
+
+    /// Resolves the directory under which `submitScreenshot` writes its
+    /// captures. Mirrors the path Runtime uses for the same data
+    /// (`<appSupport>/Jarvis/screenshots/`); both the production submit
+    /// path and the service-side policy read from this single source of
+    /// truth so the policy gate accepts the request. Exposed as a static
+    /// helper so tests can seed `PolicyConfig.approvedDirectories` with the
+    /// matching path without duplicating the resolution logic.
+    public static var screenshotsApprovedDirectory: URL {
+        let appSupport = (try? FileManager.default.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: false
+        )) ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        return appSupport.appendingPathComponent("Jarvis/screenshots", isDirectory: true)
+    }
+
     private func mutate(path: String, body: [String: String]? = nil) async throws {
         var request = URLRequest(url: baseURL.appendingPathComponent(path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))))
         request.httpMethod = "POST"

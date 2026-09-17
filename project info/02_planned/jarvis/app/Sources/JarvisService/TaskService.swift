@@ -24,10 +24,11 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     private let executor: any ToolExecutor
     private let terminal: TerminalToolExecutor?
     private let webFetch: WebFetchToolExecutor?
+    private let screenshot: ScreenshotToolExecutor?
     private let lock = NSLock()
     private var executions: [UUID: Task<Void, Error>] = [:]
 
-    public init(taskRepository: any TaskRepository, auditRepository: any AuditRepository, policy: any PolicyEvaluator, policyConfig: PolicyConfig = .init(), executor: any ToolExecutor = NoOpToolExecutor(), terminal: TerminalToolExecutor? = nil, webFetch: WebFetchToolExecutor? = nil, requestRepository: (any ToolRequestRepository)? = nil, approvalRepository: (any ApprovalRepository)? = nil, unitOfWork: (any PersistenceUnitOfWork)? = nil) throws {
+    public init(taskRepository: any TaskRepository, auditRepository: any AuditRepository, policy: any PolicyEvaluator, policyConfig: PolicyConfig = .init(), executor: any ToolExecutor = NoOpToolExecutor(), terminal: TerminalToolExecutor? = nil, webFetch: WebFetchToolExecutor? = nil, screenshot: ScreenshotToolExecutor? = nil, requestRepository: (any ToolRequestRepository)? = nil, approvalRepository: (any ApprovalRepository)? = nil, unitOfWork: (any PersistenceUnitOfWork)? = nil) throws {
         guard let sqliteTasks = taskRepository as? SQLiteTaskRepository,
               let sqliteAudits = auditRepository as? SQLiteAuditRepository,
               sqliteTasks.database === sqliteAudits.database else { throw TaskServiceError.incompatiblePersistence }
@@ -44,7 +45,7 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
             guard let sqlite = unitOfWork as? SQLitePersistenceUnitOfWork, sqlite.database === database else { throw TaskServiceError.incompatiblePersistence }
             self.uow = sqlite
         } else { self.uow = SQLitePersistenceUnitOfWork(database: database) }
-        self.tasks = taskRepository; self.audits = auditRepository; self.policy = policy; self.config = policyConfig; self.executor = executor; self.terminal = terminal; self.webFetch = webFetch
+        self.tasks = taskRepository; self.audits = auditRepository; self.policy = policy; self.config = policyConfig; self.executor = executor; self.terminal = terminal; self.webFetch = webFetch; self.screenshot = screenshot
     }
 
     public func createTask(title: String) async throws -> JarvisTask { try lock.withLock { let task = JarvisTask(title: title); try uow.createTask(task, audit: event(taskID: task.id, summary: "task created", result: "created")); return task } }
@@ -184,6 +185,7 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
             let picked: any ToolExecutor = {
                 if request.name == "shell", let terminal = self.terminal { return terminal }
                 if request.name == "fetch", let webFetch = self.webFetch { return webFetch }
+                if request.name == "screenshot", let screenshot = self.screenshot { return screenshot }
                 return executor
             }()
             let result = try await picked.execute(request)
