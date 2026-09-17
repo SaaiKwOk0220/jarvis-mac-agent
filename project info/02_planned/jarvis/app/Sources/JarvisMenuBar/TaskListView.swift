@@ -20,6 +20,9 @@ struct TaskListView: View {
             Button { openWindow(id: "shell-task") } label: {
                 Label("Run shell command…", systemImage: "terminal")
             }
+            Button { openWindow(id: "fetch-url") } label: {
+                Label("Fetch URL…", systemImage: "globe")
+            }
             if client.tasks.isEmpty {
                 Text(client.serviceError?.localizedDescription ?? "No tasks yet")
                     .foregroundStyle(.secondary)

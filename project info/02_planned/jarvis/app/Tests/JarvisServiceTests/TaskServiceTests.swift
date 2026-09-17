@@ -412,6 +412,57 @@ final class TaskServiceTests: XCTestCase {
             "audit must carry TerminalToolExecutor's exit=0 marker; got: \(toolResultAudit?.result ?? "<nil>")"
         )
     }
+
+    /// Pins the executor dispatch contract: a `name == "fetch"` request with
+    /// `sideEffect == .read` must reach the WebFetchToolExecutor when one is
+    /// installed. We assert on the executor's own marker ("HTTP 200") rather
+    /// than the body so the assertion survives any change to the canned body
+    /// string while still detecting a silent fall-through to NoOpToolExecutor.
+    func testFetchRequestRoutesToWebFetchExecutor() async throws {
+        let body = "hello-from-mock"
+        let session = MockURLSessionFactory.make()
+        MockURLProtocol.handler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "text/plain"])!
+            return (response, Data(body.utf8))
+        }
+        defer { MockURLProtocol.handler = nil }
+
+        let executor = WebFetchToolExecutor(session: session)
+        let fixture = try Fixture(webFetch: executor)
+        let task = try await fixture.service.createTask(title: "Fetch through service")
+        let request = ToolRequest(
+            taskID: task.id,
+            name: "fetch",
+            sideEffect: .read,
+            target: "https://example.com/path",
+            payload: "https://example.com/path",
+            scope: ToolScope(browserProfile: "default")
+        )
+
+        let decision = try await fixture.service.submit(request: request)
+
+        XCTAssertEqual(decision, .allow,
+            "fetch should be allowed by policy without approval")
+        for _ in 0..<100 {
+            if try fixture.tasks.fetch(id: task.id)?.status == .completed { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .completed,
+            "task should reach .completed once WebFetchToolExecutor finishes")
+        XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .completed)
+        let toolResultAudit = try fixture.audit.events(for: task.id).first { $0.summary == "tool result" }
+        XCTAssertNotNil(toolResultAudit, "expected a 'tool result' audit after fetch executor finishes")
+        XCTAssertTrue(
+            toolResultAudit?.result.contains("HTTP 200") == true,
+            "audit must carry WebFetchToolExecutor's HTTP status marker; got: \(toolResultAudit?.result ?? "<nil>")"
+        )
+        XCTAssertTrue(
+            toolResultAudit?.result.contains(body) == true,
+            "audit must carry the fetched body so the user can see it; got: \(toolResultAudit?.result ?? "<nil>")"
+        )
+    }
 }
 
 private final class Fixture: @unchecked Sendable {
@@ -422,7 +473,7 @@ private final class Fixture: @unchecked Sendable {
     let approvals: SQLiteApprovalRepository
     let service: TaskService
 
-    init(executor: any ToolExecutor = NoOpToolExecutor(), terminal: TerminalToolExecutor? = nil) throws {
+    init(executor: any ToolExecutor = NoOpToolExecutor(), terminal: TerminalToolExecutor? = nil, webFetch: WebFetchToolExecutor? = nil) throws {
         database = try Database(path: ":memory:")
         try database.migrate()
         tasks = SQLiteTaskRepository(database: database)
@@ -431,13 +482,15 @@ private final class Fixture: @unchecked Sendable {
         approvals = SQLiteApprovalRepository(database: database)
         let policyConfig = PolicyConfig(
             approvedDirectories: ["/tmp/jarvis-service"],
-            commandNames: ["shell", "swift", "xcodebuild"]
+            commandNames: ["shell", "swift", "xcodebuild"],
+            browserProfiles: ["default"],
+            sites: ["example.com"]
         )
         service = try TaskService(
             taskRepository: tasks,
             auditRepository: audit,
             policy: Policy(),
-            policyConfig: policyConfig, executor: executor, terminal: terminal,
+            policyConfig: policyConfig, executor: executor, terminal: terminal, webFetch: webFetch,
             requestRepository: requests, approvalRepository: approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: database)
         )
     }
