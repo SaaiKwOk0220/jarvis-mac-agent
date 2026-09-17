@@ -377,6 +377,41 @@ final class TaskServiceTests: XCTestCase {
         XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .awaitingApproval)
         XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .pending)
     }
+
+    /// Verifies that `submit(request:)` reaches the TerminalToolExecutor for a
+    /// shell command by looking for the executor's "exit=0" marker in the
+    /// audit summary. This is distinct from `testShellRequestRoutesToTerminalExecutor`
+    /// above which checks for an arbitrary echoed string — this test pins
+    /// the executor's output format so future refactors can't silently swap
+    /// in the NoOpToolExecutor.
+    func testSubmitShellCommandReachesTerminalExecutor() async throws {
+        let fixture = try Fixture(terminal: TerminalToolExecutor(timeout: .seconds(5)))
+        let task = try await fixture.service.createTask(title: "Menu shell command")
+        let request = ToolRequest(
+            taskID: task.id,
+            name: "shell",
+            sideEffect: .localExecute,
+            target: "/tmp/jarvis-service",
+            payload: "echo hello-shell-ui"
+        )
+
+        _ = try await fixture.service.submit(request: request)
+        try await fixture.service.approve(requestID: request.id, digest: request.payloadDigest)
+
+        for _ in 0..<100 {
+            if try fixture.tasks.fetch(id: task.id)?.status == .completed { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .completed)
+        XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .completed)
+        let toolResultAudit = try fixture.audit.events(for: task.id).first { $0.summary == "tool result" }
+        XCTAssertNotNil(toolResultAudit, "expected a 'tool result' audit after Terminal executor finishes")
+        XCTAssertTrue(
+            toolResultAudit?.result.contains("exit=0") == true,
+            "audit must carry TerminalToolExecutor's exit=0 marker; got: \(toolResultAudit?.result ?? "<nil>")"
+        )
+    }
 }
 
 private final class Fixture: @unchecked Sendable {

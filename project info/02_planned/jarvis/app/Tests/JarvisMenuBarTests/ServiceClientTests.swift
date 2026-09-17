@@ -294,4 +294,68 @@ final class ServiceClientTests: XCTestCase {
         XCTAssertEqual(client.previousStatuses.count, client.tasks.count,
             "previousStatuses size must equal current task count after every refresh")
     }
+
+    /// Drives `submitShellCommand` against a real LoopbackServer so the end-to-end
+    /// wiring (URLSession POST, JSON encode of the ToolRequest, server-side
+    /// submit, service-side persistence) is exercised. Verifies the resulting
+    /// task lands in `.awaitingApproval` with a pending shell request whose
+    /// digest matches what the client computed.
+    func testSubmitShellCommandPostsShellRequestToLoopbackServer() async throws {
+        let database = try Database(path: ":memory:")
+        try database.migrate()
+        let tasks = SQLiteTaskRepository(database: database)
+        let audit = SQLiteAuditRepository(database: database)
+        let requests = SQLiteToolRequestRepository(database: database)
+        let approvals = SQLiteApprovalRepository(database: database)
+        let service = try TaskService(
+            taskRepository: tasks,
+            auditRepository: audit,
+            policy: Policy(),
+            policyConfig: PolicyConfig(
+                approvedDirectories: ["/tmp/jarvis-shell-ui"],
+                commandNames: ["shell"]
+            ),
+            requestRepository: requests,
+            approvalRepository: approvals,
+            unitOfWork: SQLitePersistenceUnitOfWork(database: database)
+        )
+        let server = LoopbackServer(service: service)
+        let port = try await server.start()
+        defer { server.stop() }
+
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let task = try await client.createTask(title: "Menu shell command")
+
+        try await client.submitShellCommand(
+            taskID: task.id,
+            command: "echo menu-shell",
+            workingDirectory: "/tmp/jarvis-shell-ui"
+        )
+
+        let stored = try await service.getTask(id: task.id)
+        XCTAssertEqual(stored?.status, .awaitingApproval,
+                       "submitShellCommand must drive the task into awaitingApproval")
+
+        let pending = try await service.listPendingApprovalRequests(taskID: task.id)
+        XCTAssertEqual(pending.count, 1, "submitShellCommand should produce exactly one pending request")
+        let request = try XCTUnwrap(pending.first)
+        XCTAssertEqual(request.taskID, task.id)
+        XCTAssertEqual(request.target, "/tmp/jarvis-shell-ui",
+                       "target should echo the working directory the client sent")
+
+        // Recompute the digest on the client side and verify it matches the
+        // server-side digest. This confirms the wire format (the body the
+        // client encoded) survived the round-trip without mangling.
+        let expectedDigest = ToolRequest.actionDigest(
+            name: "shell",
+            sideEffect: .localExecute,
+            target: "/tmp/jarvis-shell-ui",
+            payload: "echo menu-shell",
+            scope: ToolScope(workingDirectory: "/tmp/jarvis-shell-ui")
+        )
+        XCTAssertEqual(request.digest, expectedDigest,
+                       "digest from server must equal the one the client computed")
+        XCTAssertNil(client.actionError,
+                     "submitShellCommand must not leave actionError populated on success")
+    }
 }

@@ -30,12 +30,6 @@ public struct PolicyConfig: Codable, Equatable, Sendable {
     }
 }
 
-public enum PolicyDecision: Equatable, Sendable {
-    case allow
-    case requireApproval(reason: String)
-    case deny(reason: String)
-}
-
 public protocol PolicyEvaluator: Sendable {
     func evaluate(_ request: ToolRequest, config: PolicyConfig) -> PolicyDecision
 }

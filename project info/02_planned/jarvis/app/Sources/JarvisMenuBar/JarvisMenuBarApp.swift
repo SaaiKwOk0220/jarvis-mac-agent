@@ -24,6 +24,11 @@ struct JarvisMenuBarApp: App {
                 .frame(minWidth: 420, minHeight: 190)
         }
         .defaultSize(width: 460, height: 230)
+        Window("Run Shell Command", id: "shell-task") {
+            NewShellTaskView(client: client)
+                .frame(minWidth: 480, minHeight: 320)
+        }
+        .defaultSize(width: 540, height: 380)
         Window("Jarvis Task", id: "task-detail") {
             TaskDetailView(client: client)
                 .frame(minWidth: 420, minHeight: 360)
@@ -45,7 +50,12 @@ private final class Runtime {
             try database.migrate()
             let service = try TaskService(taskRepository: SQLiteTaskRepository(database: database),
                 auditRepository: SQLiteAuditRepository(database: database), policy: Policy(),
-                policyConfig: PolicyConfig(approvedDirectories: [appSupport.path]), executor: NoOpToolExecutor())
+                policyConfig: PolicyConfig(
+                    approvedDirectories: [appSupport.path],
+                    commandNames: ["shell", "swift", "xcodebuild"]
+                ),
+                executor: NoOpToolExecutor(),
+                terminal: TerminalToolExecutor())
             let server = LoopbackServer(service: service)
             self.server = server
             Task { @MainActor in

@@ -248,6 +248,50 @@ public final class ServiceClient: ObservableObject {
         }
     }
 
+    /// Submits a shell command tool request for an existing task. The
+    /// LoopbackServer forces `taskID` from the URL so the request cannot
+    /// target a different task than the menu-bar UI requested. A successful
+    /// call lands the task in `.awaitingApproval`; the user must approve via
+    /// the task-detail window for the command to actually execute.
+    public func submitShellCommand(
+        taskID: UUID,
+        command: String,
+        workingDirectory: String
+    ) async throws {
+        let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedCommand.isEmpty else {
+            throw ServiceClientError.http(status: 400, message: "command is required")
+        }
+        let scope = ToolScope(workingDirectory: workingDirectory)
+        let request = ToolRequest(
+            taskID: taskID,
+            name: "shell",
+            sideEffect: .localExecute,
+            target: workingDirectory,
+            payload: trimmedCommand,
+            scope: scope
+        )
+        do {
+            var urlRequest = URLRequest(url: baseURL.appendingPathComponent("tasks/\(taskID.uuidString)/requests"))
+            urlRequest.httpMethod = "POST"
+            urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            urlRequest.httpBody = try JSONEncoder().encode(request)
+            let (data, response) = try await session.data(for: urlRequest)
+            try Self.validate(response: response, data: data)
+            // After submitting, refresh tasks + approval metadata so the
+            // task-detail window opened by the caller sees the new request.
+            _ = try await refresh()
+            _ = try await loadApprovalRequests(taskID: taskID)
+            actionError = nil
+        } catch let error as ServiceClientError {
+            actionError = error.localizedDescription
+            throw error
+        } catch {
+            actionError = ServiceClientError.unavailable.localizedDescription
+            throw ServiceClientError.unavailable
+        }
+    }
+
     private func mutate(path: String, body: [String: String]? = nil) async throws {
         var request = URLRequest(url: baseURL.appendingPathComponent(path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))))
         request.httpMethod = "POST"
