@@ -16,18 +16,20 @@ final class FoundationAcceptanceTests: XCTestCase {
             executor: NoOpToolExecutor(), requestRepository: requests, approvalRepository: approvals,
             unitOfWork: SQLitePersistenceUnitOfWork(database: database))
 
-        // A successful read-only request auto-completes its task once the executor finishes.
+        // A successful read-only request leaves the task in `.running` once the executor finishes;
+        // callers must invoke `complete(taskID:)` to reach `.completed`.
         let readTask = try await service.createTask(title: "Foundation read")
         let read = ToolRequest(taskID: readTask.id, name: "read_file", sideEffect: .read,
             target: "/tmp/jarvis-service/input.txt", payload: "")
         let readDecision = try await service.submit(request: read)
         XCTAssertEqual(readDecision, .allow)
         for _ in 0..<50 {
-            if try await service.getTask(id: readTask.id)?.status == .completed { break }
+            if try requests.fetch(id: read.id)?.1 == .completed { break }
             try await Task.sleep(nanoseconds: 2_000_000)
         }
         let readStatus = try await service.getTask(id: readTask.id)?.status
-        XCTAssertEqual(readStatus, .completed)
+        XCTAssertEqual(readStatus, .running,
+                       "task stays .running after executor success; call complete(taskID:) to finish")
         let readEvents = try audits.events(for: readTask.id)
         XCTAssertEqual(readEvents.map(\.summary), [
             "task created", "task transitioned", "task transitioned", "tool request received",
@@ -35,7 +37,7 @@ final class FoundationAcceptanceTests: XCTestCase {
         ])
 
         // The approval flow (digest mismatch, correct approval, executor completion) lives on its own task
-        // because a finished executor transitions the task to .completed, blocking further submissions.
+        // because a finished executor now keeps the task in .running, ready for further submissions.
         let writeTask = try await service.createTask(title: "Foundation approval")
         let write = ToolRequest(taskID: writeTask.id, name: "write_file", sideEffect: .localWrite,
             target: "/tmp/jarvis-service/output.txt", payload: "secret=should-redact")
@@ -49,7 +51,8 @@ final class FoundationAcceptanceTests: XCTestCase {
         for _ in 0..<50 { if try requests.fetch(id: write.id)?.1 == .completed { break }; try await Task.sleep(nanoseconds: 2_000_000) }
         XCTAssertEqual(try requests.fetch(id: write.id)?.1, .completed)
         let writeStatus = try await service.getTask(id: writeTask.id)?.status
-        XCTAssertEqual(writeStatus, .completed)
+        XCTAssertEqual(writeStatus, .running,
+                       "task stays .running after executor success; call complete(taskID:) to finish")
         let writeEvents = try audits.events(for: writeTask.id)
         XCTAssertEqual(writeEvents.map(\.summary), [
             "task created", "task transitioned", "task transitioned", "tool request received",

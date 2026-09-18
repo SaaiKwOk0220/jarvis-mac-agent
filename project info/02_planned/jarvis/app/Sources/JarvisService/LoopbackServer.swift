@@ -84,6 +84,12 @@ public final class LoopbackServer: @unchecked Sendable {
                 try await service.cancel(taskID: taskID)
                 return LoopbackResponse(status: 204)
             }
+            if verb == "POST", parts.count == 3, parts[0] == "tasks", parts[2] == "complete" {
+                let id = parts[1]
+                guard let taskID = UUID(uuidString: id) else { return error(status: 400, message: "invalid task id") }
+                try await service.complete(taskID: taskID)
+                return LoopbackResponse(status: 204)
+            }
             if verb == "POST", parts.count == 3, parts[0] == "requests", parts[2] == "approve" {
                 let id = parts[1]
                 guard let requestID = UUID(uuidString: id) else { return error(status: 400, message: "invalid request id") }

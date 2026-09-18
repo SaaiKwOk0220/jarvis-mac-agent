@@ -82,4 +82,50 @@ final class LoopbackServerTests: XCTestCase {
         XCTAssertEqual(response.status, 404,
                        "POST /tasks/{unknown}/requests must return 404; got \(response.status)")
     }
+
+    /// POST `/tasks/{id}/complete` must return 204 and drive the task to
+    /// `.completed`. The endpoint also surfaces `illegalTransition` as a 409
+    /// when the task is already terminal — matching the pattern other
+    /// task-mutation endpoints use.
+    func testLoopbackServerAcceptsPOSTTaskComplete() async throws {
+        let (service, _, _, _, requests, _) = try makeService()
+        let server = LoopbackServer(service: service)
+        let task = try await service.createTask(title: "POST /complete happy path")
+        let request = ToolRequest(
+            taskID: task.id,
+            name: "read_file",
+            sideEffect: .read,
+            target: "/tmp/jarvis-loopback/anything",
+            payload: ""
+        )
+        _ = try await service.submit(request: request)
+        // Wait for the executor to finish; the task stays in .running.
+        for _ in 0..<50 {
+            if try requests.fetch(id: request.id)?.1 == .completed { break }
+            try await Task.sleep(nanoseconds: 2_000_000)
+        }
+
+        let response = await server.handle(
+            method: "POST",
+            path: "/tasks/\(task.id.uuidString)/complete",
+            body: Data(),
+            peerHost: "127.0.0.1"
+        )
+        XCTAssertEqual(response.status, 204,
+                       "POST /tasks/{id}/complete must return 204; got \(response.status)")
+        let completedStatus = try await service.getTask(id: task.id)?.status
+        XCTAssertEqual(completedStatus, .completed,
+                       "complete(taskID:) must move the task to .completed")
+
+        // Calling complete again must surface 409 (illegalTransition) — same
+        // shape as the cancel endpoint's terminal-state guard.
+        let second = await server.handle(
+            method: "POST",
+            path: "/tasks/\(task.id.uuidString)/complete",
+            body: Data(),
+            peerHost: "127.0.0.1"
+        )
+        XCTAssertEqual(second.status, 409,
+                       "POST /tasks/{id}/complete on a terminal task must return 409; got \(second.status)")
+    }
 }
