@@ -32,7 +32,24 @@ public struct TerminalToolExecutor: ToolExecutor, Sendable {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", request.payload]
+        // Wrap the payload so that when sh receives SIGTERM/SIGINT, it
+        // forwards the signal to every process in its process group
+        // (descendants the payload spawned). Without this, those descendants
+        // are reparented to launchd when sh exits and outlive our control.
+        // `kill -TERM -$$` addresses the group by pgid; Swift's `Process`
+        // spawns sh as a process-group leader (pgid == sh's pid), so this
+        // targets the shell and all of its children. `exit 143` records
+        // the SIGTERM exit. Limitation: a child that calls `setsid` or
+        // `setpgid` to escape the group will not be reached — for that
+        // case, replace this with a `posix_spawn`-based executor that
+        // tracks the pgid explicitly.
+        process.arguments = [
+            "-c",
+            """
+            trap 'kill -TERM -$$; exit 143' TERM INT
+            \(request.payload)
+            """
+        ]
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
@@ -57,19 +74,19 @@ public struct TerminalToolExecutor: ToolExecutor, Sendable {
         async let stderrTask = Self.readPipe(stderrPipe)
 
         defer {
-            // When the parent task is cancelled (or otherwise exits early),
-            // ensure the child process is not left as a short-lived orphan:
-            // SIGTERM, wait up to one second for graceful exit, then SIGKILL.
-            // We use Darwin's usleep() instead of Thread.sleep because
-            // Thread.sleep is unavailable from this async context.
+            // Even with the trap, escalate to SIGKILL on the entire process
+            // group if the shell is still alive after the grace period. The
+            // negative-pid form kills any grandchildren that survived
+            // (because the trap was bypassed by SIGKILL, a descendant called
+            // setsid to escape the group, or the trap itself failed).
             if process.isRunning {
-                process.terminate()
+                process.terminate() // SIGTERM — trap fires, kills the group
                 let deadline = Date().addingTimeInterval(1.0)
                 while process.isRunning && Date() < deadline {
                     usleep(50_000) // 50ms in microseconds
                 }
                 if process.isRunning {
-                    kill(process.processIdentifier, SIGKILL)
+                    kill(-process.processIdentifier, SIGKILL)
                 }
             }
         }
@@ -94,13 +111,13 @@ public struct TerminalToolExecutor: ToolExecutor, Sendable {
         while process.isRunning {
             try await Task.sleep(for: pollInterval)
             if ContinuousClock.now >= deadline {
-                process.terminate()
+                process.terminate() // SIGTERM — trap fires, kills the group
                 let graceDeadline = ContinuousClock.now.advanced(by: gracePeriod)
                 while process.isRunning && ContinuousClock.now < graceDeadline {
                     try await Task.sleep(for: pollInterval)
                 }
                 if process.isRunning {
-                    kill(process.processIdentifier, SIGKILL)
+                    kill(-process.processIdentifier, SIGKILL)
                 }
                 throw TerminalToolExecutorError.timeout
             }

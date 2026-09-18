@@ -154,4 +154,66 @@ final class TerminalToolExecutorTests: XCTestCase {
         XCTAssertTrue(result.summary.contains("exit=0"),
                       "expected chatty child to exit normally, got: \(result.summary)")
     }
+
+    func testCancellationKillsGrandchildProcess() async throws {
+        // The shell backgrounds `sleep 60` via `nohup` and `disown`s it so the
+        // grandchild is reparented to launchd and ignores SIGHUP. Without
+        // explicit group cleanup on cancel, the grandchild outlives the shell
+        // and is only reaped when launchd gets around to it.
+        //
+        // Why nohup + disown: a plain `sleep 60 &` is killed incidentally by
+        // bash sending SIGHUP to its job table on exit, which masks the bug
+        // on macOS. nohup makes the grandchild ignore HUP, and disown
+        // removes it from bash's job table — together these guarantee the
+        // grandchild survives a SIGTERM-on-shell unless the executor takes
+        // explicit action. With the trap wrapper that signals the whole
+        // process group, the grandchild dies regardless.
+        let pidFile = "/tmp/jarvis-grandchild-pid-\(UUID().uuidString).txt"
+        defer { try? FileManager.default.removeItem(atPath: pidFile) }
+
+        let payload = "nohup sleep 60 >/dev/null 2>&1 & echo $! > \(pidFile); disown; sleep 60"
+        let request = ToolRequest(
+            taskID: UUID(),
+            name: "shell",
+            sideEffect: .localExecute,
+            target: "/tmp",
+            payload: payload
+        )
+
+        let executor = TerminalToolExecutor()
+        let task = Task<Void, Error> {
+            do {
+                _ = try await executor.execute(request)
+                XCTFail("expected execute to be cancelled")
+            } catch is CancellationError {
+                // expected
+            } catch TerminalToolExecutorError.timeout {
+                // also acceptable: timeout fires before cancel propagates
+            }
+        }
+
+        // Give the child time to spawn and write the grandchild pid.
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: pidFile),
+                      "expected shell to have written \(pidFile) before cancellation")
+
+        let pidString = try String(contentsOfFile: pidFile, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let pid = pid_t(pidString) ?? 0
+        XCTAssertGreaterThan(pid, 0, "expected a positive pid, got: \(pidString)")
+
+        // Sanity: the grandchild should be alive right now.
+        XCTAssertEqual(kill(pid, 0), 0, "expected grandchild pid \(pid) to be alive pre-cancel")
+
+        task.cancel()
+
+        // The defer must SIGTERM the whole group, wait up to 1s for graceful
+        // exit, then SIGKILL the whole group. Give it 2.5s to settle.
+        try await Task.sleep(for: .milliseconds(2500))
+
+        // Grandchild PID should now be ESRCH (process gone).
+        let result = kill(pid, 0)
+        XCTAssertEqual(result, -1, "expected grandchild pid \(pid) to be reaped after cancel, kill returned \(result)")
+        XCTAssertEqual(errno, ESRCH, "expected ESRCH after cancel, got errno \(errno)")
+    }
 }
