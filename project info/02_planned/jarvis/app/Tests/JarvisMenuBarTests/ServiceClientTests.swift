@@ -552,4 +552,86 @@ final class ServiceClientTests: XCTestCase {
         XCTAssertNil(client.actionError,
             "submitScreenshot must not leave actionError populated on success")
     }
+
+    /// Drives `submitAccessibilityQuery` against a real LoopbackServer so the
+    /// end-to-end wiring (URLSession POST, JSON encode of the ToolRequest,
+    /// server-side submit, service-side persistence) is exercised. Mirrors the
+    /// `testSubmitScreenshotPostsScreenshotRequestToLoopbackServer` pattern but
+    /// pins the ax_query wire format: name=ax_query, sideEffect=read,
+    /// target=bundle ID, payload={"maxDepth":N}. The query is a `.read` action
+    /// and must not produce a pending approval row.
+    func testSubmitAccessibilityQueryPostsToLoopbackServer() async throws {
+        let database = try Database(path: ":memory:")
+        try database.migrate()
+        let tasks = SQLiteTaskRepository(database: database)
+        let audit = SQLiteAuditRepository(database: database)
+        let requests = SQLiteToolRequestRepository(database: database)
+        let approvals = SQLiteApprovalRepository(database: database)
+        let service = try TaskService(
+            taskRepository: tasks,
+            auditRepository: audit,
+            policy: Policy(),
+            policyConfig: PolicyConfig(applicationBundleIDs: ["com.apple.Safari"]),
+            accessibility: AccessibilityQueryToolExecutor(query: { _ in "AXApplication \"Safari\"" }),
+            requestRepository: requests,
+            approvalRepository: approvals,
+            unitOfWork: SQLitePersistenceUnitOfWork(database: database)
+        )
+        let server = LoopbackServer(service: service)
+        let port = try await server.start()
+        defer { server.stop() }
+
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let task = try await client.createTask(title: "Menu accessibility query")
+
+        try await client.submitAccessibilityQuery(
+            taskID: task.id,
+            target: "com.apple.Safari",
+            maxDepth: 6
+        )
+
+        // ax_query is a .read action against an allowlisted bundle ID and must
+        // not produce a pending approval row; the request lands in .executing
+        // (or already .completed).
+        let pending = try await service.listPendingApprovalRequests(taskID: task.id)
+        XCTAssertEqual(pending.count, 0,
+            "ax_query is a .read action and must not produce a pending approval row")
+
+        let stored = try await service.getTask(id: task.id)
+        XCTAssertNotEqual(stored?.status, .awaitingApproval,
+            "ax_query should not leave the task in awaitingApproval")
+
+        // Find the ax_query request the client just submitted. The order by
+        // status isn't guaranteed, so we look across all terminal states for
+        // the row whose name matches "ax_query".
+        let completedRequests = try requests.list(status: .completed).map(\.0)
+        let executingRequests = try requests.list(status: .executing).map(\.0)
+        let failedRequests = try requests.list(status: .failed).map(\.0)
+        let allRequests = completedRequests + executingRequests + failedRequests
+        let storedRequest = try XCTUnwrap(
+            allRequests.first(where: { $0.taskID == task.id && $0.name == "ax_query" }),
+            "expected the accessibility request to be persisted with name=ax_query"
+        )
+        XCTAssertEqual(storedRequest.taskID, task.id)
+        XCTAssertEqual(storedRequest.name, "ax_query")
+        XCTAssertEqual(storedRequest.sideEffect, .read)
+        XCTAssertEqual(storedRequest.target, "com.apple.Safari",
+            "target must be the bundle identifier so the policy app allowlist applies")
+        XCTAssertEqual(storedRequest.payload, "{\"maxDepth\":6}")
+
+        // Recompute the digest on the client side and verify it matches the
+        // server-side digest. This confirms the wire format (the body the
+        // client encoded) survived the round-trip without mangling.
+        let expectedDigest = ToolRequest.actionDigest(
+            name: "ax_query",
+            sideEffect: .read,
+            target: "com.apple.Safari",
+            payload: "{\"maxDepth\":6}"
+        )
+        XCTAssertEqual(storedRequest.payloadDigest, expectedDigest,
+            "digest from server must equal the one the client computed")
+
+        XCTAssertNil(client.actionError,
+            "submitAccessibilityQuery must not leave actionError populated on success")
+    }
 }

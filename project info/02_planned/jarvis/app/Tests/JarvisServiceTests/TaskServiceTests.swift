@@ -513,6 +513,49 @@ final class TaskServiceTests: XCTestCase {
         )
     }
 
+    /// Pins the executor dispatch contract for accessibility queries: a
+    /// `name == "ax_query"` request with `sideEffect == .read` and a bundle-ID
+    /// target must reach the `AccessibilityQueryToolExecutor` when one is
+    /// installed. The mock closure returns a distinctive tree string so we can
+    /// detect fall-through to a different executor (the NoOpToolExecutor would
+    /// produce "demo executor completed"). The bundle ID is allowlisted in the
+    /// Fixture's `PolicyConfig.applicationBundleIDs`, so the read-side policy
+    /// gate allows the request without approval.
+    func testAccessibilityQueryRoutesToExecutor() async throws {
+        let executor = AccessibilityQueryToolExecutor(query: { _ in "mock accessibility tree" })
+        let fixture = try Fixture(accessibility: executor)
+        let task = try await fixture.service.createTask(title: "AX query through service")
+        let request = ToolRequest(
+            taskID: task.id,
+            name: "ax_query",
+            sideEffect: .read,
+            target: "com.apple.Safari",
+            payload: ""
+        )
+
+        let decision = try await fixture.service.submit(request: request)
+        XCTAssertEqual(decision, .allow,
+            "ax_query is a .read action against an allowlisted bundle ID; policy should allow without approval")
+
+        for _ in 0..<100 {
+            if try fixture.requests.fetch(id: request.id)?.1 == .completed { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .running,
+            "Task stays .running after AccessibilityQueryToolExecutor finishes; call complete(taskID:) to finish")
+        XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .completed)
+        let toolResultAudit = try fixture.audit.events(for: task.id).first { $0.summary == "tool result" }
+        XCTAssertNotNil(toolResultAudit, "expected a 'tool result' audit after the AX executor finishes")
+        XCTAssertTrue(
+            toolResultAudit?.result.contains("mock accessibility tree") == true,
+            "audit must carry the accessibility tree so the user can see it; got: \(toolResultAudit?.result ?? "<nil>")"
+        )
+        XCTAssertFalse(
+            toolResultAudit?.result.contains("demo executor completed") == true,
+            "audit must not show the NoOp executor's marker; got: \(toolResultAudit?.result ?? "<nil>")"
+        )
+    }
+
     /// Drives a single executor run to completion and then verifies that
     /// `complete(taskID:)` is the only path that moves the task to
     /// `.completed`. After the executor finishes the task must be `.running`;
@@ -650,7 +693,7 @@ private final class Fixture: @unchecked Sendable {
     let approvals: SQLiteApprovalRepository
     let service: TaskService
 
-    init(executor: any ToolExecutor = NoOpToolExecutor(), terminal: TerminalToolExecutor? = nil, webFetch: WebFetchToolExecutor? = nil, screenshot: ScreenshotToolExecutor? = nil) throws {
+    init(executor: any ToolExecutor = NoOpToolExecutor(), terminal: TerminalToolExecutor? = nil, webFetch: WebFetchToolExecutor? = nil, screenshot: ScreenshotToolExecutor? = nil, accessibility: AccessibilityQueryToolExecutor? = nil) throws {
         database = try Database(path: ":memory:")
         try database.migrate()
         tasks = SQLiteTaskRepository(database: database)
@@ -661,13 +704,14 @@ private final class Fixture: @unchecked Sendable {
             approvedDirectories: ["/tmp/jarvis-service"],
             commandNames: ["shell", "swift", "xcodebuild"],
             browserProfiles: ["default"],
-            sites: ["example.com"]
+            sites: ["example.com"],
+            applicationBundleIDs: ["com.apple.Safari"]
         )
         service = try TaskService(
             taskRepository: tasks,
             auditRepository: audit,
             policy: Policy(),
-            policyConfig: policyConfig, executor: executor, terminal: terminal, webFetch: webFetch, screenshot: screenshot,
+            policyConfig: policyConfig, executor: executor, terminal: terminal, webFetch: webFetch, screenshot: screenshot, accessibility: accessibility,
             requestRepository: requests, approvalRepository: approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: database)
         )
     }

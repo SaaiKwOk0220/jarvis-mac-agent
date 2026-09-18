@@ -26,6 +26,9 @@ struct TaskListView: View {
             Button { openWindow(id: "screenshot") } label: {
                 Label("Capture screenshot…", systemImage: "camera")
             }
+            Button { openWindow(id: "ax-query") } label: {
+                Label("Inspect accessibility…", systemImage: "accessibility")
+            }
             if client.tasks.isEmpty {
                 Text(client.serviceError?.localizedDescription ?? "No tasks yet")
                     .foregroundStyle(.secondary)
