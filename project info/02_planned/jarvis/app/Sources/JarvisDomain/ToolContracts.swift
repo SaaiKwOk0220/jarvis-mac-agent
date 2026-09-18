@@ -143,6 +143,7 @@ public protocol TaskServiceAPI: Sendable {
     func approve(requestID: UUID, digest: String) async throws
     func reject(requestID: UUID) async throws
     func cancel(taskID: UUID) async throws
+    func complete(taskID: UUID) async throws
     func listPendingApprovalRequests(taskID: UUID) async throws -> [PendingApprovalRequest]
     func listTimelineEvents(taskID: UUID) async throws -> [TimelineEvent]
 }

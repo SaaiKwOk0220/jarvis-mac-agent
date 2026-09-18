@@ -198,14 +198,18 @@ final class TaskServiceTests: XCTestCase {
         try await fixture.service.approve(requestID: request.id, digest: request.payloadDigest)
 
         for _ in 0..<100 {
-            if try fixture.tasks.fetch(id: task.id)?.status == .completed { break }
+            if try fixture.requests.fetch(id: request.id)?.1 == .completed { break }
             try await Task.sleep(nanoseconds: 10_000_000)
         }
 
-        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .completed,
-            "Task should reach .completed once NoOpToolExecutor finishes; the demo executor must not leave the task in .running")
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .running,
+            "Task stays .running after executor success; call complete(taskID:) to finish")
         XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .completed)
         XCTAssertTrue(try fixture.audit.events(for: task.id).contains { $0.summary == "tool result" })
+
+        try await fixture.service.complete(taskID: task.id)
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .completed,
+            "complete(taskID:) transitions the running task to .completed")
     }
 
     func testRejectsRepositoriesFromDifferentDatabases() throws {
@@ -348,11 +352,12 @@ final class TaskServiceTests: XCTestCase {
         try await fixture.service.approve(requestID: request.id, digest: request.payloadDigest)
 
         for _ in 0..<100 {
-            if try fixture.tasks.fetch(id: task.id)?.status == .completed { break }
+            if try fixture.requests.fetch(id: request.id)?.1 == .completed { break }
             try await Task.sleep(nanoseconds: 10_000_000)
         }
 
-        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .completed)
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .running,
+            "Task stays .running after TerminalToolExecutor finishes; call complete(taskID:) to finish")
         XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .completed)
         XCTAssertTrue(
             try fixture.audit.events(for: task.id).contains { $0.summary == "tool result" && $0.result.contains("routed") },
@@ -399,11 +404,12 @@ final class TaskServiceTests: XCTestCase {
         try await fixture.service.approve(requestID: request.id, digest: request.payloadDigest)
 
         for _ in 0..<100 {
-            if try fixture.tasks.fetch(id: task.id)?.status == .completed { break }
+            if try fixture.requests.fetch(id: request.id)?.1 == .completed { break }
             try await Task.sleep(nanoseconds: 10_000_000)
         }
 
-        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .completed)
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .running,
+            "Task stays .running after TerminalToolExecutor finishes; call complete(taskID:) to finish")
         XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .completed)
         let toolResultAudit = try fixture.audit.events(for: task.id).first { $0.summary == "tool result" }
         XCTAssertNotNil(toolResultAudit, "expected a 'tool result' audit after Terminal executor finishes")
@@ -446,11 +452,11 @@ final class TaskServiceTests: XCTestCase {
         XCTAssertEqual(decision, .allow,
             "fetch should be allowed by policy without approval")
         for _ in 0..<100 {
-            if try fixture.tasks.fetch(id: task.id)?.status == .completed { break }
+            if try fixture.requests.fetch(id: request.id)?.1 == .completed { break }
             try await Task.sleep(nanoseconds: 10_000_000)
         }
-        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .completed,
-            "task should reach .completed once WebFetchToolExecutor finishes")
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .running,
+            "Task stays .running after WebFetchToolExecutor finishes; call complete(taskID:) to finish")
         XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .completed)
         let toolResultAudit = try fixture.audit.events(for: task.id).first { $0.summary == "tool result" }
         XCTAssertNotNil(toolResultAudit, "expected a 'tool result' audit after fetch executor finishes")
@@ -489,11 +495,11 @@ final class TaskServiceTests: XCTestCase {
             "screenshot is a .read action that lands inside an approved directory; policy should allow without approval")
 
         for _ in 0..<100 {
-            if try fixture.tasks.fetch(id: task.id)?.status == .completed { break }
+            if try fixture.requests.fetch(id: request.id)?.1 == .completed { break }
             try await Task.sleep(nanoseconds: 10_000_000)
         }
-        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .completed,
-            "task should reach .completed once ScreenshotToolExecutor finishes")
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .running,
+            "Task stays .running after ScreenshotToolExecutor finishes; call complete(taskID:) to finish")
         XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .completed)
         let toolResultAudit = try fixture.audit.events(for: task.id).first { $0.summary == "tool result" }
         XCTAssertNotNil(toolResultAudit, "expected a 'tool result' audit after Screenshot executor finishes")
@@ -505,6 +511,134 @@ final class TaskServiceTests: XCTestCase {
             toolResultAudit?.result.contains("demo executor completed") == true,
             "audit must not show the NoOp executor's marker; got: \(toolResultAudit?.result ?? "<nil>")"
         )
+    }
+
+    /// Drives a single executor run to completion and then verifies that
+    /// `complete(taskID:)` is the only path that moves the task to
+    /// `.completed`. After the executor finishes the task must be `.running`;
+    /// the new action emits a "task completed" audit event so the user can
+    /// see the call in the timeline.
+    func testCompleteTransitionsRunningTaskToCompleted() async throws {
+        let fixture = try Fixture()
+        let task = try await fixture.service.createTask(title: "Complete happy path")
+        let request = ToolRequest(taskID: task.id, name: "read_file", sideEffect: .read,
+            target: "/tmp/jarvis-service/anything", payload: "")
+        _ = try await fixture.service.submit(request: request)
+
+        for _ in 0..<50 {
+            if try fixture.requests.fetch(id: request.id)?.1 == .completed { break }
+            try await Task.sleep(nanoseconds: 2_000_000)
+        }
+
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .running,
+            "executor success leaves the task in .running; complete(taskID:) is the only path to .completed")
+
+        try await fixture.service.complete(taskID: task.id)
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .completed,
+            "complete(taskID:) must transition .running -> .completed")
+        XCTAssertTrue(try fixture.audit.events(for: task.id).contains { $0.summary == "task completed" },
+            "complete(taskID:) must record a 'task completed' audit event")
+    }
+
+    /// `complete(taskID:)` must reject calls made on a task that has already
+    /// reached a terminal state (`.completed`, `.cancelled`, `.failed`) with
+    /// `illegalTransition`. The test exercises each terminal state in turn.
+    func testCompleteRejectsAlreadyTerminalTask() async throws {
+        // .completed: drive a successful run then complete() twice
+        let fixture = try Fixture()
+        let completedTask = try await fixture.service.createTask(title: "Already completed")
+        let completedRequest = ToolRequest(taskID: completedTask.id, name: "read_file", sideEffect: .read,
+            target: "/tmp/jarvis-service/anything", payload: "")
+        _ = try await fixture.service.submit(request: completedRequest)
+        for _ in 0..<50 {
+            if try fixture.requests.fetch(id: completedRequest.id)?.1 == .completed { break }
+            try await Task.sleep(nanoseconds: 2_000_000)
+        }
+        try await fixture.service.complete(taskID: completedTask.id)
+        XCTAssertEqual(try fixture.tasks.fetch(id: completedTask.id)?.status, .completed)
+
+        await XCTAssertThrowsErrorAsync(try await fixture.service.complete(taskID: completedTask.id)) {
+            XCTAssertEqual($0 as? TaskServiceError, .illegalTransition(from: .completed, to: .completed))
+        }
+
+        // .cancelled: cancel and try to complete
+        let cancelledTask = try await fixture.service.createTask(title: "Already cancelled")
+        try await fixture.service.cancel(taskID: cancelledTask.id)
+        XCTAssertEqual(try fixture.tasks.fetch(id: cancelledTask.id)?.status, .cancelled)
+        await XCTAssertThrowsErrorAsync(try await fixture.service.complete(taskID: cancelledTask.id)) {
+            XCTAssertEqual($0 as? TaskServiceError, .illegalTransition(from: .cancelled, to: .completed))
+        }
+
+        // .failed: trigger an executor failure then try to complete
+        let failingFixture = try Fixture(executor: ThrowingExecutor())
+        let failedTask = try await failingFixture.service.createTask(title: "Already failed")
+        let failedRequest = ToolRequest(taskID: failedTask.id, name: "read_file", sideEffect: .read,
+            target: "/tmp/jarvis-service/anything", payload: "")
+        await XCTAssertThrowsErrorAsync(try await failingFixture.service.submit(request: failedRequest))
+        XCTAssertEqual(try failingFixture.tasks.fetch(id: failedTask.id)?.status, .failed)
+        await XCTAssertThrowsErrorAsync(try await failingFixture.service.complete(taskID: failedTask.id)) {
+            XCTAssertEqual($0 as? TaskServiceError, .illegalTransition(from: .failed, to: .completed))
+        }
+    }
+
+    /// Pins the multi-request behaviour: a single task carries two sequential
+    /// tool requests, both run to completion, the task stays in `.running`
+    /// throughout, and only the explicit `complete(taskID:)` call moves it
+    /// to `.completed`. This is the core contract that the rest of the
+    /// multi-request workflow depends on.
+    func testMultiRequestWorkflowExecutesSequentially() async throws {
+        let fixture = try Fixture()
+        let task = try await fixture.service.createTask(title: "Multi-request workflow")
+
+        // First request: .read action, allowed by policy, runs to completion.
+        let first = ToolRequest(taskID: task.id, name: "read_file", sideEffect: .read,
+            target: "/tmp/jarvis-service/first.txt", payload: "")
+        let firstDecision = try await fixture.service.submit(request: first)
+        XCTAssertEqual(firstDecision, .allow, "first .read request must be allowed without approval")
+
+        for _ in 0..<50 {
+            if try fixture.requests.fetch(id: first.id)?.1 == .completed { break }
+            try await Task.sleep(nanoseconds: 2_000_000)
+        }
+        XCTAssertEqual(try fixture.requests.fetch(id: first.id)?.1, .completed,
+            "first request must reach .completed")
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .running,
+            "after first request the task stays in .running; submit() can drive another request")
+
+        // Second request on the SAME task: .localWrite requires approval, lands in
+        // .awaitingApproval. Without explicit complete() the task must remain
+        // .running throughout.
+        let second = ToolRequest(taskID: task.id, name: "write_file", sideEffect: .localWrite,
+            target: "/tmp/jarvis-service/second.txt", payload: "second-step")
+        let secondDecision = try await fixture.service.submit(request: second)
+        XCTAssertEqual(secondDecision, .requireApproval(reason: "local write changes local state"),
+            "second request must require approval before the executor runs")
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .awaitingApproval,
+            "task moves to .awaitingApproval when the second request needs approval")
+        XCTAssertEqual(try fixture.requests.fetch(id: second.id)?.1, .pending)
+
+        // Approve the second request and wait for the executor to finish.
+        try await fixture.service.approve(requestID: second.id, digest: second.payloadDigest)
+        for _ in 0..<50 {
+            if try fixture.requests.fetch(id: second.id)?.1 == .completed { break }
+            try await Task.sleep(nanoseconds: 2_000_000)
+        }
+        XCTAssertEqual(try fixture.requests.fetch(id: second.id)?.1, .completed,
+            "second request must reach .completed after approval")
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .running,
+            "task stays in .running after second executor finishes")
+
+        // Now both requests have run; explicit complete() must move the task to .completed.
+        try await fixture.service.complete(taskID: task.id)
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .completed,
+            "complete(taskID:) must transition the task to .completed after both requests ran")
+
+        // Audit log must show both tool results and the explicit completion.
+        let summaries = try fixture.audit.events(for: task.id).map(\.summary)
+        XCTAssertEqual(summaries.filter { $0 == "tool result" }.count, 2,
+            "audit must record a 'tool result' event for each of the two executor runs")
+        XCTAssertTrue(summaries.contains("task completed"),
+            "audit must record the explicit complete(taskID:) call")
     }
 }
 

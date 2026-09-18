@@ -146,6 +146,27 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
 
     public func transition(taskID: UUID, to: TaskStatus) throws { try lock.withLock { let task = try requiredTask(taskID); try transition(task, to: to) } }
 
+    /// Marks a task as `.completed` from a non-terminal state. The task must
+    /// currently be `.running`, `.awaitingApproval`, `.draft`, `.planning`, or
+    /// `.blocked`; calling this on an already-terminal task
+    /// (`.completed`, `.cancelled`, or `.failed`) throws
+    /// `TaskServiceError.illegalTransition`. Use this after a multi-request
+    /// workflow finishes all of its tool runs to record the task as done.
+    public func complete(taskID: UUID) async throws {
+        try lock.withLock {
+            let task = try requiredTask(taskID)
+            guard task.status != .cancelled && task.status != .completed && task.status != .failed else {
+                throw TaskServiceError.illegalTransition(from: task.status, to: .completed)
+            }
+            try uow.transition(
+                taskID: task.id,
+                from: task.status,
+                to: .completed,
+                audits: [event(taskID: task.id, summary: "task completed", result: "completed")]
+            )
+        }
+    }
+
     private func startExecution(_ request: ToolRequest) {
         let gate = ExecutionGate()
         let job: Task<Void, Error> = Task { [weak self] in
@@ -175,10 +196,11 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
         _ = lock.withLock { executions.removeValue(forKey: requestID) }
     }
 
-    /// On a successful executor run the task transitions to `.completed`.
-    /// Further `submit(request:)` calls on this task will throw
-    /// `TaskServiceError.illegalTransition(from: .completed, to: .running)`,
-    /// so each task carries at most one tool request in this foundation.
+    /// On a successful executor run the task stays in `.running` so further
+    /// `submit(request:)` calls on this task can drive multi-request workflows.
+    /// Use `complete(taskID:)` to transition to `.completed` when the workflow
+    /// is done. Failed or cancelled requests still move the task to `.failed`
+    /// / `.cancelled` as before.
     private func execute(_ request: ToolRequest) async throws {
         do {
             try lock.withLock { guard let (_, status) = try requests.fetch(id: request.id), status == .executing else { throw TaskServiceError.requestNotAwaitingApproval }; try requireRunning(request.taskID) }
@@ -191,7 +213,7 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
             let result = try await picked.execute(request)
             try lock.withLock {
                 guard let task = try tasks.fetch(id: request.taskID), task.status != .cancelled else { return }
-                try uow.finishRequest(request, status: .completed, taskStatus: .completed, audits: [event(request, summary: "tool result", result: bounded(result.summary))])
+                try uow.finishRequest(request, status: .completed, taskStatus: .running, audits: [event(request, summary: "tool result", result: bounded(result.summary))])
             }
         } catch is CancellationError {
             // Cancellation transaction already sets request and task to cancelled; never add success/failure after it.

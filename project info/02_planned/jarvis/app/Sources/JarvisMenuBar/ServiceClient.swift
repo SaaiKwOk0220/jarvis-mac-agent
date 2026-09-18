@@ -232,6 +232,25 @@ public final class ServiceClient: ObservableObject {
         }
     }
 
+    /// Marks a multi-request task as `.completed`. A successful executor run
+    /// leaves the task in `.running` (not `.completed`) so additional tool
+    /// requests can be submitted on the same task; the caller must invoke
+    /// `completeTask` to record the workflow as done. A 409 response (already
+    /// terminal) is surfaced through `actionError` like the other mutations.
+    public func completeTask(taskID: UUID) async throws {
+        do {
+            try await mutate(path: "/tasks/\(taskID.uuidString)/complete")
+            try await refresh()
+            actionError = nil
+        } catch let error as ServiceClientError {
+            actionError = error.localizedDescription
+            throw error
+        } catch {
+            actionError = ServiceClientError.unavailable.localizedDescription
+            throw ServiceClientError.unavailable
+        }
+    }
+
     public func startDemoApproval(taskID: UUID) async throws {
         do {
             try await mutate(path: "/tasks/\(taskID.uuidString)/demo-approval")

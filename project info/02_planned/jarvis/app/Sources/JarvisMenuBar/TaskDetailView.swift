@@ -5,6 +5,7 @@ struct TaskDetailView: View {
     @ObservedObject var client: ServiceClient
     @State private var isCancelling = false
     @State private var isStartingDemo = false
+    @State private var isCompleting = false
 
     var body: some View {
         Group {
@@ -54,6 +55,21 @@ struct TaskDetailView: View {
                                 }
                             } label: { Label(isCancelling ? "Cancelling…" : "Cancel task", systemImage: "xmark.circle") }
                             .disabled(isCancelling)
+                        }
+                        if task.status == .running {
+                            Button {
+                                isCompleting = true
+                                client.clearActionError()
+                                Task {
+                                    defer { isCompleting = false }
+                                    do {
+                                        try await client.completeTask(taskID: task.id)
+                                    } catch {
+                                        // client.actionError already published by ServiceClient
+                                    }
+                                }
+                            } label: { Label(isCompleting ? "Completing…" : "Complete task", systemImage: "checkmark.seal") }
+                            .disabled(isCompleting)
                         }
                     }.padding(20)
                 }

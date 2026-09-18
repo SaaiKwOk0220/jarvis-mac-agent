@@ -266,6 +266,58 @@ final class ServiceClientTests: XCTestCase {
         XCTAssertEqual(client.tasks.map(\.id), [task.id])
     }
 
+    /// Drives `completeTask` against a real LoopbackServer so the end-to-end
+    /// wiring (URLSession POST, server-side `complete(taskID:)`, status
+    /// refresh) is exercised. The test starts a `.read` request, waits for
+    /// the executor to finish (leaving the task in `.running`), and then
+    /// verifies that `completeTask` drives it to `.completed`. A second call
+    /// surfaces a 409 through `actionError` like the other mutations.
+    func testCompleteTaskPostsToLoopbackServer() async throws {
+        let database = try Database(path: ":memory:")
+        try database.migrate()
+        let service = try TaskService(taskRepository: SQLiteTaskRepository(database: database),
+            auditRepository: SQLiteAuditRepository(database: database), policy: Policy(),
+            policyConfig: PolicyConfig(approvedDirectories: ["/tmp/jarvis-service"]))
+        let server = LoopbackServer(service: service)
+        let port = try await server.start()
+        defer { server.stop() }
+
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let task = try await client.createTask(title: "Menu complete task")
+
+        // Drive a .read request so the task lands in .running (the new
+        // non-terminal post-executor state).
+        let request = ToolRequest(taskID: task.id, name: "read_file", sideEffect: .read,
+            target: "/tmp/jarvis-service/anything", payload: "")
+        _ = try await service.submit(request: request)
+        for _ in 0..<50 {
+            if let (_, status) = try? SQLiteToolRequestRepository(database: database).fetch(id: request.id), status == .completed { break }
+            try await Task.sleep(nanoseconds: 2_000_000)
+        }
+        let runningStatus = try await service.getTask(id: task.id)?.status
+        XCTAssertEqual(runningStatus, .running,
+            "after executor success the task must still be .running")
+
+        try await client.completeTask(taskID: task.id)
+        XCTAssertNil(client.actionError,
+            "completeTask must clear actionError on success")
+        let completedStatus = try await service.getTask(id: task.id)?.status
+        XCTAssertEqual(completedStatus, .completed,
+            "completeTask must move the task to .completed via the loopback endpoint")
+
+        // Second call must surface a 409 through actionError, matching the
+        // shape used by cancel/approve for terminal-state conflicts.
+        do {
+            try await client.completeTask(taskID: task.id)
+            XCTFail("Expected completeTask to throw after the task is already completed")
+        } catch {
+            // Expected
+        }
+        XCTAssertNotNil(client.actionError)
+        XCTAssertTrue(client.actionError?.contains("409") == true,
+            "actionError should describe the 409 conflict; got: \(client.actionError ?? "nil")")
+    }
+
     /// Bug E: `previousStatuses` should never grow beyond the set of tasks
     /// returned by the current refresh. Stale entries for deleted tasks must
     /// be pruned so the diff stays bounded over a long-running session.
