@@ -19,6 +19,11 @@ struct JarvisMenuBarApp: App {
         MenuBarExtra("Jarvis", systemImage: "bolt.horizontal.circle") {
             TaskListView(client: client)
         }
+        Window("Welcome to Jarvis", id: "welcome") {
+            WelcomeView()
+                .frame(minWidth: 540, minHeight: 460)
+        }
+        .defaultSize(width: 600, height: 520)
         Window("New Jarvis Task", id: "new-task") {
             NewTaskView(client: client)
                 .frame(minWidth: 420, minHeight: 190)

@@ -57,7 +57,16 @@ struct TaskListView: View {
         }
         .padding(12)
         .frame(width: 300)
-        .task { _ = try? await client.refresh() }
+        .task {
+            _ = try? await client.refresh()
+            // First-launch onboarding: pop the welcome window once per
+            // install. The "welcomed" flag is set inside WelcomeView when
+            // the user taps "Get started", so we only ever open it when
+            // the flag is absent.
+            if !UserDefaults.standard.bool(forKey: WelcomeView.welcomedDefaultsKey) {
+                openWindow(id: "welcome")
+            }
+        }
     }
 
     private func color(for status: TaskStatus) -> Color {
