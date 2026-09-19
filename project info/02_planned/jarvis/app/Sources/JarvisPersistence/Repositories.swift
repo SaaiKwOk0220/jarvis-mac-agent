@@ -219,6 +219,12 @@ public final class SQLitePersistenceUnitOfWork: PersistenceUnitOfWork, @unchecke
     public let database: Database
     public init(database: Database) { self.database = database }
 
+    /// Requests may be attached to a task that is either actively executing
+    /// (`.running`) or waiting on a decision (`.awaitingApproval`). A task in
+    /// `.awaitingApproval` is still alive — it can accept more requests while
+    /// earlier ones await approval — so both statuses are accepted here.
+    private static let requestAcceptingTaskStatuses: Set<TaskStatus> = [.running, .awaitingApproval]
+
     public func createTask(_ task: JarvisTask, audit: AuditEvent) throws {
         try database.write { db in
             try insertTask(task, db: db); try insertAudit(audit, db: db)
@@ -226,7 +232,7 @@ public final class SQLitePersistenceUnitOfWork: PersistenceUnitOfWork, @unchecke
     }
     public func submitRequest(_ request: ToolRequest, status: ToolRequestStatus, taskStatus: TaskStatus, audits: [AuditEvent]) throws {
         try database.write { db in
-            try ensureTaskStatus(request.taskID, equals: .running, db: db)
+            try ensureTaskStatus(request.taskID, in: Self.requestAcceptingTaskStatuses, db: db)
             try updateTask(request.taskID, to: taskStatus, db: db)
             try insertToolRequest(request, status: status, db: db)
             for audit in audits { try insertAudit(audit, db: db) }
@@ -234,7 +240,7 @@ public final class SQLitePersistenceUnitOfWork: PersistenceUnitOfWork, @unchecke
     }
     public func approveRequest(_ request: ToolRequest, approval: Approval, taskStatus: TaskStatus, audits: [AuditEvent]) throws {
         try database.write { db in
-            try ensureTaskStatus(request.taskID, equals: .awaitingApproval, db: db)
+            try ensureTaskStatus(request.taskID, in: Self.requestAcceptingTaskStatuses, db: db)
             try updateTask(request.taskID, to: taskStatus, db: db)
             try updateToolRequest(request.id, to: .executing, db: db)
             try insertApproval(approval, db: db)
@@ -243,7 +249,7 @@ public final class SQLitePersistenceUnitOfWork: PersistenceUnitOfWork, @unchecke
     }
     public func rejectRequest(_ request: ToolRequest, approval: Approval, taskStatus: TaskStatus, audits: [AuditEvent]) throws {
         try database.write { db in
-            try ensureTaskStatus(request.taskID, equals: .awaitingApproval, db: db)
+            try ensureTaskStatus(request.taskID, in: Self.requestAcceptingTaskStatuses, db: db)
             try updateTask(request.taskID, to: taskStatus, db: db)
             try updateToolRequest(request.id, to: .rejected, db: db)
             try insertApproval(approval, db: db)
@@ -262,7 +268,7 @@ public final class SQLitePersistenceUnitOfWork: PersistenceUnitOfWork, @unchecke
     }
     public func recordRequest(_ request: ToolRequest, status: ToolRequestStatus, audits: [AuditEvent]) throws {
         try database.write { db in
-            try ensureTaskStatus(request.taskID, equals: .running, db: db)
+            try ensureTaskStatus(request.taskID, in: Self.requestAcceptingTaskStatuses, db: db)
             try insertToolRequest(request, status: status, db: db)
             for audit in audits { try insertAudit(audit, db: db) }
         }
@@ -299,6 +305,7 @@ private func toolRequest(from row: Row) throws -> (ToolRequest, ToolRequestStatu
 private func insertTask(_ task: JarvisTask, db: GRDB.Database) throws { try db.execute(sql: "INSERT INTO tasks (id,title,status,created_at,updated_at) VALUES (?,?,?,?,?)", arguments: [task.id.uuidString,task.title,task.status.rawValue,task.createdAt,task.updatedAt]) }
 private func updateTask(_ id: UUID, to status: TaskStatus, db: GRDB.Database) throws { try db.execute(sql: "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?", arguments: [status.rawValue,Date(),id.uuidString]) }
 private func ensureTaskStatus(_ id: UUID, equals status: TaskStatus, db: GRDB.Database) throws { guard let current: String = try Row.fetchOne(db, sql: "SELECT status FROM tasks WHERE id = ?", arguments: [id.uuidString])?["status"], current == status.rawValue else { throw PersistenceError.invalidStoredTask } }
+private func ensureTaskStatus(_ id: UUID, in allowed: Set<TaskStatus>, db: GRDB.Database) throws { guard let current: String = try Row.fetchOne(db, sql: "SELECT status FROM tasks WHERE id = ?", arguments: [id.uuidString])?["status"], let status = TaskStatus(rawValue: current), allowed.contains(status) else { throw PersistenceError.invalidStoredTask } }
 private func ensureTaskNotTerminal(_ id: UUID, db: GRDB.Database) throws { guard let current: String = try Row.fetchOne(db, sql: "SELECT status FROM tasks WHERE id = ?", arguments: [id.uuidString])?["status"], current != TaskStatus.cancelled.rawValue, current != TaskStatus.completed.rawValue else { throw PersistenceError.invalidStoredTask } }
 private func insertToolRequest(_ request: ToolRequest, status: ToolRequestStatus, db: GRDB.Database) throws { try db.execute(sql: "INSERT INTO tool_requests (id,task_id,name,side_effect,target,payload,browser_profile,working_directory,payload_digest,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)", arguments: [request.id.uuidString,request.taskID.uuidString,request.name,request.sideEffect.rawValue,request.target,request.payload,request.scope?.browserProfile,request.scope?.workingDirectory,request.payloadDigest,status.rawValue,Date()]) }
 private func updateToolRequest(_ id: UUID, to status: ToolRequestStatus, db: GRDB.Database) throws { try db.execute(sql: "UPDATE tool_requests SET status = ? WHERE id = ?", arguments: [status.rawValue,id.uuidString]) }

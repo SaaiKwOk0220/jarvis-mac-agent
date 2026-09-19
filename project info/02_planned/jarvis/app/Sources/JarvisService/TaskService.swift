@@ -118,7 +118,8 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
             guard let (request, status) = try requests.fetch(id: requestID), status == .pending else { throw TaskServiceError.requestNotAwaitingApproval }
             guard validateApproval(request: request, approvalDigest: digest) else { try audits.append(event(request, summary: "approval rejected", result: "digest mismatch")); throw TaskServiceError.approvalDigestMismatch }
             let approval = Approval(toolRequestID: request.id, actionDigest: request.payloadDigest, decision: .approved)
-            try uow.approveRequest(request, approval: approval, taskStatus: .running, audits: [event(request, summary: "approval accepted", result: "approved", approvalID: approval.id)])
+            let taskStatus = try aggregateStatus(forTask: request.taskID, excluding: request.id, fallback: .running)
+            try uow.approveRequest(request, approval: approval, taskStatus: taskStatus, audits: [event(request, summary: "approval accepted", result: "approved", approvalID: approval.id)])
             return request
         }
         startExecution(request)
@@ -128,7 +129,8 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
         try lock.withLock {
             guard let (request, status) = try requests.fetch(id: requestID), status == .pending else { throw TaskServiceError.requestNotAwaitingApproval }
             let approval = Approval(toolRequestID: request.id, actionDigest: request.payloadDigest, decision: .rejected)
-            try uow.rejectRequest(request, approval: approval, taskStatus: .blocked, audits: [event(request, summary: "approval rejected", result: "rejected", approvalID: approval.id)])
+            let taskStatus = try aggregateStatus(forTask: request.taskID, excluding: request.id, fallback: .blocked)
+            try uow.rejectRequest(request, approval: approval, taskStatus: taskStatus, audits: [event(request, summary: "approval rejected", result: "rejected", approvalID: approval.id)])
         }
     }
 
@@ -197,11 +199,13 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
         _ = lock.withLock { executions.removeValue(forKey: requestID) }
     }
 
-    /// On a successful executor run the task stays in `.running` so further
-    /// `submit(request:)` calls on this task can drive multi-request workflows.
-    /// Use `complete(taskID:)` to transition to `.completed` when the workflow
-    /// is done. Failed or cancelled requests still move the task to `.failed`
-    /// / `.cancelled` as before.
+    /// On a successful executor run the task returns to the status implied by
+    /// the requests that are still outstanding: `.running` when nothing else is
+    /// outstanding, or `.awaitingApproval` when another request is still pending
+    /// a decision. Either way further `submit(request:)` calls on this task can
+    /// drive multi-request workflows. Use `complete(taskID:)` to transition to
+    /// `.completed` when the workflow is done. Failed or cancelled requests
+    /// still move the task to `.failed` / `.cancelled` as before.
     private func execute(_ request: ToolRequest) async throws {
         do {
             try lock.withLock { guard let (_, status) = try requests.fetch(id: request.id), status == .executing else { throw TaskServiceError.requestNotAwaitingApproval }; try requireRunning(request.taskID) }
@@ -215,7 +219,8 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
             let result = try await picked.execute(request)
             try lock.withLock {
                 guard let task = try tasks.fetch(id: request.taskID), task.status != .cancelled else { return }
-                try uow.finishRequest(request, status: .completed, taskStatus: .running, audits: [event(request, summary: "tool result", result: bounded(result.summary))])
+                let taskStatus = try aggregateStatus(forTask: request.taskID, excluding: request.id, fallback: .running)
+                try uow.finishRequest(request, status: .completed, taskStatus: taskStatus, audits: [event(request, summary: "tool result", result: bounded(result.summary))])
             }
         } catch is CancellationError {
             // Cancellation transaction already sets request and task to cancelled; never add success/failure after it.
@@ -228,8 +233,24 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
         }
     }
 
-    private func ensureRunning(_ id: UUID) throws { let task = try requiredTask(id); switch task.status { case .draft: try transition(task, to: .planning); try transition(try requiredTask(id), to: .running); case .planning: try transition(task, to: .running); case .running: return; default: throw TaskServiceError.illegalTransition(from: task.status, to: .running) } }
-    private func requireRunning(_ id: UUID) throws { guard (try requiredTask(id)).status == .running else { throw TaskServiceError.illegalTransition(from: try requiredTask(id).status, to: .running) } }
+    private func ensureRunning(_ id: UUID) throws { let task = try requiredTask(id); switch task.status { case .draft: try transition(task, to: .planning); try transition(try requiredTask(id), to: .running); case .planning: try transition(task, to: .running); case .running, .awaitingApproval: return; default: throw TaskServiceError.illegalTransition(from: task.status, to: .running) } }
+    /// A task that is `.awaitingApproval` is still alive: it can accept further
+    /// requests while earlier ones wait for a decision, so it counts as running
+    /// for the purpose of attaching new work.
+    private func requireRunning(_ id: UUID) throws { let status = try requiredTask(id).status; guard status == .running || status == .awaitingApproval else { throw TaskServiceError.illegalTransition(from: status, to: .running) } }
+
+    /// Aggregates the task status implied by the requests that remain
+    /// outstanding once `excludedRequestID` has been moved out of the
+    /// `.pending` / `.executing` sets by the write this value accompanies.
+    /// The request being decided must be excluded, otherwise deciding the last
+    /// pending request would still see itself and never reach `fallback`.
+    /// Executing wins over pending; otherwise `fallback` applies.
+    private func aggregateStatus(forTask taskID: UUID, excluding excludedRequestID: UUID? = nil, fallback: TaskStatus) throws -> TaskStatus {
+        let executing = try requests.list(status: .executing).contains { $0.0.taskID == taskID && $0.0.id != excludedRequestID }
+        if executing { return .running }
+        let pending = try requests.list(status: .pending).contains { $0.0.taskID == taskID && $0.0.id != excludedRequestID }
+        return pending ? .awaitingApproval : fallback
+    }
     private func requiredTask(_ id: UUID) throws -> JarvisTask { guard let task = try tasks.fetch(id: id) else { throw TaskServiceError.taskNotFound }; return task }
     private func transition(_ task: JarvisTask, to: TaskStatus) throws { do { try TaskStateMachine.validate(from: task.status, to: to) } catch { throw TaskServiceError.illegalTransition(from: task.status, to: to) }; try uow.transition(taskID: task.id, from: task.status, to: to, audits: [event(taskID: task.id, summary: "task transitioned", result: "\(task.status.rawValue) -> \(to.rawValue)")]) }
     private func bounded(_ summary: String) -> String { String(redactSecrets(summary).prefix(512)) }

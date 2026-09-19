@@ -683,6 +683,180 @@ final class TaskServiceTests: XCTestCase {
         XCTAssertTrue(summaries.contains("task completed"),
             "audit must record the explicit complete(taskID:) call")
     }
+
+    // MARK: - Concurrent pending approvals
+
+    /// Pins the core capability of this change: a single task may hold more than
+    /// one `.pending` approval at a time. Submitting a second `.localWrite`
+    /// request while the first is still pending must succeed, leave the task in
+    /// `.awaitingApproval`, and expose both requests through
+    /// `listPendingApprovalRequests(taskID:)`.
+    func testTwoPendingApprovalsCoexistOnOneTask() async throws {
+        let fixture = try Fixture()
+        let (task, first, second) = try await fixture.makeTaskWithTwoPendingApprovals(title: "Two pending approvals")
+
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .awaitingApproval,
+            "the task stays in .awaitingApproval while any request is pending")
+        XCTAssertEqual(try fixture.requests.fetch(id: first.id)?.1, .pending)
+        XCTAssertEqual(try fixture.requests.fetch(id: second.id)?.1, .pending)
+
+        let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        XCTAssertEqual(Set(pending.map(\.id)), Set([first.id, second.id]),
+            "both pending approvals must be visible to the approver UI")
+    }
+
+    /// Approving one of two pending requests must not clear `.awaitingApproval`:
+    /// the second request still needs a decision, so the task status is
+    /// aggregated from the outstanding requests rather than hard-coded.
+    func testApprovingOneOfTwoPendingsKeepsTaskAwaitingApproval() async throws {
+        let fixture = try Fixture()
+        let (task, first, second) = try await fixture.makeTaskWithTwoPendingApprovals(title: "Approve one of two")
+
+        try await fixture.service.approve(requestID: first.id, digest: first.payloadDigest)
+        try await fixture.waitForRequest(id: first.id, status: .completed)
+
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .awaitingApproval,
+            "the second pending request keeps the task in .awaitingApproval after the first is approved")
+        XCTAssertEqual(try fixture.requests.fetch(id: second.id)?.1, .pending,
+            "the untouched request must remain pending")
+    }
+
+    /// Approving the last outstanding pending request runs it and, because no
+    /// request is left outstanding, returns the task to `.running` — the same
+    /// resting state a single-request approval produces.
+    func testApprovingBothPendingsRunsBothAndReturnsToRunning() async throws {
+        let fixture = try Fixture()
+        let (task, first, second) = try await fixture.makeTaskWithTwoPendingApprovals(title: "Approve both")
+
+        try await fixture.service.approve(requestID: first.id, digest: first.payloadDigest)
+        try await fixture.waitForRequest(id: first.id, status: .completed)
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .awaitingApproval,
+            "the task waits for the second decision")
+
+        try await fixture.service.approve(requestID: second.id, digest: second.payloadDigest)
+        try await fixture.waitForRequest(id: second.id, status: .completed)
+
+        XCTAssertEqual(try fixture.requests.fetch(id: first.id)?.1, .completed)
+        XCTAssertEqual(try fixture.requests.fetch(id: second.id)?.1, .completed)
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .running,
+            "with nothing outstanding the task returns to .running after the executor finishes")
+        XCTAssertEqual(try fixture.audit.events(for: task.id).filter { $0.summary == "tool result" }.count, 2,
+            "each approved request must record its own 'tool result' audit event")
+    }
+
+    /// Rejecting one of two pendings leaves the task `.awaitingApproval` and
+    /// keeps the other request actionable: the surviving request can still be
+    /// approved and run to completion.
+    func testRejectingOneOfTwoPendingsKeepsOtherActionable() async throws {
+        let fixture = try Fixture()
+        let (task, first, second) = try await fixture.makeTaskWithTwoPendingApprovals(title: "Reject one of two")
+
+        try await fixture.service.reject(requestID: first.id)
+
+        XCTAssertEqual(try fixture.requests.fetch(id: first.id)?.1, .rejected)
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .awaitingApproval,
+            "the surviving pending request keeps the task in .awaitingApproval")
+        XCTAssertEqual(try fixture.requests.fetch(id: second.id)?.1, .pending)
+
+        try await fixture.service.approve(requestID: second.id, digest: second.payloadDigest)
+        try await fixture.waitForRequest(id: second.id, status: .completed)
+
+        XCTAssertEqual(try fixture.requests.fetch(id: second.id)?.1, .completed,
+            "the request that outlived the rejection must still be approvable")
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .running)
+    }
+
+    /// Rejecting the *last* outstanding pending request preserves the original
+    /// single-request semantics: the task lands in `.blocked`.
+    func testRejectingLastPendingBlocksTask() async throws {
+        let fixture = try Fixture()
+        let (task, first, second) = try await fixture.makeTaskWithTwoPendingApprovals(title: "Reject both")
+
+        try await fixture.service.reject(requestID: first.id)
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .awaitingApproval,
+            "one pending request remains after the first rejection")
+
+        try await fixture.service.reject(requestID: second.id)
+
+        XCTAssertEqual(try fixture.requests.fetch(id: first.id)?.1, .rejected)
+        XCTAssertEqual(try fixture.requests.fetch(id: second.id)?.1, .rejected)
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .blocked,
+            "rejecting the last pending request blocks the task, as before")
+    }
+
+    /// A task that is `.awaitingApproval` is still alive, so an `.allow`
+    /// request may be submitted and executed without disturbing the pending
+    /// approval. Once the executor finishes, the task must fall back to
+    /// `.awaitingApproval` because a decision is still owed.
+    func testSubmittingWhileAwaitingApprovalIsAllowed() async throws {
+        let fixture = try Fixture()
+        let task = try await fixture.service.createTask(title: "Submit while awaiting approval")
+        let pendingRequest = ToolRequest(taskID: task.id, name: "write_file", sideEffect: .localWrite,
+            target: "/tmp/jarvis-service/needs-approval.txt", payload: "gated contents")
+        let pendingDecision = try await fixture.service.submit(request: pendingRequest)
+        XCTAssertEqual(pendingDecision, .requireApproval(reason: "local write changes local state"))
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .awaitingApproval)
+
+        let readRequest = ToolRequest(taskID: task.id, name: "read_file", sideEffect: .read,
+            target: "/tmp/jarvis-service/reads-freely.txt", payload: "")
+        let decision = try await fixture.service.submit(request: readRequest)
+
+        XCTAssertEqual(decision, .allow, "a .read request is allowed even while an approval is pending")
+        XCTAssertEqual(try fixture.requests.fetch(id: readRequest.id)?.1, .completed,
+            "the allowed request executes immediately")
+        XCTAssertEqual(try fixture.requests.fetch(id: pendingRequest.id)?.1, .pending,
+            "the pending approval is untouched by the allowed request")
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .awaitingApproval,
+            "the outstanding pending approval keeps the task in .awaitingApproval")
+    }
+
+    /// Cancelling a task must sweep up every outstanding request, not just the
+    /// first one, and record the task as `.cancelled`.
+    func testCancelWithMultiplePendingsCancelsAll() async throws {
+        let fixture = try Fixture()
+        let (task, first, second) = try await fixture.makeTaskWithTwoPendingApprovals(title: "Cancel multiple pendings")
+
+        try await fixture.service.cancel(taskID: task.id)
+
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .cancelled)
+        XCTAssertEqual(try fixture.requests.fetch(id: first.id)?.1, .cancelled)
+        XCTAssertEqual(try fixture.requests.fetch(id: second.id)?.1, .cancelled,
+            "every pending request must be cancelled alongside the task")
+    }
+
+    /// Regression guard for the already-working `.allow` path: two concurrent
+    /// allowed requests on one task both run to completion — unlike
+    /// `testCancellationCancelsMultipleExecutionsForOneTask`, nothing cancels
+    /// them. This is the behaviour the approval changes must not disturb.
+    func testConcurrentAllowRequestsRunInParallel() async throws {
+        let executor = MultiSuspendingExecutor()
+        let fixture = try Fixture(executor: executor)
+        let task = try await fixture.service.createTask(title: "Parallel allow requests")
+        let requests = (0..<2).map { ToolRequest(taskID: task.id, name: "read_file", sideEffect: .read,
+            target: "/tmp/jarvis-service/\($0)", payload: "") }
+        let submissions = requests.map { request in Task.detached { try? await fixture.service.submit(request: request) } }
+        await executor.started(ids: Set(requests.map(\.id)))
+
+        requests.forEach { executor.resume(id: $0.id) }
+        for submission in submissions { _ = await submission.result }
+
+        for request in requests {
+            XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .completed,
+                "both allowed requests must reach .completed when nothing cancels them")
+        }
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .running)
+        XCTAssertEqual(try fixture.audit.events(for: task.id).filter { $0.summary == "tool result" }.count, 2)
+    }
+
+    /// The state machine must tolerate status-preserving writes. Approving or
+    /// submitting while the task is already `.running` or `.awaitingApproval`
+    /// rewrites the same value, which would otherwise be an illegal transition.
+    func testStateMachineAllowsSelfTransitions() throws {
+        XCTAssertNoThrow(try TaskStateMachine.validate(from: .running, to: .running))
+        XCTAssertNoThrow(try TaskStateMachine.validate(from: .awaitingApproval, to: .awaitingApproval))
+        XCTAssertTrue(TaskStateMachine.allowedDestinations(for: .running).contains(.running))
+        XCTAssertTrue(TaskStateMachine.allowedDestinations(for: .awaitingApproval).contains(.awaitingApproval))
+    }
 }
 
 private final class Fixture: @unchecked Sendable {
@@ -718,6 +892,35 @@ private final class Fixture: @unchecked Sendable {
 
     func makeService() throws -> TaskService {
         try TaskService(taskRepository: tasks, auditRepository: audit, policy: Policy(), policyConfig: PolicyConfig(approvedDirectories: ["/tmp/jarvis-service"]), requestRepository: requests, approvalRepository: approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: database))
+    }
+
+    /// Creates a task and submits two `.localWrite` requests. The deterministic
+    /// policy routes both to `.requireApproval`, so the task ends up in
+    /// `.awaitingApproval` holding two `.pending` requests — the concurrent
+    /// pending-approval state this suite exercises. Returns the task and both
+    /// requests in submission order.
+    func makeTaskWithTwoPendingApprovals(title: String) async throws -> (JarvisTask, ToolRequest, ToolRequest) {
+        let task = try await service.createTask(title: title)
+        let first = ToolRequest(taskID: task.id, name: "write_file", sideEffect: .localWrite,
+            target: "/tmp/jarvis-service/first.txt", payload: "first payload")
+        let second = ToolRequest(taskID: task.id, name: "write_file", sideEffect: .localWrite,
+            target: "/tmp/jarvis-service/second.txt", payload: "second payload")
+        let firstDecision = try await service.submit(request: first)
+        let secondDecision = try await service.submit(request: second)
+        XCTAssertEqual(firstDecision, .requireApproval(reason: "local write changes local state"))
+        XCTAssertEqual(secondDecision, .requireApproval(reason: "local write changes local state"))
+        XCTAssertEqual(try tasks.fetch(id: task.id)?.status, .awaitingApproval)
+        return (task, first, second)
+    }
+
+    /// Polls until the request reaches `status`, matching the wait loops the
+    /// rest of the suite uses for executor-backed work. A timeout simply
+    /// returns, letting the caller's assertion report the mismatch.
+    func waitForRequest(id: UUID, status: ToolRequestStatus, iterations: Int = 100) async throws {
+        for _ in 0..<iterations {
+            if try requests.fetch(id: id)?.1 == status { return }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
     }
 }
 
