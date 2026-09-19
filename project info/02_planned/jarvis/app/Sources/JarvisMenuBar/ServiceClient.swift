@@ -58,6 +58,13 @@ public enum ServiceClientError: Error, Equatable, LocalizedError, Sendable {
 
 @MainActor
 public final class ServiceClient: ObservableObject {
+    /// Process-wide reference to the active service client. The app
+    /// (`JarvisMenuBarApp`) sets this once during startup so non-SwiftUI
+    /// entry points — global hotkeys, App Intents — can read live task data
+    /// without going through a SwiftUI environment. Weak to keep
+    /// `ServiceClient`'s lifecycle tied to the SwiftUI scene graph.
+    public static weak var shared: ServiceClient?
+
     @Published public private(set) var tasks: [JarvisTask] = []
     @Published public private(set) var selectedTask: JarvisTask?
     @Published public private(set) var approvalRequests: [UUID: ApprovalRequest] = [:]
@@ -89,6 +96,9 @@ public final class ServiceClient: ObservableObject {
             Task { _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) }
         }
         #endif
+        if ServiceClient.shared == nil {
+            ServiceClient.shared = self
+        }
     }
 
     public func configure(baseURL: URL) {

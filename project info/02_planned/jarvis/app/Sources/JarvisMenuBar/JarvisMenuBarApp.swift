@@ -1,5 +1,6 @@
 import SwiftUI
 import Foundation
+import Carbon.HIToolbox
 import JarvisPersistence
 import JarvisPolicy
 import JarvisService
@@ -13,6 +14,7 @@ struct JarvisMenuBarApp: App {
         let client = ServiceClient()
         _client = StateObject(wrappedValue: client)
         runtime = Runtime(client: client)
+        registerGlobalHotkey()
     }
 
     var body: some Scene {
@@ -96,6 +98,29 @@ private final class Runtime {
             }
         } catch {
             // The UI remains available and reports an unavailable service if setup fails.
+        }
+    }
+}
+
+/// Registers Cmd+Shift+J as a process-wide hotkey using Carbon's
+/// `RegisterEventHotKey`. Carbon is the only public macOS API that captures
+/// the keystroke (so it does not leak to the frontmost app); `NSEvent`
+/// monitors are observer-only. Registration failures are non-fatal: the
+/// menu-bar UI continues to work, and the user can still reach Jarvis via
+/// the menu-bar icon or the "Ask Jarvis" App Intent.
+private extension JarvisMenuBarApp {
+    func registerGlobalHotkey() {
+        do {
+            try HotkeyManager.shared.register(
+                keyCode: UInt32(kVK_ANSI_J),
+                modifiers: UInt32(cmdKey | shiftKey)
+            ) {
+                HotkeyAction.perform()
+            }
+        } catch {
+            FileHandle.standardError.write(Data(
+                "Jarvis: failed to register Cmd+Shift+J hotkey: \(error)\n".utf8
+            ))
         }
     }
 }
