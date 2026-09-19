@@ -19,9 +19,15 @@ public enum TaskStateMachine {
         case .planning:
             [.running, .blocked, .failed, .cancelled]
         case .running:
-            [.awaitingApproval, .blocked, .failed, .completed, .cancelled]
+            // `.running -> .running` is a legal no-op: a second allowed request
+            // finishing, or an approval that clears the last outstanding
+            // request, rewrites the same status instead of moving the task.
+            [.running, .awaitingApproval, .blocked, .failed, .completed, .cancelled]
         case .awaitingApproval:
-            [.running, .blocked, .failed, .cancelled]
+            // `.awaitingApproval -> .awaitingApproval` lets a task accumulate
+            // several pending requests, and lets one of them be decided while
+            // others remain, without an illegal status write.
+            [.awaitingApproval, .running, .blocked, .failed, .cancelled]
         case .blocked:
             [.planning, .failed, .cancelled]
         case .failed, .cancelled, .completed:

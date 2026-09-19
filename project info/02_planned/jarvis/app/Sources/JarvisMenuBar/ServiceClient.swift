@@ -164,10 +164,12 @@ public final class ServiceClient: ObservableObject {
         do {
             let requests = try Self.decoder.decode([ApprovalRequest].self, from: data)
             // Key by taskID so the UI can resolve the active pending request for a
-            // task with `approvalRequests[task.id]`. `TaskService.submit(request:)`
-            // enforces "one task, one pending request at a time", but if the
-            // response ever carries multiple entries for the same taskID the
-            // last one wins, which is the safe choice for the approver UI.
+            // task with `approvalRequests[task.id]`. A task may now hold several
+            // pending requests at once (see the multi-pending-approval change in
+            // TaskService); this dictionary collapses them and the last one in the
+            // response wins. That is accurate for the single-request case and safe
+            // — if lossy — for the multi-pending case; showing all pendings is a
+            // follow-up UI change.
             for request in requests {
                 approvalRequests[request.taskID] = request
             }
