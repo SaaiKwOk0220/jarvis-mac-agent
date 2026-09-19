@@ -857,6 +857,56 @@ final class TaskServiceTests: XCTestCase {
         XCTAssertTrue(TaskStateMachine.allowedDestinations(for: .running).contains(.running))
         XCTAssertTrue(TaskStateMachine.allowedDestinations(for: .awaitingApproval).contains(.awaitingApproval))
     }
+
+    // MARK: - Failure path aggregation
+
+    /// Pins the fix for the failure-path aggregation bug: when one of two
+    /// pending requests is approved and its executor throws, the surviving
+    /// pending request must keep the task in `.awaitingApproval`. The task
+    /// must NOT be hard-coded to `.failed` — that would orphan the second
+    /// pending request because the state machine has no exit from `.failed`.
+    /// Approving and running the surviving request must still work after the
+    /// failure.
+    func testFailurePathAggregatesWithPendingRequest() async throws {
+        let fixture = try Fixture(executor: ThrowingExecutor())
+        let (task, first, second) = try await fixture.makeTaskWithTwoPendingApprovals(title: "Failure with survivor")
+
+        try await fixture.service.approve(requestID: first.id, digest: first.payloadDigest)
+        try await fixture.waitForRequest(id: first.id, status: .failed)
+
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .awaitingApproval,
+            "the surviving pending request must keep the task in .awaitingApproval after the first fails")
+        XCTAssertEqual(try fixture.requests.fetch(id: first.id)?.1, .failed)
+        XCTAssertEqual(try fixture.requests.fetch(id: second.id)?.1, .pending,
+            "the untouched request must remain pending")
+
+        // The surviving request must still be actionable after the failure.
+        try await fixture.service.approve(requestID: second.id, digest: second.payloadDigest)
+        try await fixture.waitForRequest(id: second.id, status: .failed)
+        XCTAssertEqual(try fixture.requests.fetch(id: second.id)?.1, .failed,
+            "the surviving request must still be approvable after its sibling failed")
+    }
+
+    /// Pins the failure-path fallback: when the only outstanding request is the
+    /// one that failed, the task lands in `.failed`. This is the unchanged
+    /// single-request semantics — the new aggregation rule only diverges when
+    /// another request is still outstanding.
+    func testFailurePathWithNoPendingMarksTaskFailed() async throws {
+        let fixture = try Fixture(executor: ThrowingExecutor())
+        let task = try await fixture.service.createTask(title: "Failure with no survivors")
+        let request = ToolRequest(taskID: task.id, name: "write_file", sideEffect: .localWrite,
+            target: "/tmp/jarvis-service/alone.txt", payload: "only payload")
+        _ = try await fixture.service.submit(request: request)
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .awaitingApproval,
+            "submitting a .localWrite lands the task in .awaitingApproval before approval")
+
+        try await fixture.service.approve(requestID: request.id, digest: request.payloadDigest)
+        try await fixture.waitForRequest(id: request.id, status: .failed)
+
+        XCTAssertEqual(try fixture.tasks.fetch(id: task.id)?.status, .failed,
+            "with no other outstanding requests, failure falls back to .failed")
+        XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .failed)
+    }
 }
 
 private final class Fixture: @unchecked Sendable {
