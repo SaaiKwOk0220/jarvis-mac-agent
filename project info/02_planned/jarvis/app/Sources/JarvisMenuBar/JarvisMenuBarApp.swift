@@ -70,7 +70,11 @@ private final class Runtime {
                     commandNames: ["shell", "swift", "xcodebuild"],
                     browserProfiles: ["default"],
                     sites: [],
-                    applicationBundleIDs: []
+                    applicationBundleIDs: [
+                        "com.apple.finder",
+                        "com.apple.Safari",
+                        "com.apple.Terminal"
+                    ]
                 ),
                 executor: NoOpToolExecutor(),
                 terminal: TerminalToolExecutor(),
