@@ -245,6 +245,45 @@ final class ServiceClientTests: XCTestCase {
         XCTAssertEqual(client.approvalRequests[task.id]?.digest, request.payloadDigest)
     }
 
+    /// Documents the current ServiceClient contract: `approvalRequests` is keyed by taskID,
+    /// so multiple pending requests for the same task collapse to the *last* one received in the
+    /// server response. ApprovalView uses this directly via `client.approvalRequests[task.id]`;
+    /// if a UI change wants to surface every pending, it must fetch via `loadApprovalRequests`
+    /// and aggregate rather than rely on the dictionary.
+    func testMultiplePendingApprovalsForSameTaskCollapseToLast() async throws {
+        let database = try Database(path: ":memory:")
+        try database.migrate()
+        let service = try TaskService(
+            taskRepository: SQLiteTaskRepository(database: database),
+            auditRepository: SQLiteAuditRepository(database: database),
+            policy: Policy(),
+            policyConfig: PolicyConfig(approvedDirectories: ["/tmp/jarvis-c-collapse"]),
+            requestRepository: SQLiteToolRequestRepository(database: database),
+            approvalRepository: SQLiteApprovalRepository(database: database),
+            unitOfWork: SQLitePersistenceUnitOfWork(database: database)
+        )
+        let task = try await service.createTask(title: "Multi-pending collapse")
+        let first = ToolRequest(taskID: task.id, name: "write_file", sideEffect: .localWrite,
+            target: "/tmp/jarvis-c-collapse/first.txt", payload: "first payload")
+        let second = ToolRequest(taskID: task.id, name: "write_file", sideEffect: .localWrite,
+            target: "/tmp/jarvis-c-collapse/second.txt", payload: "second payload")
+        _ = try await service.submit(request: first)
+        _ = try await service.submit(request: second)
+
+        let server = LoopbackServer(service: service)
+        let port = try await server.start()
+        defer { server.stop() }
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+
+        let fetched = try await client.loadApprovalRequests(taskID: task.id)
+        XCTAssertEqual(fetched.count, 2, "Server should return both pending requests for the task")
+        XCTAssertEqual(client.approvalRequests.count, 1, "ServiceClient dict collapses to one entry per taskID")
+        let resolved = try XCTUnwrap(client.approvalRequests[task.id],
+            "After load, the last entry received must be resolvable via [task.id]")
+        XCTAssertTrue([first.id, second.id].contains(resolved.id),
+            "Collapsed entry must be one of the two requests; got \(resolved.id)")
+    }
+
     /// Bug D: NewTaskView used to call `client.select(task)` after `createTask`,
     /// which already sets `selectedTask` internally. The redundant call
     /// triggered a second `@Published` re-render. The view layer fix relies on
