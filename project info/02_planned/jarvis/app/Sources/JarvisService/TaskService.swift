@@ -204,8 +204,11 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     /// outstanding, or `.awaitingApproval` when another request is still pending
     /// a decision. Either way further `submit(request:)` calls on this task can
     /// drive multi-request workflows. Use `complete(taskID:)` to transition to
-    /// `.completed` when the workflow is done. Failed or cancelled requests
-    /// still move the task to `.failed` / `.cancelled` as before.
+    /// `.completed` when the workflow is done. A thrown executor goes through
+    /// the same aggregate so that an in-flight failure does not orphan another
+    /// pending request on the same task: failure + another pending →
+    /// `.awaitingApproval`; failure + another executing → `.running`;
+    /// failure + nothing else outstanding → `.failed`.
     private func execute(_ request: ToolRequest) async throws {
         do {
             try lock.withLock { guard let (_, status) = try requests.fetch(id: request.id), status == .executing else { throw TaskServiceError.requestNotAwaitingApproval }; try requireRunning(request.taskID) }
@@ -225,9 +228,11 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
         } catch is CancellationError {
             // Cancellation transaction already sets request and task to cancelled; never add success/failure after it.
         } catch {
+            let fallback: TaskStatus = .failed
+            let aggregate: TaskStatus = (try? aggregateStatus(forTask: request.taskID, excluding: request.id, fallback: fallback)) ?? fallback
             try lock.withLock {
                 guard let task = try tasks.fetch(id: request.taskID), task.status != .cancelled else { return }
-                try uow.finishRequest(request, status: .failed, taskStatus: .failed, audits: [event(request, summary: "tool failure", result: "failed")])
+                try uow.finishRequest(request, status: .failed, taskStatus: aggregate, audits: [event(request, summary: "tool failure", result: "failed")])
             }
             throw error
         }
