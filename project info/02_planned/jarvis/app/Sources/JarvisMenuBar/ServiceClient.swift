@@ -408,6 +408,62 @@ public final class ServiceClient: ObservableObject {
         }
     }
 
+    /// Submits an accessibility-query tool request for an existing task. The
+    /// target is an application bundle identifier (`com.*`) and is checked
+    /// before the request leaves the UI: bundle identifiers are the only shape
+    /// the read-side policy gate can match against
+    /// `PolicyConfig.applicationBundleIDs`, so a bare process id or a display
+    /// name would be denied as "not allowlisted" with a confusing reason.
+    ///
+    /// `maxDepth` bounds how many levels of the accessibility tree the
+    /// executor walks. Like `submitFetchURL`, the request is a `.read` action
+    /// and does not require an approval step; the task-detail window will show
+    /// the inspection progressing straight through to `.completed`.
+    ///
+    /// The request carries no `scope`: the read-side policy gate for a bundle
+    /// ID target consults `PolicyConfig.applicationBundleIDs` only, and an
+    /// all-nil `ToolScope` would not survive persistence — the repository
+    /// normalizes it back to `nil`, which changes the recomputed digest and
+    /// makes the stored request unreadable.
+    public func submitAccessibilityQuery(
+        taskID: UUID,
+        target: String,
+        maxDepth: Int
+    ) async throws {
+        let trimmed = target.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw ServiceClientError.http(status: 400, message: "target is required")
+        }
+        guard trimmed.hasPrefix("com.") else {
+            throw ServiceClientError.http(status: 400, message: "target must be an application bundle identifier (com.*)")
+        }
+        let payload = "{\"maxDepth\":\(maxDepth)}"
+        let request = ToolRequest(
+            taskID: taskID,
+            name: "ax_query",
+            sideEffect: .read,
+            target: trimmed,
+            payload: payload
+        )
+        do {
+            var urlRequest = URLRequest(url: baseURL.appendingPathComponent("tasks/\(taskID.uuidString)/requests"))
+            urlRequest.httpMethod = "POST"
+            urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            urlRequest.httpBody = try JSONEncoder().encode(request)
+            let (data, response) = try await session.data(for: urlRequest)
+            try Self.validate(response: response, data: data)
+            _ = try await refresh()
+            _ = try await loadApprovalRequests(taskID: taskID)
+            actionError = nil
+        } catch let error as ServiceClientError {
+            actionError = error.localizedDescription
+            throw error
+        } catch {
+            actionError = ServiceClientError.unavailable.localizedDescription
+            throw ServiceClientError.unavailable
+        }
+    }
+
     /// Resolves the directory under which `submitScreenshot` writes its
     /// captures. Mirrors the path Runtime uses for the same data
     /// (`<appSupport>/Jarvis/screenshots/`); both the production submit

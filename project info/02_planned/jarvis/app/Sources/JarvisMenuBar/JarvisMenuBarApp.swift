@@ -39,6 +39,11 @@ struct JarvisMenuBarApp: App {
                 .frame(minWidth: 480, minHeight: 220)
         }
         .defaultSize(width: 540, height: 260)
+        Window("Inspect Accessibility", id: "ax-query") {
+            NewAccessibilityQueryView(client: client)
+                .frame(minWidth: 480, minHeight: 260)
+        }
+        .defaultSize(width: 540, height: 300)
         Window("Jarvis Task", id: "task-detail") {
             TaskDetailView(client: client)
                 .frame(minWidth: 420, minHeight: 360)
@@ -64,12 +69,14 @@ private final class Runtime {
                     approvedDirectories: [appSupport.path],
                     commandNames: ["shell", "swift", "xcodebuild"],
                     browserProfiles: ["default"],
-                    sites: []
+                    sites: [],
+                    applicationBundleIDs: []
                 ),
                 executor: NoOpToolExecutor(),
                 terminal: TerminalToolExecutor(),
                 webFetch: WebFetchToolExecutor(),
-                screenshot: ScreenshotToolExecutor())
+                screenshot: ScreenshotToolExecutor(),
+                accessibility: AccessibilityQueryToolExecutor())
             let server = LoopbackServer(service: service)
             self.server = server
             Task { @MainActor in
