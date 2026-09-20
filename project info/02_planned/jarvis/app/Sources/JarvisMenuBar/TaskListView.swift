@@ -14,6 +14,9 @@ struct TaskListView: View {
                     .buttonStyle(.borderless)
             }
             Divider()
+            Button { openWindow(id: "ask-jarvis") } label: {
+                Label("Ask Jarvis…", systemImage: "sparkles")
+            }
             Button { openWindow(id: "new-task") } label: {
                 Label("New task…", systemImage: "plus.circle")
             }

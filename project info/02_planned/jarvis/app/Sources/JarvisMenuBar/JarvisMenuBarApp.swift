@@ -1,6 +1,7 @@
 import SwiftUI
 import Foundation
 import Carbon.HIToolbox
+import JarvisDomain
 import JarvisPersistence
 import JarvisPolicy
 import JarvisService
@@ -56,12 +57,24 @@ struct JarvisMenuBarApp: App {
                 .frame(minWidth: 420, minHeight: 360)
         }
         .defaultSize(width: 520, height: 460)
+        Window("Ask Jarvis", id: "ask-jarvis") {
+            AskJarvisView(client: client, service: runtime.taskService)
+                .frame(minWidth: 520, minHeight: 460)
+        }
+        .defaultSize(width: 620, height: 560)
     }
 }
 
 /// Owns the local service for the lifetime of the menu-bar process.
 private final class Runtime {
     private var server: LoopbackServer?
+
+    /// The live service backing the menu-bar UI, or `nil` when startup failed
+    /// (the UI stays usable and reports an unavailable service). The "Ask
+    /// Jarvis" window needs the real instance — not the HTTP client — to hand
+    /// to `TaskServiceToolRunner`; both paths end up at this one service, so
+    /// the agent loop is bound by the same policy gate as every other task.
+    private(set) var taskService: (any TaskServiceAPI)?
 
     init(client: ServiceClient) {
         do {
@@ -88,6 +101,7 @@ private final class Runtime {
                 webFetch: WebFetchToolExecutor(),
                 screenshot: ScreenshotToolExecutor(),
                 accessibility: AccessibilityQueryToolExecutor())
+            self.taskService = service
             let server = LoopbackServer(service: service)
             self.server = server
             Task { @MainActor in
