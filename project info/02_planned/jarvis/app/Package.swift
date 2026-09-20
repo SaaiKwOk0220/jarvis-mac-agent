@@ -23,6 +23,7 @@ let package = Package(
                 .product(name: "GRDB", package: "GRDB.swift"),
             ]
         ),
+        .target(name: "JarvisLLM", dependencies: ["JarvisDomain"]),
         .target(
             name: "JarvisService",
             dependencies: ["JarvisDomain", "JarvisPersistence", "JarvisPolicy"]
@@ -32,6 +33,7 @@ let package = Package(
             dependencies: ["JarvisDomain", "JarvisService"]
         ),
         .testTarget(name: "JarvisDomainTests", dependencies: ["JarvisDomain"]),
+        .testTarget(name: "JarvisLLMTests", dependencies: ["JarvisLLM"]),
         .testTarget(name: "JarvisPolicyTests", dependencies: ["JarvisPolicy", "JarvisDomain"]),
         .testTarget(
             name: "JarvisPersistenceTests",
