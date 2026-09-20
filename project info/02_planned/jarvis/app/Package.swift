@@ -30,7 +30,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "JarvisMenuBar",
-            dependencies: ["JarvisDomain", "JarvisService"]
+            dependencies: ["JarvisDomain", "JarvisService", "JarvisPolicy", "JarvisLLM"]
         ),
         .testTarget(name: "JarvisDomainTests", dependencies: ["JarvisDomain"]),
         .testTarget(name: "JarvisLLMTests", dependencies: ["JarvisLLM"]),
@@ -49,7 +49,7 @@ let package = Package(
         ),
         .testTarget(
             name: "JarvisMenuBarTests",
-            dependencies: ["JarvisMenuBar", "JarvisDomain"]
+            dependencies: ["JarvisMenuBar", "JarvisDomain", "JarvisLLM"]
         ),
         .testTarget(
             name: "JarvisAcceptanceTests",

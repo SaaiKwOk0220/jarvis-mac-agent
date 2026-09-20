@@ -58,6 +58,18 @@ final class ScriptedRunner: AgentToolRunner, @unchecked Sendable {
     }
 }
 
+/// Collects the events the loop reports, in order, so tests can assert the
+/// run's observable sequence. The lock makes it safe to read after an `await`
+/// on the loop, matching `ScriptedProvider`'s pattern.
+final class EventRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [AgentLoopEvent] = []
+
+    func record(_ event: AgentLoopEvent) { lock.withLock { recorded.append(event) } }
+
+    var events: [AgentLoopEvent] { lock.withLock { recorded } }
+}
+
 private extension NSLock {
     func withLock<T>(_ body: () throws -> T) rethrows -> T {
         lock(); defer { unlock() }; return try body()
@@ -199,5 +211,28 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertEqual(firstTurn.count, 2)
         XCTAssertEqual(firstTurn[0], LLMMessage(role: .system, content: AgentLoop.defaultSystemPrompt))
         XCTAssertEqual(firstTurn[1], LLMMessage(role: .user, content: "summarise my day"))
+    }
+
+    /// The optional `onEvent` callback is purely observational — the run
+    /// behaves identically with or without it — and reports each step in the
+    /// order it happened, which is what a UI streams into a progress log.
+    func testLoopReportsEventsInOrder() async throws {
+        let provider = ScriptedProvider(responses: [
+            LLMResponse(content: "Listing files", toolCalls: [shellCall()], usage: nil),
+            LLMResponse(content: "All set", toolCalls: [], usage: nil),
+        ])
+        let runner = ScriptedRunner(tools: [shellTool()], outcomes: ["shell": .executed("a.txt")])
+        let loop = AgentLoop(provider: provider, runner: runner)
+        let recorder = EventRecorder()
+
+        let result = try await loop.run(goal: "list files") { recorder.record($0) }
+
+        XCTAssertEqual(result, .completed(finalText: "All set"))
+        XCTAssertEqual(recorder.events, [
+            .assistantText("Listing files"),
+            .toolCallRequested(shellCall()),
+            .toolCallSucceeded(name: "shell", observation: "a.txt"),
+            .assistantText("All set"),
+        ])
     }
 }
