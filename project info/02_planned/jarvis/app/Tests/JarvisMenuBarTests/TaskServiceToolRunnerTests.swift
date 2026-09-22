@@ -136,8 +136,10 @@ final class TaskServiceToolRunnerTests: XCTestCase {
     }
 
     /// The policy's approval verdict is handed back verbatim, bound to the id
-    /// of the request the user will see in the task-detail window.
-    func testAwaitingApprovalPropagates() async throws {
+    /// of the request the user will see in the task-detail window and to the
+    /// request's payload digest, which a waiter uses to locate the terminal
+    /// audit event once the human decides.
+    func testAwaitingApprovalPropagatesPayloadDigest() async throws {
         let reason = "shell command requires explicit approval"
         let service = ScriptedTaskService(decision: .requireApproval(reason: reason))
         let runner = TaskServiceToolRunner(service: service, taskID: UUID())
@@ -145,7 +147,10 @@ final class TaskServiceToolRunnerTests: XCTestCase {
         let outcome = try await runner.perform(shellCall())
 
         let request = try XCTUnwrap(service.submittedRequests.first)
-        XCTAssertEqual(outcome, .awaitingApproval(requestID: request.id, description: reason))
+        XCTAssertEqual(
+            outcome,
+            .awaitingApproval(requestID: request.id, payloadDigest: request.payloadDigest, description: reason)
+        )
     }
 
     /// A policy denial is surfaced with the policy's own reason so the loop

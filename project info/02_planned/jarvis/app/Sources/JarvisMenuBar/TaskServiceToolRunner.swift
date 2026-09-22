@@ -140,7 +140,7 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
         case .allow:
             return .executed(try await observation(for: request))
         case .requireApproval(let reason):
-            return .awaitingApproval(requestID: request.id, description: reason)
+            return .awaitingApproval(requestID: request.id, payloadDigest: request.payloadDigest, description: reason)
         case .deny(let reason):
             return .denied(reason)
         }

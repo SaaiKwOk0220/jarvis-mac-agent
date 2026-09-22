@@ -143,7 +143,7 @@ final class AgentLoopTests: XCTestCase {
         ])
         let runner = ScriptedRunner(
             tools: [shellTool()],
-            outcomes: ["shell": .awaitingApproval(requestID: requestID, description: "rm -rf needs approval")]
+            outcomes: ["shell": .awaitingApproval(requestID: requestID, payloadDigest: "digest", description: "rm -rf needs approval")]
         )
         let loop = AgentLoop(provider: provider, runner: runner)
 

@@ -184,8 +184,14 @@ struct AskJarvisView: View {
             log.append(AgentLogEntry(kind: .info, text: "Task \(task.id.uuidString.prefix(8)) created"))
 
             let runner = TaskServiceToolRunner(service: service, taskID: task.id)
-            let loop = AgentLoop(provider: OllamaProvider(), runner: runner)
-            let result = try await runLoop(loop, goal: goal)
+            let waiter = TaskServiceApprovalWaiter(service: service)
+            let session = AgentSession(
+                provider: OllamaProvider(),
+                runner: runner,
+                approvalWaiter: waiter,
+                taskID: task.id
+            )
+            let result = try await runSession(session, goal: goal)
             await finish(result, taskID: task.id, service: service)
             _ = try? await client.refresh()
         } catch {
@@ -196,10 +202,10 @@ struct AskJarvisView: View {
         }
     }
 
-    /// Streams the loop's events into the log in order. The stream is finished
+    /// Streams the session's events into the log in order. The stream is finished
     /// exactly once whichever way the run ends, so the collector always
     /// completes and the log is settled before the outcome is appended.
-    private func runLoop(_ loop: AgentLoop, goal: String) async throws -> AgentLoopResult {
+    private func runSession(_ session: AgentSession, goal: String) async throws -> AgentLoopResult {
         let (stream, continuation) = AsyncStream<AgentLoopEvent>.makeStream()
         let collector = Task { @MainActor in
             for await event in stream {
@@ -207,7 +213,7 @@ struct AskJarvisView: View {
             }
         }
         do {
-            let result = try await loop.run(goal: goal) { event in
+            let result = try await session.run(goal: goal) { event in
                 continuation.yield(event)
             }
             continuation.finish()
@@ -221,8 +227,8 @@ struct AskJarvisView: View {
     }
 
     /// Records how the run terminated. A completed run also closes the task;
-    /// a paused run deliberately leaves it in `awaitingApproval` so the
-    /// hand-off to the task-detail window is the only way forward.
+    /// any other outcome leaves the task open so the user can decide what to
+    /// do with it from the task-detail window.
     private func finish(_ result: AgentLoopResult, taskID: UUID, service: any TaskServiceAPI) async {
         switch result {
         case .completed(let finalText):
