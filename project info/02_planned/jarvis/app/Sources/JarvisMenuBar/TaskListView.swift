@@ -17,6 +17,9 @@ struct TaskListView: View {
             Button { openWindow(id: "ask-jarvis") } label: {
                 Label("Ask Jarvis…", systemImage: "sparkles")
             }
+            Button { openWindow(id: "memory") } label: {
+                Label("Memory…", systemImage: "brain")
+            }
             Button { openWindow(id: "new-task") } label: {
                 Label("New task…", systemImage: "plus.circle")
             }

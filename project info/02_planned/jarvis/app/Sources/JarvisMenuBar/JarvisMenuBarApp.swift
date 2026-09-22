@@ -58,10 +58,24 @@ struct JarvisMenuBarApp: App {
         }
         .defaultSize(width: 520, height: 460)
         Window("Ask Jarvis", id: "ask-jarvis") {
-            AskJarvisView(client: client, service: runtime.taskService)
-                .frame(minWidth: 520, minHeight: 460)
+            AskJarvisView(
+                client: client,
+                service: runtime.taskService,
+                memoryContextProvider: runtime.memoryContextProvider
+            )
+            .frame(minWidth: 520, minHeight: 460)
         }
         .defaultSize(width: 620, height: 560)
+        Window("Memory", id: "memory") {
+            if let memory = runtime.memory {
+                MemoryView(memory: memory)
+                    .frame(minWidth: 480, minHeight: 420)
+            } else {
+                Text("Memory is unavailable: the local database failed to initialise.")
+                    .padding(24)
+            }
+        }
+        .defaultSize(width: 540, height: 500)
     }
 }
 
@@ -76,6 +90,11 @@ private final class Runtime {
     /// the agent loop is bound by the same policy gate as every other task.
     private(set) var taskService: (any TaskServiceAPI)?
 
+    /// The user's memory store, or `nil` when initialisation failed. The
+    /// "Memory" window shows an unavailable message in that case, and the
+    /// "Ask Jarvis" window falls back to an empty context provider.
+    private(set) var memory: (any Memory)?
+
     init(client: ServiceClient) {
         do {
             let appSupport = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
@@ -83,6 +102,7 @@ private final class Runtime {
             try FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true)
             let database = try Database(path: appSupport.appendingPathComponent("jarvis.sqlite").path)
             try database.migrate()
+            self.memory = try SQLiteMemoryStore(database: database)
             let service = try TaskService(taskRepository: SQLiteTaskRepository(database: database),
                 auditRepository: SQLiteAuditRepository(database: database), policy: Policy(),
                 policyConfig: PolicyConfig(
@@ -112,6 +132,18 @@ private final class Runtime {
             }
         } catch {
             // The UI remains available and reports an unavailable service if setup fails.
+        }
+    }
+
+    /// Returns a fresh closure the agent session can call to fetch the
+    /// current memory context, or `nil` when no store is available. The
+    /// closure captures only `memory` (a `Sendable` protocol value), so the
+    /// caller can pass it across actor boundaries without retaining this
+    /// `Runtime`.
+    var memoryContextProvider: (@Sendable () async -> String)? {
+        guard let memory else { return nil }
+        return {
+            (try? await memory.formatContext()) ?? ""
         }
     }
 }

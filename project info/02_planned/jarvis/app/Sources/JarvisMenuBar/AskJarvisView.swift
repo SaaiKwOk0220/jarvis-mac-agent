@@ -76,6 +76,10 @@ struct AskJarvisView: View {
     /// needs the real instance rather than the HTTP client so it can hand it
     /// to `TaskServiceToolRunner`.
     let service: (any TaskServiceAPI)?
+    /// Optional snapshot of the user's memory. When non-nil, the agent loop
+    /// reads the current memory context as a second system prompt at the
+    /// start of every run; when nil, the loop runs without that context.
+    let memoryContextProvider: (@Sendable () async -> String)?
 
     @StateObject private var log = AgentRunLog()
     @State private var goal = ""
@@ -189,7 +193,8 @@ struct AskJarvisView: View {
                 provider: OllamaProvider(),
                 runner: runner,
                 approvalWaiter: waiter,
-                taskID: task.id
+                taskID: task.id,
+                memoryContextProvider: memoryContextProvider
             )
             let result = try await runSession(session, goal: goal)
             await finish(result, taskID: task.id, service: service)
