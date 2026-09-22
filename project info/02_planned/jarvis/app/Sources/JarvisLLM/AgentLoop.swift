@@ -98,9 +98,11 @@ public struct AgentLoop: Sendable {
                 case .executed(let observation):
                     onEvent?(.toolCallSucceeded(name: call.name, observation: observation))
                     messages.append(LLMMessage(role: .tool, content: observation))
-                case .awaitingApproval(let requestID, let description):
+                case .awaitingApproval(let requestID, _, let description):
                     // Stop the run here; the caller picks it up once a human
-                    // has resolved the approval.
+                    // has resolved the approval. `AgentSession` keeps the
+                    // digest so a `ApprovalWaiter` can locate the matching
+                    // terminal audit event once the request resolves.
                     onEvent?(.awaitingApproval(requestID: requestID, description: description))
                     return .awaitingApproval(requestID: requestID, description: description)
                 case .denied(let reason):

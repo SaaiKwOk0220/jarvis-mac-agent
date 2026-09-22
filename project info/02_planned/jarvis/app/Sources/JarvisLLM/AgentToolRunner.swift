@@ -19,9 +19,10 @@ public protocol AgentToolRunner: Sendable {
 public enum AgentToolOutcome: Sendable, Equatable {
     /// Tool ran; the string is the observation fed back to the LLM.
     case executed(String)
-    /// Policy requires a human decision before the tool can run. The loop
-    /// stops here; the caller resumes after the approval resolves.
-    case awaitingApproval(requestID: UUID, description: String)
+    /// Policy requires a human decision before the tool can run. The caller
+    /// uses `payloadDigest` to locate the corresponding audit event so a
+    /// `ApprovalWaiter` can block until the request resolves.
+    case awaitingApproval(requestID: UUID, payloadDigest: String, description: String)
     /// Policy denied the tool outright. The reason is fed back to the LLM
     /// so it can pick a different plan.
     case denied(String)
