@@ -21,6 +21,13 @@ public struct AgentSession: Sendable {
     public let taskID: UUID
     public let maxIterations: Int
     public let systemPrompt: String
+    /// Optional snapshot of the user's known facts. When set, the session
+    /// invokes the provider before each run and, if the returned string is
+    /// non-empty, inserts it as a second system message between the
+    /// `systemPrompt` and the user goal. The closure is captured fresh per
+    /// run so an updated memory store is reflected without rebuilding the
+    /// session.
+    public let memoryContextProvider: (@Sendable () async -> String)?
 
     public init(
         provider: any LLMProvider,
@@ -28,7 +35,8 @@ public struct AgentSession: Sendable {
         approvalWaiter: any ApprovalWaiter,
         taskID: UUID,
         maxIterations: Int = 8,
-        systemPrompt: String = AgentLoop.defaultSystemPrompt
+        systemPrompt: String = AgentLoop.defaultSystemPrompt,
+        memoryContextProvider: (@Sendable () async -> String)? = nil
     ) {
         self.provider = provider
         self.runner = runner
@@ -36,6 +44,7 @@ public struct AgentSession: Sendable {
         self.taskID = taskID
         self.maxIterations = maxIterations
         self.systemPrompt = systemPrompt
+        self.memoryContextProvider = memoryContextProvider
     }
 
     /// Drives the loop for one goal, transparently waiting for any tool
@@ -47,8 +56,14 @@ public struct AgentSession: Sendable {
     ) async throws -> AgentLoopResult {
         var messages: [LLMMessage] = [
             LLMMessage(role: .system, content: systemPrompt),
-            LLMMessage(role: .user, content: goal),
         ]
+        if let memoryContextProvider {
+            let context = await memoryContextProvider()
+            if !context.isEmpty {
+                messages.append(LLMMessage(role: .system, content: context))
+            }
+        }
+        messages.append(LLMMessage(role: .user, content: goal))
 
         for _ in 0..<maxIterations {
             let response = try await provider.complete(messages: messages, tools: runner.tools())

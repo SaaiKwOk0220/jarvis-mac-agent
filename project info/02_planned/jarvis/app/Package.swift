@@ -49,7 +49,7 @@ let package = Package(
         ),
         .testTarget(
             name: "JarvisMenuBarTests",
-            dependencies: ["JarvisMenuBar", "JarvisDomain", "JarvisLLM"]
+            dependencies: ["JarvisMenuBar", "JarvisDomain", "JarvisLLM", "JarvisPersistence"]
         ),
         .testTarget(
             name: "JarvisAcceptanceTests",
