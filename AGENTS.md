@@ -55,8 +55,8 @@ User ──Task──▶ Coordinator
 - `feat/<topic>` and `fix/<topic>` are the only branches that may open a PR to `main`.
 - All PRs to `main` must:
   1. Pass the `swift-test` GitHub Actions check
-  2. Receive at least one approving review (the Decision maker can self-approve)
-- Squash or merge-commit is the Decision maker's choice; the default is **merge commit** to preserve the agent's history (`-no-ff`).
+  2. Receive independent QA and read-only agent review, followed by the Decision maker's explicit approval to merge. A separate GitHub account's approving review is not required.
+- `main` requires linear history. Use rebase by default to preserve individual commits; the Decision maker may choose another allowed method.
 - Agent branches (`agent/<role>/<task>`) are deleted after their work lands in `main`.
 
 ## Communication contract
