@@ -10,9 +10,14 @@ public struct LLMMessage: Codable, Equatable, Sendable {
     public let role: Role
     public let content: String
 
-    public init(role: Role, content: String) {
+    public let toolCalls: [LLMToolCall]?
+    public let toolCallID: String?
+
+    public init(role: Role, content: String, toolCalls: [LLMToolCall]? = nil, toolCallID: String? = nil) {
         self.role = role
         self.content = content
+        self.toolCalls = toolCalls
+        self.toolCallID = toolCallID
     }
 }
 
@@ -53,11 +58,13 @@ public struct LLMToolCall: Codable, Equatable, Sendable {
     public let id: String
     public let name: String
     public let arguments: [String: String]
+    public let rawInputJSON: String?
 
-    public init(id: String, name: String, arguments: [String: String]) {
+    public init(id: String, name: String, arguments: [String: String], rawInputJSON: String? = nil) {
         self.id = id
         self.name = name
         self.arguments = arguments
+        self.rawInputJSON = rawInputJSON
     }
 }
 

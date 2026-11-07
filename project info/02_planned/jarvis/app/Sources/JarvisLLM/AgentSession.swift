@@ -76,14 +76,14 @@ public struct AgentSession: Sendable {
                 return .completed(finalText: response.content ?? "")
             }
 
-            messages.append(LLMMessage(role: .assistant, content: response.content ?? ""))
+            messages.append(LLMMessage(role: .assistant, content: response.content ?? "", toolCalls: response.toolCalls))
 
             for call in response.toolCalls {
                 onEvent?(.toolCallRequested(call))
                 switch try await runner.perform(call) {
                 case .executed(let observation):
                     onEvent?(.toolCallSucceeded(name: call.name, observation: observation))
-                    messages.append(LLMMessage(role: .tool, content: observation))
+                    messages.append(LLMMessage(role: .tool, content: observation, toolCallID: call.id))
 
                 case .awaitingApproval(let requestID, let payloadDigest, let description):
                     onEvent?(.awaitingApproval(requestID: requestID, description: description))
@@ -95,10 +95,10 @@ public struct AgentSession: Sendable {
                     switch resolution {
                     case .approved(let observation):
                         onEvent?(.toolCallSucceeded(name: call.name, observation: observation))
-                        messages.append(LLMMessage(role: .tool, content: observation))
+                        messages.append(LLMMessage(role: .tool, content: observation, toolCallID: call.id))
                     case .rejected(let reason):
                         onEvent?(.toolCallDenied(name: call.name, reason: reason))
-                        messages.append(LLMMessage(role: .tool, content: "denied: \(reason)"))
+                        messages.append(LLMMessage(role: .tool, content: "denied: \(reason)", toolCallID: call.id))
                     case .failed(let reason):
                         return .exceededIterations(lastText: reason)
                     case .cancelled:
@@ -109,7 +109,7 @@ public struct AgentSession: Sendable {
 
                 case .denied(let reason):
                     onEvent?(.toolCallDenied(name: call.name, reason: reason))
-                    messages.append(LLMMessage(role: .tool, content: "denied: \(reason)"))
+                    messages.append(LLMMessage(role: .tool, content: "denied: \(reason)", toolCallID: call.id))
                 }
             }
         }

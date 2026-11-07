@@ -90,14 +90,14 @@ public struct AgentLoop: Sendable {
 
             // Record the assistant's plan so the model sees its own tool calls
             // on the next turn rather than a conversation that skips a beat.
-            messages.append(LLMMessage(role: .assistant, content: response.content ?? ""))
+            messages.append(LLMMessage(role: .assistant, content: response.content ?? "", toolCalls: response.toolCalls))
 
             for call in response.toolCalls {
                 onEvent?(.toolCallRequested(call))
                 switch try await runner.perform(call) {
                 case .executed(let observation):
                     onEvent?(.toolCallSucceeded(name: call.name, observation: observation))
-                    messages.append(LLMMessage(role: .tool, content: observation))
+                    messages.append(LLMMessage(role: .tool, content: observation, toolCallID: call.id))
                 case .awaitingApproval(let requestID, _, let description):
                     // Stop the run here; the caller picks it up once a human
                     // has resolved the approval. `AgentSession` keeps the
@@ -109,7 +109,7 @@ public struct AgentLoop: Sendable {
                     // Hand the refusal back so the model can re-plan rather
                     // than retrying the same denied call.
                     onEvent?(.toolCallDenied(name: call.name, reason: reason))
-                    messages.append(LLMMessage(role: .tool, content: "denied: \(reason)"))
+                    messages.append(LLMMessage(role: .tool, content: "denied: \(reason)", toolCallID: call.id))
                 }
             }
         }
