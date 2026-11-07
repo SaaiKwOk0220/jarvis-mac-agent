@@ -54,7 +54,10 @@ public struct AnthropicProvider: LLMProvider {
             throw LLMError.unavailable("Anthropic API key not configured")
         }
 
-        let projected = Self.project(messages)
+        guard baseURL.scheme?.lowercased() == "https" else {
+            throw LLMError.unavailable("Anthropic endpoint must use HTTPS")
+        }
+        let projected = try Self.project(messages)
 
         var request = URLRequest(url: baseURL.appendingPathComponent("v1/messages"))
         request.httpMethod = "POST"
@@ -78,7 +81,7 @@ public struct AnthropicProvider: LLMProvider {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await session.data(for: request)
+            (data, response) = try await session.data(for: request, delegate: RejectRedirectDelegate())
         } catch {
             throw LLMError.unavailable(String(describing: error))
         }
@@ -110,11 +113,17 @@ public struct AnthropicProvider: LLMProvider {
 
     /// Projects a decoded Messages response onto the provider-neutral contract.
     private static func map(data: Data) throws -> LLMResponse {
-        guard let decoded = try? JSONDecoder().decode(MessagesResponse.self, from: data) else {
+        guard Self.hasSupportedNumbers(data), let decoded = try? JSONDecoder().decode(MessagesResponse.self, from: data) else {
             throw LLMError.invalidResponse(String(data: data, encoding: .utf8) ?? "<non-utf8 body>")
         }
 
-        let blocks = decoded.content ?? []
+        guard let blocks = decoded.content, !blocks.isEmpty, blocks.allSatisfy({ block in
+            switch block.type {
+            case "text": return block.text != nil
+            case "tool_use": return !(block.id ?? "").isEmpty && !(block.name ?? "").isEmpty && block.input != nil
+            default: return false
+            }
+        }) else { throw LLMError.invalidResponse("Malformed content blocks") }
 
         // Several text blocks in one turn are separate paragraphs of the same
         // answer; join rather than take the first so nothing is dropped.
@@ -133,7 +142,8 @@ public struct AnthropicProvider: LLMProvider {
                     // crashing the loop on a force-unwrap.
                     id: block.id ?? "toolu_\(index)",
                     name: block.name ?? "",
-                    arguments: (block.input?.pairs ?? [:]).mapValues(\.flattened)
+                    arguments: (block.input?.pairs ?? [:]).mapValues(\.flattened),
+                    rawInputJSON: block.input.flatMap { try? JSONEncoder().encode($0.pairs) }.flatMap { String(data: $0, encoding: .utf8) }
                 )
             }
 
@@ -149,6 +159,54 @@ public struct AnthropicProvider: LLMProvider {
             toolCalls: toolCalls,
             usage: usage
         )
+    }
+
+    /// Reject numeric literals with over 18 significant digits, explicit or
+    /// adjusted exponents outside -100...100. This conservative limit applies
+    /// to every number in the response, including fields outside tool input.
+    /// Inspect bytes before JSONDecoder can round them. JSON strings are skipped.
+    private static func hasSupportedNumbers(_ data: Data) -> Bool {
+        let bytes = Array(data)
+        var i = 0
+        var inString = false
+        var escaped = false
+        while i < bytes.count {
+            let byte = bytes[i]
+            if inString {
+                if escaped { escaped = false }
+                else if byte == 92 { escaped = true }
+                else if byte == 34 { inString = false }
+                i += 1
+                continue
+            }
+            if byte == 34 { inString = true; i += 1; continue }
+            if byte == 45 || (48...57).contains(byte) {
+                let start = i
+                while i < bytes.count && ((48...57).contains(bytes[i]) || [45, 43, 46, 69, 101].contains(bytes[i])) { i += 1 }
+                let literal = String(decoding: bytes[start..<i], as: UTF8.self)
+                let parts = literal.lowercased().split(separator: "e", omittingEmptySubsequences: false)
+                guard parts.count <= 2 else { return false }
+                let exponent: Int
+                if parts.count == 2 {
+                    guard let value = Int(parts[1]), value >= -100, value <= 100 else { return false }
+                    exponent = value
+                } else { exponent = 0 }
+                let mantissa = parts[0].split(separator: ".", omittingEmptySubsequences: false)
+                guard mantissa.count <= 2 else { return false }
+                let fractionCount = mantissa.count == 2 ? mantissa[1].count : 0
+                let digits = parts[0].filter { $0.isNumber }
+                let trimmed = digits.drop(while: { $0 == "0" })
+                if !trimmed.isEmpty {
+                    let significant = trimmed.reversed().drop(while: { $0 == "0" })
+                    let trailingZeros = trimmed.count - significant.count
+                    let adjustedExponent = exponent - fractionCount + trailingZeros
+                    if significant.count > 18 || adjustedExponent < -100 || adjustedExponent > 100 { return false }
+                }
+                continue
+            }
+            i += 1
+        }
+        return true
     }
 
     /// Anthropic sends an empty text block alongside tool calls; treat blank
@@ -177,28 +235,11 @@ public struct AnthropicProvider: LLMProvider {
     /// 2. **Tool results become `user` turns carrying `tool_result` blocks.**
     ///    There is no `tool` role in Anthropic's vocabulary.
     ///
-    /// The second mapping has a wrinkle: a `tool_result` block must cite the
-    /// `tool_use_id` of the assistant block it answers, but `LLMMessage` has no
-    /// field carrying that id — `AgentLoop` replays the assistant's turn as its
-    /// text alone and appends tool observations as bare `.tool` messages. We
-    /// recover the pairing positionally: a run of observations is one parallel
-    /// tool batch, and each one is assigned the next locally-synthesised id in
-    /// order. Because a turn is re-projected from the same message array on
-    /// every call, the ids are stable within a request.
-    ///
-    /// This is enough for the single-turn and text-only paths, and it keeps
-    /// `LLMMessage` free of a provider-specific field. It is not yet faithful
-    /// enough for the server to accept a replayed tool turn: the assistant turn
-    /// is sent as text only, so there is no `tool_use` block for the server to
-    /// match the `tool_result` against. Fully faithful multi-turn tool replay
-    /// needs a `toolCallID` on `LLMMessage`; that is a follow-up, since adding
-    /// it means touching the contract introduced with `OllamaProvider`.
-    private static func project(_ messages: [LLMMessage]) -> Projection {
+    private static func project(_ messages: [LLMMessage]) throws -> Projection {
         let systemParts = messages.filter { $0.role == .system }.map(\.content)
         let system = systemParts.isEmpty ? nil : systemParts.joined(separator: "\n\n")
 
         var wire: [WireMessage] = []
-        var synthesised = 0
 
         var index = 0
         while index < messages.count {
@@ -209,7 +250,23 @@ public struct AnthropicProvider: LLMProvider {
                 // Already hoisted into the top-level `system` field.
                 break
             case .user, .assistant:
-                wire.append(WireMessage(role: message.role.rawValue, content: .text(message.content)))
+                if message.role == .assistant, let calls = message.toolCalls, !calls.isEmpty {
+                    var blocks: [WireMessage.Block] = []
+                    if !message.content.isEmpty { blocks.append(.init(type: "text", text: message.content)) }
+                    for call in calls {
+                        let input: [String: AnthropicJSONValue]
+                        if let raw = call.rawInputJSON, let data = raw.data(using: .utf8),
+                           let decoded = try? JSONDecoder().decode([String: AnthropicJSONValue].self, from: data) {
+                            input = decoded
+                        } else {
+                            input = call.arguments.mapValues { .string($0) }
+                        }
+                        blocks.append(.init(type: "tool_use", id: call.id, name: call.name, input: input))
+                    }
+                    wire.append(WireMessage(role: "assistant", content: .blocks(blocks)))
+                } else {
+                    wire.append(WireMessage(role: message.role.rawValue, content: .text(message.content)))
+                }
             case .tool:
                 // A run of consecutive observations is one user turn holding
                 // several `tool_result` blocks, which is how Anthropic models
@@ -219,12 +276,10 @@ public struct AnthropicProvider: LLMProvider {
                     // Deliberately not shaped like a real `toolu_` id so an
                     // accidental leak onto the wire is obvious rather than
                     // plausible.
-                    results.append(.init(
-                        type: "tool_result",
-                        toolUseID: "toolu_local_\(synthesised)",
-                        content: messages[index].content
-                    ))
-                    synthesised += 1
+                    guard let id = messages[index].toolCallID, !id.isEmpty else {
+                        throw LLMError.invalidResponse("Missing tool call ID")
+                    }
+                    results.append(.init(type: "tool_result", toolUseID: id, content: messages[index].content))
                     index += 1
                 }
                 wire.append(WireMessage(role: "user", content: .blocks(results)))
@@ -279,13 +334,17 @@ public struct AnthropicProvider: LLMProvider {
 
         struct Block: Encodable {
             let type: String
-            let toolUseID: String?
-            let content: String?
+            var toolUseID: String? = nil
+            var content: String? = nil
+            var text: String? = nil
+            var id: String? = nil
+            var name: String? = nil
+            var input: [String: AnthropicJSONValue]? = nil
 
             enum CodingKeys: String, CodingKey {
                 case type
                 case toolUseID = "tool_use_id"
-                case content
+                case content, text, id, name, input
             }
         }
     }
@@ -371,12 +430,8 @@ public struct AnthropicProvider: LLMProvider {
             let container = try decoder.singleValueContainer()
             if let object = try? container.decode([String: AnthropicJSONValue].self) {
                 pairs = object
-            } else if let json = try? container.decode(String.self),
-                      let data = json.data(using: .utf8),
-                      let object = try? JSONDecoder().decode([String: AnthropicJSONValue].self, from: data) {
-                pairs = object
             } else {
-                pairs = [:]
+                throw DecodingError.dataCorruptedError(in: container, debugDescription: "Invalid tool input")
             }
         }
     }
@@ -386,7 +441,7 @@ public struct AnthropicProvider: LLMProvider {
 /// tool-call input onto `[String: String]`.
 private enum AnthropicJSONValue: Codable {
     case string(String)
-    case number(Double)
+    case number(Decimal)
     case bool(Bool)
     case null
     case object([String: AnthropicJSONValue])
@@ -398,7 +453,7 @@ private enum AnthropicJSONValue: Codable {
             self = .null
         } else if let value = try? container.decode(Bool.self) {
             self = .bool(value)
-        } else if let value = try? container.decode(Double.self) {
+        } else if let value = try? container.decode(Decimal.self) {
             self = .number(value)
         } else if let value = try? container.decode(String.self) {
             self = .string(value)
@@ -432,7 +487,7 @@ private enum AnthropicJSONValue: Codable {
     var flattened: String {
         switch self {
         case .string(let value): return value
-        case .number(let value): return Self.format(value)
+        case .number(let value): return NSDecimalNumber(decimal: value).stringValue
         case .bool(let value): return value ? "true" : "false"
         case .null: return ""
         case .object, .array:
@@ -443,8 +498,11 @@ private enum AnthropicJSONValue: Codable {
         }
     }
 
-    private static func format(_ value: Double) -> String {
-        if value.rounded() == value, abs(value) < 1e15 { return String(Int(value)) }
-        return String(value)
+
+}
+
+final class RejectRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+        completionHandler(nil)
     }
 }

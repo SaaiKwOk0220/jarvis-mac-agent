@@ -127,7 +127,7 @@ final class AgentSessionTests: XCTestCase {
 
         let secondTurn = try XCTUnwrap(provider.capturedMessages.last)
         XCTAssertTrue(
-            secondTurn.contains(LLMMessage(role: .tool, content: "ok")),
+            secondTurn.contains(LLMMessage(role: .tool, content: "ok", toolCallID: "call_0")),
             "approved observation should be in the follow-up turn, got \(secondTurn)"
         )
     }
@@ -167,7 +167,7 @@ final class AgentSessionTests: XCTestCase {
 
         let secondTurn = try XCTUnwrap(provider.capturedMessages.last)
         XCTAssertTrue(
-            secondTurn.contains(LLMMessage(role: .tool, content: "denied: no policy")),
+            secondTurn.contains(LLMMessage(role: .tool, content: "denied: no policy", toolCallID: "call_0")),
             "rejection reason should reach the model as 'denied: <reason>', got \(secondTurn)"
         )
     }

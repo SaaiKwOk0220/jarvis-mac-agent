@@ -127,7 +127,7 @@ final class AgentLoopTests: XCTestCase {
 
         let secondTurn = try XCTUnwrap(provider.capturedMessages.last)
         XCTAssertTrue(
-            secondTurn.contains(LLMMessage(role: .tool, content: "a.txt\nb.txt")),
+            secondTurn.contains(LLMMessage(role: .tool, content: "a.txt\nb.txt", toolCallID: "call_0")),
             "expected the tool observation in the follow-up turn, got \(secondTurn)"
         )
     }
@@ -173,7 +173,7 @@ final class AgentLoopTests: XCTestCase {
 
         let secondTurn = try XCTUnwrap(provider.capturedMessages.last)
         XCTAssertTrue(
-            secondTurn.contains(LLMMessage(role: .tool, content: "denied: policy says no")),
+            secondTurn.contains(LLMMessage(role: .tool, content: "denied: policy says no", toolCallID: "call_0")),
             "expected the denial in the follow-up turn, got \(secondTurn)"
         )
     }

@@ -44,6 +44,144 @@ private extension NSLock {
 
 final class AnthropicProviderTests: XCTestCase {
 
+    func testRejectsMalformedResponse() async throws {
+        MockURLProtocol.handler = { request in
+            (anthropicJSONResponse(request), Data("{}".utf8))
+        }
+        do {
+            _ = try await makeProvider().complete(messages: [.init(role: .user, content: "hi")], tools: [])
+            XCTFail("Expected invalid response")
+        } catch let error as LLMError {
+            guard case .invalidResponse = error else { return XCTFail("Unexpected error") }
+        }
+    }
+
+    func testRejectsInsecureEndpointBeforeRequest() async throws {
+        let provider = AnthropicProvider(apiKey: "secret", baseURL: URL(string: "http://example.com")!, session: MockURLSessionFactory.make())
+        do {
+            _ = try await provider.complete(messages: [.init(role: .user, content: "hi")], tools: [])
+            XCTFail("Expected insecure endpoint rejection")
+        } catch let error as LLMError {
+            guard case .unavailable = error else { return XCTFail("Unexpected error") }
+        }
+    }
+
+    func testToolCallsAndResultsReplayRealIDsAndInputTypes() async throws {
+        let body = AnthropicLockedBox<Data?>(initial: nil)
+        MockURLProtocol.handler = { request in
+            body.set(anthropicBodyData(of: request))
+            return (anthropicJSONResponse(request), Data(#"{"content":[{"type":"text","text":"done"}]}"#.utf8))
+        }
+        let calls = [
+            LLMToolCall(id: "toolu_one", name: "shell", arguments: ["count": "2"], rawInputJSON: #"{"count":2}"#),
+            LLMToolCall(id: "toolu_two", name: "shell", arguments: ["enabled": "true"], rawInputJSON: #"{"enabled":true}"#)
+        ]
+        _ = try await makeProvider().complete(messages: [
+            .init(role: .user, content: "run"),
+            .init(role: .assistant, content: "", toolCalls: calls),
+            .init(role: .tool, content: "first", toolCallID: calls[0].id),
+            .init(role: .tool, content: "second", toolCallID: calls[1].id)
+        ], tools: [shellTool])
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(body.get())) as? [String: Any])
+        let messages = try XCTUnwrap(root["messages"] as? [[String: Any]])
+        let uses = try XCTUnwrap(messages[1]["content"] as? [[String: Any]])
+        XCTAssertEqual(uses.map { $0["id"] as? String }, ["toolu_one", "toolu_two"])
+        XCTAssertEqual((uses[0]["input"] as? [String: Any])?["count"] as? Int, 2)
+        XCTAssertEqual((uses[1]["input"] as? [String: Any])?["enabled"] as? Bool, true)
+        let results = try XCTUnwrap(messages[2]["content"] as? [[String: Any]])
+        XCTAssertEqual(results.map { $0["tool_use_id"] as? String }, ["toolu_one", "toolu_two"])
+    }
+
+    func testSessionReplaysLargeIntegerAndMultipleToolResults() async throws {
+        let count = AnthropicLockedBox<Int>(initial: 0)
+        let body = AnthropicLockedBox<Data?>(initial: nil)
+        MockURLProtocol.handler = { request in
+            let n = count.get(); count.set(n + 1)
+            if n == 0 {
+                return (anthropicJSONResponse(request), Data(#"{"content":[{"type":"tool_use","id":"toolu_a","name":"shell","input":{"value":9007199254740993}},{"type":"tool_use","id":"toolu_b","name":"other","input":{}}]}"#.utf8))
+            }
+            body.set(anthropicBodyData(of: request))
+            return (anthropicJSONResponse(request), Data(#"{"content":[{"type":"text","text":"done"}]}"#.utf8))
+        }
+        let runner = SessionScriptedRunner(tools: [shellTool], outcomes: ["shell": .executed("ok"), "other": .denied("no")])
+        let session = AgentSession(provider: makeProvider(), runner: runner, approvalWaiter: ScriptedApprovalWaiter(resolutions: []), taskID: UUID())
+        let outcome = try await session.run(goal: "go")
+        XCTAssertEqual(outcome, .completed(finalText: "done"))
+        let requestBody = try XCTUnwrap(body.get())
+        let text = try XCTUnwrap(String(data: requestBody, encoding: .utf8))
+        XCTAssertTrue(text.contains("9007199254740993"), text)
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: requestBody) as? [String: Any])
+        let messages = try XCTUnwrap(root["messages"] as? [[String: Any]])
+        let results = try XCTUnwrap(messages.last?["content"] as? [[String: Any]])
+        XCTAssertEqual(results.map { $0["tool_use_id"] as? String }, ["toolu_a", "toolu_b"])
+        XCTAssertEqual(results.last?["content"] as? String, "denied: no")
+    }
+
+    func testRedirectDelegateRejectsCredentialForwarding() throws {
+        let original = URL(string: "https://api.anthropic.com/v1/messages")!
+        let response = HTTPURLResponse(url: original, statusCode: 307, httpVersion: "HTTP/1.1", headerFields: ["Location": "https://attacker.example/"])!
+        var target = URLRequest(url: URL(string: "https://attacker.example/")!)
+        target.setValue("secret", forHTTPHeaderField: "x-api-key")
+        let accepted = AnthropicLockedBox<URLRequest?>(initial: target)
+        let session = MockURLSessionFactory.make()
+        RejectRedirectDelegate().urlSession(session, task: session.dataTask(with: original), willPerformHTTPRedirection: response, newRequest: target) { accepted.set($0) }
+        XCTAssertNil(accepted.get())
+    }
+
+    func testRejectsNumberBeyondSupportedPrecision() async throws {
+        MockURLProtocol.handler = { request in
+            (anthropicJSONResponse(request), Data(#"{"content":[{"type":"tool_use","id":"toolu_a","name":"shell","input":{"value":123456789012345678901234567890123456789}}]}"#.utf8))
+        }
+        do {
+            _ = try await makeProvider().complete(messages: [.init(role: .user, content: "go")], tools: [shellTool])
+            XCTFail("expected precision error")
+        } catch let error as LLMError {
+            guard case .invalidResponse = error else { return XCTFail("unexpected error: \(error)") }
+        }
+    }
+
+    func testNumberRangeAndStringEscapes() async throws {
+        let cases: [(String, Bool)] = [
+            ("0." + String(repeating: "0", count: 130) + "1", false),
+            ("1000000000000000000000000", true),
+            ("1e100", true), ("1e101", false),
+            ("1e-100", true), ("1e-101", false)
+        ]
+        for (number, valid) in cases {
+            let payload = "{\"content\":[{\"type\":\"tool_use\",\"id\":\"a\",\"name\":\"shell\",\"input\":{\"n\":\(number),\"s\":\"escaped \\\"1234567890123456789012345\\\"\"}}]}"
+            MockURLProtocol.handler = { request in (anthropicJSONResponse(request), Data(payload.utf8)) }
+            do {
+                _ = try await makeProvider().complete(messages: [.init(role: .user, content: "go")], tools: [shellTool])
+                if !valid { XCTFail("accepted \(number)") }
+            } catch {
+                if valid { XCTFail("rejected \(number): \(error)") }
+            }
+        }
+    }
+
+    func testAcceptedNumericBoundariesSurviveReplay() async throws {
+        for number in ["1e100", "1e-100", "1000000000000000000000000"] {
+            let count = AnthropicLockedBox<Int>(initial: 0)
+            let body = AnthropicLockedBox<Data?>(initial: nil)
+            let payload = "{\"content\":[{\"type\":\"tool_use\",\"id\":\"a\",\"name\":\"shell\",\"input\":{\"n\":\(number)}}]}"
+            MockURLProtocol.handler = { request in
+                let n = count.get(); count.set(n + 1)
+                if n == 0 { return (anthropicJSONResponse(request), Data(payload.utf8)) }
+                body.set(anthropicBodyData(of: request))
+                return (anthropicJSONResponse(request), Data(#"{"content":[{"type":"text","text":"done"}]}"#.utf8))
+            }
+            let runner = SessionScriptedRunner(tools: [shellTool], outcomes: ["shell": .executed("ok")])
+            let session = AgentSession(provider: makeProvider(), runner: runner, approvalWaiter: ScriptedApprovalWaiter(resolutions: []), taskID: UUID())
+            _ = try await session.run(goal: "go")
+            let root = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(body.get())) as? [String: Any])
+            let messages = try XCTUnwrap(root["messages"] as? [[String: Any]])
+            let blocks = try XCTUnwrap(messages[1]["content"] as? [[String: Any]])
+            let input = try XCTUnwrap(blocks[0]["input"] as? [String: Any])
+            let value = try XCTUnwrap(input["n"] as? NSNumber)
+            XCTAssertEqual(value.decimalValue, Decimal(string: number), "replay changed \(number)")
+        }
+    }
+
     override func tearDown() {
         MockURLProtocol.handler = nil
         super.tearDown()
