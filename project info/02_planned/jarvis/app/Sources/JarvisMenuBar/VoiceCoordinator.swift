@@ -2,7 +2,8 @@ import Foundation
 
 @MainActor protocol VoiceBackend: AnyObject {
     var isOnDeviceSupported: Bool { get }
-    func requestPermission() async -> Bool
+    func requestSpeechPermission() async -> Bool
+    func requestMicrophonePermission() async -> Bool
     func start(onText: @escaping @MainActor @Sendable (String) -> Void, onFailure: @escaping @MainActor @Sendable (String) -> Void, onFinish: @escaping @MainActor @Sendable () -> Void) throws
     func finish()
     func stop()
@@ -35,7 +36,9 @@ import Foundation
         let current = generation
         errorMessage = nil
         guard backend.isOnDeviceSupported else { errorMessage = "本机不支持离线中文语音识别。"; return }
-        guard await backend.requestPermission() else { if current == generation { errorMessage = "需要麦克风和语音识别权限。" }; return }
+        guard await backend.requestSpeechPermission() else { if current == generation { errorMessage = "需要麦克风和语音识别权限。" }; return }
+        guard current == generation else { return }
+        guard await backend.requestMicrophonePermission() else { if current == generation { errorMessage = "需要麦克风和语音识别权限。" }; return }
         guard current == generation else { return }
         guard backend.isOnDeviceSupported else { errorMessage = "本机不支持离线中文语音识别。"; return }
         do {
