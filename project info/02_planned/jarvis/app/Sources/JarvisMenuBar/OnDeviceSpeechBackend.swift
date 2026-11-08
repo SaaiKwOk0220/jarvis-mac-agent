@@ -2,6 +2,17 @@
 @preconcurrency import Speech
 import Foundation
 
+@MainActor enum VoicePermissionPolicy {
+    enum State { case granted, undetermined, denied }
+    static func resolve(_ state: State, request: @MainActor () async -> Bool) async -> Bool {
+        switch state {
+        case .granted: return true
+        case .denied: return false
+        case .undetermined: return await request()
+        }
+    }
+}
+
 /// Framework callbacks may arrive on arbitrary queues; no callback inherits
 /// the caller's actor. Only parsed, Sendable values cross to the main actor.
 enum SpeechCallbackBridge {
@@ -166,8 +177,24 @@ final class AudioPauseMonitor: @unchecked Sendable {
 
     var isOnDeviceSupported: Bool { recognizer?.isAvailable == true && recognizer?.supportsOnDeviceRecognition == true }
 
-    func requestSpeechPermission() async -> Bool { await SpeechCallbackBridge.requestSpeechAuthorization() }
-    func requestMicrophonePermission() async -> Bool { await AVCaptureDevice.requestAccess(for: .audio) }
+    func requestSpeechPermission() async -> Bool {
+        let state: VoicePermissionPolicy.State
+        switch SFSpeechRecognizer.authorizationStatus() {
+        case .authorized: state = .granted
+        case .notDetermined: state = .undetermined
+        default: state = .denied
+        }
+        return await VoicePermissionPolicy.resolve(state) { await SpeechCallbackBridge.requestSpeechAuthorization() }
+    }
+    func requestMicrophonePermission() async -> Bool {
+        let state: VoicePermissionPolicy.State
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized: state = .granted
+        case .notDetermined: state = .undetermined
+        default: state = .denied
+        }
+        return await VoicePermissionPolicy.resolve(state) { await AVCaptureDevice.requestAccess(for: .audio) }
+    }
 
     func start(onText: @escaping @MainActor @Sendable (String) -> Void, onFailure: @escaping @MainActor @Sendable (String) -> Void, onFinish: @escaping @MainActor @Sendable (Bool) -> Void, onSilence: @escaping @MainActor @Sendable () -> Void) throws {
         guard let recognizer, isOnDeviceSupported else { throw SpeechError.unavailable }
@@ -209,27 +236,45 @@ final class AudioPauseMonitor: @unchecked Sendable {
 /// never end the state of a newer one; framework callbacks may arrive off-main.
 private final class SpeechCompletionStore: @unchecked Sendable {
     private let lock = NSLock()
-    private var callbacks: [ObjectIdentifier: @MainActor @Sendable () -> Void] = [:]
-    func insert(_ id: ObjectIdentifier, _ callback: @escaping @MainActor @Sendable () -> Void) { lock.lock(); defer { lock.unlock() }; callbacks[id] = callback }
-    func take(_ id: ObjectIdentifier) -> (@MainActor @Sendable () -> Void)? { lock.lock(); defer { lock.unlock() }; return callbacks.removeValue(forKey: id) }
+    private var callbacks: [ObjectIdentifier: @MainActor @Sendable (Bool) -> Void] = [:]
+    func insert(_ id: ObjectIdentifier, _ callback: @escaping @MainActor @Sendable (Bool) -> Void) { lock.lock(); defer { lock.unlock() }; callbacks[id] = callback }
+    func take(_ id: ObjectIdentifier) -> (@MainActor @Sendable (Bool) -> Void)? { lock.lock(); defer { lock.unlock() }; return callbacks.removeValue(forKey: id) }
     func clear() { lock.lock(); defer { lock.unlock() }; callbacks.removeAll() }
+}
+
+enum VoicePlaybackSettings {
+    static let voiceKey = "jarvis.voice.identifier"
+    static let rateKey = "jarvis.voice.rate"
+    static func availableIdentifier(_ requested: String, in available: [String]) -> String? {
+        !requested.isEmpty && available.contains(requested) ? requested : nil
+    }
+    static func safeRate(_ rate: Double) -> Double {
+        guard rate.isFinite else { return 0.5 }
+        return min(0.6, max(0.35, rate))
+    }
 }
 
 @MainActor final class SystemVoiceSpeaker: NSObject, VoiceSpeaker, AVSpeechSynthesizerDelegate {
     private let synthesizer = AVSpeechSynthesizer()
     private nonisolated let completions = SpeechCompletionStore()
     override init() { super.init(); synthesizer.delegate = self }
-    func speak(_ text: String, onFinish: @escaping @MainActor @Sendable () -> Void) {
+    func speak(_ text: String, onFinish: @escaping @MainActor @Sendable (Bool) -> Void) {
         let utterance = AVSpeechUtterance(string: text)
-        utterance.voice = AVSpeechSynthesisVoice(language: "zh-CN")
+        let defaults = UserDefaults.standard
+        let available = AVSpeechSynthesisVoice.speechVoices().filter { $0.language.lowercased().hasPrefix("zh") }
+        let requested = defaults.string(forKey: VoicePlaybackSettings.voiceKey) ?? ""
+        let identifier = VoicePlaybackSettings.availableIdentifier(requested, in: available.map(\.identifier))
+        utterance.voice = identifier.flatMap(AVSpeechSynthesisVoice.init(identifier:)) ?? AVSpeechSynthesisVoice(language: "zh-CN")
+        let storedRate = (defaults.object(forKey: VoicePlaybackSettings.rateKey) as? NSNumber)?.doubleValue ?? 0.5
+        utterance.rate = Float(VoicePlaybackSettings.safeRate(storedRate))
         completions.insert(ObjectIdentifier(utterance), onFinish)
         synthesizer.speak(utterance)
     }
     func stop() { completions.clear(); synthesizer.stopSpeaking(at: .immediate) }
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
-        if let callback = completions.take(ObjectIdentifier(utterance)) { Task { @MainActor in callback() } }
+        if let callback = completions.take(ObjectIdentifier(utterance)) { Task { @MainActor in callback(true) } }
     }
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
-        if let callback = completions.take(ObjectIdentifier(utterance)) { Task { @MainActor in callback() } }
+        if let callback = completions.take(ObjectIdentifier(utterance)) { Task { @MainActor in callback(false) } }
     }
 }

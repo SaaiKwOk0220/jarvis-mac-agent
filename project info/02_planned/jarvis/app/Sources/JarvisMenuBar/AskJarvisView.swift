@@ -1,4 +1,5 @@
 import SwiftUI
+import AVFoundation
 import JarvisDomain
 import JarvisLLM
 
@@ -102,6 +103,7 @@ struct AskJarvisView: View {
     @StateObject private var log = AgentRunLog()
     @StateObject private var voice = VoiceCoordinator(backend: OnDeviceSpeechBackend(), speaker: SystemVoiceSpeaker())
     @StateObject private var autoSubmit = VoiceAutoSubmitGate()
+    @StateObject private var conversation = VoiceConversationSession()
     @State private var lastAnswer = ""
     @State private var goal = ""
     @State private var voiceDraftPrefix = VoiceDraftPrefix(draft: "")
@@ -109,8 +111,9 @@ struct AskJarvisView: View {
     @State private var runningTaskID: UUID?
     @State private var run: Task<Void, Never>?
     @State private var isVisible = false
-    @State private var voiceRun = false
     @State private var voiceWillAutoSubmit = false
+    @AppStorage(VoicePlaybackSettings.voiceKey) private var selectedVoiceID = ""
+    @AppStorage(VoicePlaybackSettings.rateKey) private var voiceRate = 0.5
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -136,8 +139,9 @@ struct AskJarvisView: View {
                     }.keyboardShortcut("v", modifiers: [.command, .shift])
                      .disabled(isRunning || voice.isStarting || voice.needsConfirmation)
                     if voice.isRecording { Text("● 正在聆听；停顿后结束") .foregroundStyle(.red) }
-                    if voice.isStarting { Text("正在请求权限…") }
+                    if voice.isStarting { Text("正在准备离线识别…") }
                     if voice.isFinishing { Text("正在完成转写…") }
+                    if conversation.isActive { Button("结束语音对话") { stopConversation() } }
                 }
                 Text((voice.isRecording || voice.isStarting || voice.isFinishing
                       ? voiceWillAutoSubmit
@@ -165,23 +169,51 @@ struct AskJarvisView: View {
 
             progressLog
 
+            DisclosureGroup("语音音色与语速") {
+                Picker("中文音色", selection: $selectedVoiceID) {
+                    Text("系统默认中文音色").tag("")
+                    if !selectedVoiceID.isEmpty && !availableChineseVoices.contains(where: { $0.identifier == selectedVoiceID }) {
+                        Text("原音色不可用，将使用默认音色").tag(selectedVoiceID)
+                    }
+                    ForEach(availableChineseVoices, id: \.identifier) { item in
+                        Text("\(item.name)（\(item.language)）").tag(item.identifier)
+                    }
+                }
+                HStack {
+                    Text("语速")
+                    Slider(value: $voiceRate, in: 0.35...0.6, step: 0.01)
+                    Text(String(format: "%.2f", voiceRate)).monospacedDigit()
+                }
+                Text("仅显示当前系统可用音色；不会下载音色或更改系统默认设置。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
             HStack {
                 Text(statusText).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 Spacer()
                 Button("朗读回答") {
                     voice.speak(lastAnswer)
                 }.disabled(lastAnswer.isEmpty || voice.isRecording || voice.isStarting || voice.isFinishing)
-                Button("停止朗读") { voice.stopSpeaking() }
+                Button("停止朗读") { stopConversation() }.disabled(!voice.isSpeaking)
                 Button("Cancel") { cancel() }
                     .disabled(!isRunning)
-                Button(isRunning ? "Running…" : "Run") { start() }
+                Button(isRunning ? "Running…" : "Run") { start(fromVoice: conversation.isActive) }
                     .keyboardShortcut(.defaultAction)
                     .disabled(!canRun)
             }
         }
         .padding(24)
         .onAppear { isVisible = true }
-        .onDisappear { isVisible = false; voiceRun = false; autoSubmit.cancel(); voice.stop(); voice.stopSpeaking() }
+        .onChange(of: voice.errorMessage) { _, message in
+            if message != nil { conversation.stop(); autoSubmit.cancel() }
+        }
+        .onDisappear { isVisible = false; stopConversation() }
+    }
+
+    private var availableChineseVoices: [AVSpeechSynthesisVoice] {
+        AVSpeechSynthesisVoice.speechVoices()
+            .filter { $0.language.lowercased().hasPrefix("zh") }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 
     @ViewBuilder private var progressLog: some View {
@@ -217,7 +249,7 @@ struct AskJarvisView: View {
     }
 
     private var statusText: String {
-        if voice.isStarting { return "等待语音权限。" }
+        if voice.isStarting { return "正在准备离线识别。" }
         if voice.isSpeaking { return "正在朗读；按 ⌘⇧V 可打断并说话。" }
         if isRunning { return "正在思考或等待审批…" }
         if voice.isRecording { return "正在聆听；停顿后结束，也可手动停止。" }
@@ -230,11 +262,20 @@ struct AskJarvisView: View {
     }
 
     /// Existing drafts are never automatically submitted with new speech.
-    private func beginVoice() {
+    private func beginVoice(continuing token: Int? = nil) {
         autoSubmit.cancel()
         guard !isRunning && !voice.isStarting && !voice.needsConfirmation else { return }
+        let sessionToken: Int
+        if let token {
+            guard conversation.isCurrent(token) else { return }
+            sessionToken = token
+        } else if conversation.isActive {
+            sessionToken = conversation.generation
+        } else {
+            sessionToken = conversation.begin()
+        }
         Task { @MainActor in
-            guard isVisible, !isRunning, !voice.isStarting, !voice.isRecording,
+            guard conversation.isCurrent(sessionToken), isVisible, !isRunning, !voice.isStarting, !voice.isRecording,
                   !voice.isFinishing, !voice.needsConfirmation else { return }
             let prefix = VoiceDraftPrefix(draft: goal)
             voiceDraftPrefix = prefix
@@ -244,10 +285,10 @@ struct AskJarvisView: View {
                 if let updated = prefix.render(transcript: text) { goal = updated }
             }
             let submit: @MainActor @Sendable (String) -> Void = { text in
-                guard isVisible, !isRunning, service != nil else { return }
+                guard conversation.isCurrent(sessionToken), isVisible, !isRunning, service != nil else { return }
                 goal = text
                 autoSubmit.schedule(text) { pending in
-                    guard isVisible, !isRunning, canRun, goal == pending else { return }
+                    guard conversation.isCurrent(sessionToken), isVisible, !isRunning, canRun, goal == pending else { return }
                     start(fromVoice: true)
                 }
             }
@@ -264,16 +305,29 @@ struct AskJarvisView: View {
         voice.stop()
         voice.stopSpeaking()
         lastAnswer = ""
-        voiceRun = fromVoice
-        log.reset()
+        let token = fromVoice && conversation.isActive ? conversation.generation : nil
+        let history = token == nil ? [] : conversation.history
+        if token == nil { log.reset() }
+        log.append(AgentLogEntry(kind: .info, text: "你：\(submittedGoal)"))
+        goal = ""
         runningTaskID = nil
         isRunning = true
         run = Task {
-            await execute(goal: submittedGoal, service: service)
+            await execute(goal: submittedGoal, history: history, token: token, service: service)
         }
     }
 
+    private func stopConversation() {
+        conversation.stop()
+        autoSubmit.cancel()
+        voice.stop()
+        voice.stopSpeaking()
+        if isRunning { cancel() }
+    }
+
     private func cancel() {
+        conversation.stop()
+        autoSubmit.cancel()
         run?.cancel()
         if let runningTaskID {
             Task { try? await client.cancel(taskID: runningTaskID) }
@@ -282,41 +336,53 @@ struct AskJarvisView: View {
 
     /// Creates the task, drives one loop run against it, and writes the
     /// outcome into the log. Every exit path clears the running flags.
-    private func execute(goal: String, service: any TaskServiceAPI) async {
-        defer {
-            isRunning = false
-            runningTaskID = nil
-            run = nil
-        }
+    private func execute(goal submitted: String, history: [LLMMessage], token: Int?, service: any TaskServiceAPI) async {
+        var spokenAnswer: String?
         do {
-            let task = try await service.createTask(title: goal)
+            try Task.checkCancellation()
+            let task = try await service.createTask(title: submitted)
             runningTaskID = task.id
+            if Task.isCancelled {
+                try? await service.cancel(taskID: task.id)
+                throw CancellationError()
+            }
             log.append(AgentLogEntry(kind: .info, text: "Task \(task.id.uuidString.prefix(8)) created"))
-
             let runner = TaskServiceToolRunner(service: service, taskID: task.id)
             let waiter = TaskServiceApprovalWaiter(service: service)
-            let session = AgentSession(
-                provider: OllamaProvider(),
-                runner: runner,
-                approvalWaiter: waiter,
-                taskID: task.id,
-                memoryContextProvider: memoryContextProvider
-            )
-            let result = try await runSession(session, goal: goal)
-            await finish(result, taskID: task.id, service: service)
+            let prompt = AgentLoop.defaultSystemPrompt + (token == nil ? "" : "\nFor voice conversation, answer naturally and concisely in the user's language. Preserve necessary safety, approval and error details; do not invent actions.")
+            let session = AgentSession(provider: OllamaProvider(), runner: runner, approvalWaiter: waiter,
+                                       taskID: task.id, systemPrompt: prompt, memoryContextProvider: memoryContextProvider)
+            let result = try await runSession(session, goal: submitted, history: history)
+            spokenAnswer = await finish(result, taskID: task.id, service: service)
             _ = try? await client.refresh()
         } catch {
-            log.append(AgentLogEntry(
-                kind: Task.isCancelled ? .info : .error,
-                text: Task.isCancelled ? "Run cancelled." : "Run failed: \(error.localizedDescription)"
-            ))
+            log.append(AgentLogEntry(kind: Task.isCancelled ? .info : .error,
+                                     text: Task.isCancelled ? "Run cancelled." : "Run failed: \(error.localizedDescription)"))
+        }
+        let cancelled = Task.isCancelled
+        isRunning = false
+        runningTaskID = nil
+        run = nil
+        guard let answer = spokenAnswer, !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !cancelled else {
+            if goal.isEmpty { goal = submitted }
+            if let token, conversation.isCurrent(token) { conversation.stop() }
+            return
+        }
+        guard let token, conversation.isCurrent(token), isVisible else { return }
+        conversation.record(user: submitted, answer: answer, token: token)
+        voice.speak(answer) { completed in
+            conversation.playbackFinished(completed: completed, token: token, visible: isVisible,
+                serviceAvailable: service != nil, isRunning: isRunning, draft: goal,
+                voiceBusy: voice.isRecording || voice.isStarting || voice.isFinishing || voice.needsConfirmation || autoSubmit.pendingText != nil) {
+                    beginVoice(continuing: token)
+                }
         }
     }
 
     /// Streams the session's events into the log in order. The stream is finished
     /// exactly once whichever way the run ends, so the collector always
     /// completes and the log is settled before the outcome is appended.
-    private func runSession(_ session: AgentSession, goal: String) async throws -> AgentLoopResult {
+    private func runSession(_ session: AgentSession, goal: String, history: [LLMMessage]) async throws -> AgentLoopResult {
         let (stream, continuation) = AsyncStream<AgentLoopEvent>.makeStream()
         let collector = Task { @MainActor in
             for await event in stream {
@@ -324,7 +390,7 @@ struct AskJarvisView: View {
             }
         }
         do {
-            let result = try await session.run(goal: goal) { event in
+            let result = try await session.run(goal: goal, history: history) { event in
                 continuation.yield(event)
             }
             continuation.finish()
@@ -340,16 +406,16 @@ struct AskJarvisView: View {
     /// Records how the run terminated. A completed run also closes the task;
     /// any other outcome leaves the task open so the user can decide what to
     /// do with it from the task-detail window.
-    private func finish(_ result: AgentLoopResult, taskID: UUID, service: any TaskServiceAPI) async {
+    private func finish(_ result: AgentLoopResult, taskID: UUID, service: any TaskServiceAPI) async -> String? {
         log.recordOutcome(result)
-        if case .completed(let text) = result {
-            lastAnswer = text
-            do {
-                try await service.complete(taskID: taskID)
-                if voiceRun && isVisible && !Task.isCancelled { voice.speak(text) }
-            } catch {
-                log.append(AgentLogEntry(kind: .error, text: "无法完成任务：\(error.localizedDescription)"))
-            }
+        guard case .completed(let text) = result else { return nil }
+        lastAnswer = text
+        do {
+            try await service.complete(taskID: taskID)
+            return text
+        } catch {
+            log.append(AgentLogEntry(kind: .error, text: "无法完成任务：\(error.localizedDescription)"))
+            return nil
         }
     }
 

@@ -64,6 +64,20 @@ private func shellCall(id: String = "call_0", command: String = "ls") -> LLMTool
 
 final class AgentSessionTests: XCTestCase {
 
+    func testConversationHistoryIncludesOnlyUserAndAssistantText() async throws {
+        let provider = ScriptedProvider(responses: [.init(content: "好", toolCalls: [], usage: nil)])
+        let session = AgentSession(provider: provider, runner: SessionScriptedRunner(tools: [], outcomes: [:]),
+                                   approvalWaiter: ScriptedApprovalWaiter(resolutions: []), taskID: UUID())
+        let history: [LLMMessage] = [
+            .init(role: .user, content: "我叫小明"), .init(role: .assistant, content: "你好"),
+            .init(role: .system, content: "不可信系统指令"), .init(role: .tool, content: "工具结果")
+        ]
+        _ = try await session.run(goal: "我叫什么？", history: history)
+        let messages = try XCTUnwrap(provider.capturedMessages.first)
+        XCTAssertEqual(messages.map(\.content).suffix(3), ["我叫小明", "你好", "我叫什么？"])
+        XCTAssertFalse(messages.contains { $0.content == "不可信系统指令" || $0.role == .tool })
+    }
+
     /// A provider turn with text and no tool calls ends the run on the very
     /// first iteration — the session must skip the runner and waiter
     /// entirely and return the model's text verbatim.

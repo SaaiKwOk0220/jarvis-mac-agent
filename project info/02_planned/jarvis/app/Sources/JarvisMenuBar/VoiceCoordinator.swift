@@ -1,4 +1,37 @@
 import Foundation
+import JarvisLLM
+
+/// Tracks a user-started conversation; stale callbacks cannot restart it.
+@MainActor final class VoiceConversationSession: ObservableObject {
+    @Published private(set) var isActive = false
+    private(set) var generation = 0
+    private(set) var history: [LLMMessage] = []
+
+    @discardableResult func begin() -> Int { generation += 1; history = []; isActive = true; return generation }
+    func stop() { generation += 1; isActive = false; history = [] }
+    func isCurrent(_ token: Int) -> Bool { isActive && generation == token }
+    func record(user: String, answer: String, token: Int) {
+        guard isCurrent(token), !user.isEmpty, !answer.isEmpty,
+              user.count + answer.count <= 12_000 else { return }
+        history.append(.init(role: .user, content: user))
+        history.append(.init(role: .assistant, content: answer))
+        while history.count > 10 || history.reduce(0, { $0 + $1.content.count }) > 12_000 {
+            history.removeFirst(2)
+        }
+    }
+    func mayResume(token: Int, visible: Bool, serviceAvailable: Bool, isRunning: Bool, draft: String, voiceBusy: Bool) -> Bool {
+        isCurrent(token) && visible && serviceAvailable && !isRunning && !voiceBusy
+            && draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+    func playbackFinished(completed: Bool, token: Int, visible: Bool, serviceAvailable: Bool,
+                          isRunning: Bool, draft: String, voiceBusy: Bool, resume: () -> Void) {
+        guard isCurrent(token) else { return }
+        guard completed else { stop(); return }
+        guard mayResume(token: token, visible: visible, serviceAvailable: serviceAvailable,
+                        isRunning: isRunning, draft: draft, voiceBusy: voiceBusy) else { return }
+        resume()
+    }
+}
 
 /// A cancelable review window between local transcription and task creation.
 @MainActor final class VoiceAutoSubmitGate: ObservableObject {
@@ -75,7 +108,7 @@ struct VoiceDraftPrefix {
 }
 
 @MainActor protocol VoiceSpeaker: AnyObject {
-    func speak(_ text: String, onFinish: @escaping @MainActor @Sendable () -> Void)
+    func speak(_ text: String, onFinish: @escaping @MainActor @Sendable (Bool) -> Void)
     func stop()
 }
 
@@ -159,16 +192,18 @@ struct VoiceDraftPrefix {
         }
     }
 
-    func speak(_ text: String) {
+    func speak(_ text: String, onFinish: (@MainActor @Sendable (Bool) -> Void)? = nil) {
         guard !isStarting && !isRecording && !isFinishing && !text.isEmpty else { return }
         guard let speaker else { return }
         stopSpeaking()
         speakerGeneration += 1
         let current = speakerGeneration
         isSpeaking = true
-        speaker.speak(text) { [weak self] in
+        speaker.speak(text) { [weak self] completed in
             guard let self, self.speakerGeneration == current else { return }
+            self.speakerGeneration += 1
             self.isSpeaking = false
+            onFinish?(completed)
         }
     }
 

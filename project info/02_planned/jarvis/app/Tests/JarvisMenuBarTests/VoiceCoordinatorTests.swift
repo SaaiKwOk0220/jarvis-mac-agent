@@ -1,6 +1,7 @@
 import XCTest
 @preconcurrency import AVFoundation
 @preconcurrency import Speech
+import JarvisLLM
 @testable import JarvisMenuBar
 
 @MainActor private final class FakeVoiceBackend: VoiceBackend {
@@ -30,8 +31,8 @@ import XCTest
 @MainActor private final class FakeSpeaker: VoiceSpeaker {
     var stopCount = 0
     var spoken: [String] = []
-    var completion: (@MainActor @Sendable () -> Void)?
-    func speak(_ text: String, onFinish: @escaping @MainActor @Sendable () -> Void) { spoken.append(text); completion = onFinish }
+    var completion: (@MainActor @Sendable (Bool) -> Void)?
+    func speak(_ text: String, onFinish: @escaping @MainActor @Sendable (Bool) -> Void) { spoken.append(text); completion = onFinish }
     func stop() { stopCount += 1 }
 }
 
@@ -45,7 +46,124 @@ private final class GateProbe: @unchecked Sendable {
     var valid: Bool { lock.lock(); defer { lock.unlock() }; return ended && !violation }
 }
 
+private actor ConversationTestProvider: LLMProvider {
+    let identifier = "test"
+    private(set) var requests: [[LLMMessage]] = []
+    func complete(messages: [LLMMessage], tools: [LLMTool]) async throws -> LLMResponse {
+        requests.append(messages)
+        return .init(content: "回答\(requests.count)", toolCalls: [], usage: nil)
+    }
+}
+private struct ConversationTestRunner: AgentToolRunner {
+    func tools() -> [LLMTool] { [] }
+    func perform(_ call: LLMToolCall) async throws -> AgentToolOutcome { .denied("unexpected tool") }
+}
+private struct ConversationTestWaiter: ApprovalWaiter {
+    func waitForResolution(requestID: UUID, payloadDigest: String, taskID: UUID) async throws -> ToolResolution { .cancelled }
+}
+
 @MainActor final class VoiceCoordinatorTests: XCTestCase {
+    func testConversationResumesOnlyWhenActiveVisibleAndDraftEmpty() {
+        let session = VoiceConversationSession()
+        let token = session.begin()
+        XCTAssertTrue(session.mayResume(token: token, visible: true, serviceAvailable: true, isRunning: false, draft: "", voiceBusy: false))
+        XCTAssertFalse(session.mayResume(token: token, visible: false, serviceAvailable: true, isRunning: false, draft: "", voiceBusy: false))
+        XCTAssertFalse(session.mayResume(token: token, visible: true, serviceAvailable: true, isRunning: false, draft: "未提交草稿", voiceBusy: false))
+        XCTAssertFalse(session.mayResume(token: token, visible: true, serviceAvailable: true, isRunning: true, draft: "", voiceBusy: false))
+        session.stop()
+        XCTAssertFalse(session.mayResume(token: token, visible: true, serviceAvailable: true, isRunning: false, draft: "", voiceBusy: false))
+        _ = session.begin()
+        XCTAssertFalse(session.mayResume(token: token, visible: true, serviceAvailable: true, isRunning: false, draft: "", voiceBusy: false))
+    }
+
+    func testConversationHistoryIsBoundedAndClearedOnStop() {
+        let session = VoiceConversationSession()
+        let token = session.begin()
+        for index in 0..<7 { session.record(user: "问\(index)", answer: "答\(index)", token: token) }
+        XCTAssertEqual(session.history.count, 10)
+        XCTAssertEqual(session.history.first?.content, "问2")
+        session.stop()
+        XCTAssertTrue(session.history.isEmpty)
+        _ = session.begin()
+        session.record(user: "旧", answer: "旧", token: token)
+        XCTAssertTrue(session.history.isEmpty)
+    }
+
+    func testTwoTurnsUseSessionHistoryAndNewConversationDoesNot() async throws {
+        let provider = ConversationTestProvider()
+        let agent = AgentSession(provider: provider, runner: ConversationTestRunner(),
+                                 approvalWaiter: ConversationTestWaiter(), taskID: UUID())
+        let conversation = VoiceConversationSession()
+        let token = conversation.begin()
+        let first = try await agent.run(goal: "我叫小明", history: conversation.history)
+        guard case .completed(let answer) = first else { return XCTFail("first turn did not complete") }
+        conversation.record(user: "我叫小明", answer: answer, token: token)
+        _ = try await agent.run(goal: "我叫什么？", history: conversation.history)
+        conversation.stop()
+        _ = conversation.begin()
+        _ = try await agent.run(goal: "新的问题", history: conversation.history)
+        let calls = await provider.requests
+        XCTAssertEqual(Array(calls[1].map(\.content).suffix(3)), ["我叫小明", "回答1", "我叫什么？"])
+        XCTAssertFalse(calls[2].contains { $0.content == "我叫小明" || $0.content == "回答1" })
+    }
+
+    func testPlaybackCompletionReopensOnlyCurrentActiveSession() {
+        let session = VoiceConversationSession()
+        let token = session.begin()
+        var reopened = 0
+        session.playbackFinished(completed: true, token: token, visible: true, serviceAvailable: true,
+                                 isRunning: false, draft: "", voiceBusy: false) { reopened += 1 }
+        XCTAssertEqual(reopened, 1)
+        session.stop()
+        session.playbackFinished(completed: true, token: token, visible: true, serviceAvailable: true,
+                                 isRunning: false, draft: "", voiceBusy: false) { reopened += 1 }
+        XCTAssertEqual(reopened, 1)
+        let next = session.begin()
+        session.playbackFinished(completed: false, token: next, visible: true, serviceAvailable: true,
+                                 isRunning: false, draft: "", voiceBusy: false) { reopened += 1 }
+        XCTAssertEqual(reopened, 1)
+        XCTAssertFalse(session.isActive)
+    }
+
+    func testCancelledSpeechDoesNotSignalNaturalCompletion() {
+        let speaker = FakeSpeaker(); let voice = VoiceCoordinator(backend: FakeVoiceBackend(), speaker: speaker)
+        var natural = false
+        voice.speak("回答") { completed in natural = completed }
+        speaker.completion?(false)
+        XCTAssertFalse(natural)
+        XCTAssertFalse(voice.isSpeaking)
+    }
+
+    func testSpeechCompletionCannotResumeTwice() {
+        let speaker = FakeSpeaker(); let voice = VoiceCoordinator(backend: FakeVoiceBackend(), speaker: speaker)
+        var completions = 0
+        voice.speak("回答") { finished in if finished { completions += 1 } }
+        let callback = speaker.completion
+        callback?(true); callback?(true)
+        XCTAssertEqual(completions, 1)
+    }
+
+    func testVoicePreferenceFallsBackWhenVoiceIsUnavailableAndClampsRate() {
+        XCTAssertEqual(VoicePlaybackSettings.availableIdentifier("installed", in: ["installed"]), "installed")
+        XCTAssertNil(VoicePlaybackSettings.availableIdentifier("missing", in: ["installed"]))
+        XCTAssertNil(VoicePlaybackSettings.availableIdentifier("", in: ["installed"]))
+        XCTAssertEqual(VoicePlaybackSettings.safeRate(0.5), 0.5, accuracy: 0.0001)
+        XCTAssertEqual(VoicePlaybackSettings.safeRate(100), 0.6, accuracy: 0.0001)
+        XCTAssertEqual(VoicePlaybackSettings.safeRate(.nan), 0.5, accuracy: 0.0001)
+    }
+
+    func testPermissionRequestOnlyRunsForUndeterminedState() async {
+        var requests = 0
+        let request: @MainActor () async -> Bool = { requests += 1; return true }
+        let granted = await VoicePermissionPolicy.resolve(.granted, request: request)
+        let denied = await VoicePermissionPolicy.resolve(.denied, request: request)
+        XCTAssertTrue(granted)
+        XCTAssertFalse(denied)
+        XCTAssertEqual(requests, 0)
+        let determined = await VoicePermissionPolicy.resolve(.undetermined, request: request)
+        XCTAssertTrue(determined)
+        XCTAssertEqual(requests, 1)
+    }
     func testAutoSubmitCountdownCanBeCancelledForEditOrClose() async throws {
         let gate = VoiceAutoSubmitGate(tick: .milliseconds(20))
         var sent: [String] = []
@@ -60,10 +178,11 @@ private final class GateProbe: @unchecked Sendable {
     func testNewSessionInvalidatesOldCountdownAndSubmitsOnlyOnce() async throws {
         let gate = VoiceAutoSubmitGate(tick: .milliseconds(20))
         var sent: [String] = []
+        let submitted = expectation(description: "new countdown completed")
         gate.schedule("旧") { sent.append($0) }
         try await Task.sleep(for: .milliseconds(25))
-        gate.schedule("新") { sent.append($0) }
-        try await Task.sleep(for: .milliseconds(120))
+        gate.schedule("新") { sent.append($0); submitted.fulfill() }
+        await fulfillment(of: [submitted], timeout: 3)
         XCTAssertEqual(sent, ["新"])
         XCTAssertNil(gate.pendingText)
     }
@@ -84,9 +203,9 @@ private final class GateProbe: @unchecked Sendable {
         XCTAssertFalse(voice.isSpeaking)
         voice.stop()
         voice.speak("新回答")
-        oldCompletion?()
+        oldCompletion?(true)
         XCTAssertTrue(voice.isSpeaking)
-        speaker.completion?()
+        speaker.completion?(true)
         XCTAssertFalse(voice.isSpeaking)
     }
     func testSilenceDetectorRequiresSpeechBeforePauseAndFiresOnce() {
