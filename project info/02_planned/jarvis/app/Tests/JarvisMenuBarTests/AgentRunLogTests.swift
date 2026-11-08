@@ -12,6 +12,16 @@ final class AgentRunLogTests: XCTestCase {
         XCTAssertTrue(log.entries.contains { $0.text == "Run complete." })
     }
 
+    func testApprovalFailureCancellationAndTimeoutShowDistinctOutcomes() {
+        let cases: [(AgentLoopResult, String)] = [(.failed(reason: "shell exited 1"), "shell exited 1"), (.cancelled, "cancelled"), (.approvalTimedOut, "timed out")]
+        for (outcome, expected) in cases {
+            let log = AgentRunLog()
+            log.recordOutcome(outcome)
+            XCTAssertTrue(log.entries.contains { $0.text.contains(expected) })
+            XCTAssertFalse(log.entries.contains { $0.text.contains("iteration limit") })
+        }
+    }
+
     func testIterationLimitRemainsVisibleWithoutRepeatingLastText() {
         let log = AgentRunLog()
         log.append(AgentLogEntry(event: .assistantText("Working")))

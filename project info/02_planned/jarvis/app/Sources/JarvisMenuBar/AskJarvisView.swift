@@ -69,6 +69,12 @@ final class AgentRunLog: ObservableObject {
             append(AgentLogEntry(kind: .info, text: "Run complete."))
         case .awaitingApproval(_, let description):
             append(AgentLogEntry(kind: .approval, text: "Paused for your approval: \(description). Open the task in the Jarvis menu to approve or reject it."))
+        case .failed(let reason):
+            append(AgentLogEntry(kind: .error, text: "Tool failed: \(reason)"))
+        case .cancelled:
+            append(AgentLogEntry(kind: .info, text: "Run cancelled."))
+        case .approvalTimedOut:
+            append(AgentLogEntry(kind: .error, text: "Approval timed out."))
         case .exceededIterations:
             append(AgentLogEntry(kind: .error, text: "Stopped after reaching the iteration limit. Try a narrower goal."))
         }

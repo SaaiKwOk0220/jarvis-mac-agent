@@ -100,11 +100,11 @@ public struct AgentSession: Sendable {
                         onEvent?(.toolCallDenied(name: call.name, reason: reason))
                         messages.append(LLMMessage(role: .tool, content: "denied: \(reason)", toolCallID: call.id))
                     case .failed(let reason):
-                        return .exceededIterations(lastText: reason)
+                        return .failed(reason: reason)
                     case .cancelled:
-                        return .exceededIterations(lastText: "cancelled by user")
+                        return .cancelled
                     case .timedOut:
-                        return .exceededIterations(lastText: "approval timed out")
+                        return .approvalTimedOut
                     }
 
                 case .denied(let reason):
