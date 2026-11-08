@@ -124,14 +124,20 @@ struct AskJarvisView: View {
                 HStack {
                     Button(voice.isRecording ? "停止录音" : (voice.isFinishing ? "取消转写" : "按下开始说话")) {
                         if voice.isRecording { voice.finishRecording() }
-                        else if voice.isFinishing { voice.stop() }
+                        else if voice.isFinishing { voice.stop(); voice.discardTranscript(); goal = voiceDraftPrefix.originalDraft }
                         else { voiceDraftPrefix = VoiceDraftPrefix(draft: goal); Task { await voice.start() } }
-                    }.disabled(isRunning || voice.isStarting)
+                    }.disabled(isRunning || voice.isStarting || voice.needsConfirmation)
                     if voice.isRecording { Text("● 正在录音").foregroundStyle(.red) }
                     if voice.isStarting { Text("正在请求权限…") }
                     if voice.isFinishing { Text("正在完成转写…") }
                 }
                 if let error = voice.errorMessage { Text(error).foregroundStyle(.red).font(.caption) }
+                if voice.needsConfirmation {
+                    HStack {
+                        Text("最终转写未确认，请检查文字后确认。")
+                        Button("确认转写") { voice.confirmTranscript() }
+                    }.foregroundStyle(.orange).font(.caption)
+                }
             }
 
             progressLog
@@ -186,17 +192,16 @@ struct AskJarvisView: View {
 
     private var canRun: Bool {
         VoiceDraftPrefix.canRun(draft: goal, serviceAvailable: service != nil, isRunning: isRunning,
-                                voiceBusy: voice.isRecording || voice.isStarting || voice.isFinishing)
+                                voiceBusy: voice.isRecording || voice.isStarting || voice.isFinishing || voice.needsConfirmation)
     }
 
     private var statusText: String {
         if voice.isStarting { return "等待语音权限。" }
         if voice.isRecording { return "录音中，请先停止录音。" }
         if voice.isFinishing { return "正在等待最终转写。" }
+        if voice.needsConfirmation { return "请检查并确认转写后再运行。" }
         guard let runningTaskID else {
-            if service == nil { return "Jarvis 服务不可用，无法运行任务。" }
-            if goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "请输入或录入任务内容。" }
-            return "Ready."
+            return VoiceDraftPrefix.idleStatus(draft: goal, serviceAvailable: service != nil, isRunning: isRunning)
         }
         return "Task \(runningTaskID.uuidString.prefix(8))"
     }
