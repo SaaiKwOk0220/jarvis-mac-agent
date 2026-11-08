@@ -343,7 +343,7 @@ final class TaskServiceTests: XCTestCase {
             name: "shell",
             sideEffect: .localExecute,
             target: "/tmp/jarvis-service",
-            payload: "echo routed"
+            payload: "pwd"
         )
 
         let decision = try await fixture.service.submit(request: request)
@@ -360,7 +360,7 @@ final class TaskServiceTests: XCTestCase {
             "Task stays .running after TerminalToolExecutor finishes; call complete(taskID:) to finish")
         XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .completed)
         XCTAssertTrue(
-            try fixture.audit.events(for: task.id).contains { $0.summary == "tool result" && $0.result.contains("routed") },
+            try fixture.audit.events(for: task.id).contains { $0.summary == "tool result" && $0.result.contains("exit=0") },
             "audit must show TerminalToolExecutor output, not NoOp"
         )
     }
@@ -386,7 +386,7 @@ final class TaskServiceTests: XCTestCase {
     /// Verifies that `submit(request:)` reaches the TerminalToolExecutor for a
     /// shell command by looking for the executor's "exit=0" marker in the
     /// audit summary. This is distinct from `testShellRequestRoutesToTerminalExecutor`
-    /// above which checks for an arbitrary echoed string — this test pins
+    /// above which checks the executor output — this test pins
     /// the executor's output format so future refactors can't silently swap
     /// in the NoOpToolExecutor.
     func testSubmitShellCommandReachesTerminalExecutor() async throws {
@@ -397,7 +397,7 @@ final class TaskServiceTests: XCTestCase {
             name: "shell",
             sideEffect: .localExecute,
             target: "/tmp/jarvis-service",
-            payload: "echo hello-shell-ui"
+            payload: "pwd"
         )
 
         _ = try await fixture.service.submit(request: request)

@@ -4,13 +4,15 @@ import JarvisDomain
 
 /// Errors surfaced by `TerminalToolExecutor`.
 public enum TerminalToolExecutorError: Error, Equatable, Sendable {
+    case unsupportedCommand
     case incompatibleSideEffect(SideEffect)
     case launchFailed(underlying: String)
     case timeout
     case nonZeroExit(code: Int32, summary: String)
 }
 
-/// ToolExecutor that runs a shell command via `/bin/sh -c <payload>` as a `Foundation.Process`.
+/// Executes the single supported read-only command in a fail-closed macOS sandbox.
+/// This does not claim to restrict filesystem reads or constrain build tools.
 ///
 /// The executor enforces a hard timeout. When the timeout elapses, the process receives `SIGTERM`;
 /// if it has not exited one second later, the executor escalates to `SIGKILL`. The captured stdout
@@ -30,26 +32,15 @@ public struct TerminalToolExecutor: ToolExecutor, Sendable {
             throw TerminalToolExecutorError.incompatibleSideEffect(request.sideEffect)
         }
 
+        // Deliberately support only a fixed command with no arguments. Never
+        // interpret a model-provided payload as shell code. A failed sandbox
+        // launch or denied sandbox operation is a failure, never a fallback.
+        guard request.payload.trimmingCharacters(in: .whitespacesAndNewlines) == "pwd" else {
+            throw TerminalToolExecutorError.unsupportedCommand
+        }
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        // Wrap the payload so that when sh receives SIGTERM/SIGINT, it
-        // forwards the signal to every process in its process group
-        // (descendants the payload spawned). Without this, those descendants
-        // are reparented to launchd when sh exits and outlive our control.
-        // `kill -TERM -$$` addresses the group by pgid; Swift's `Process`
-        // spawns sh as a process-group leader (pgid == sh's pid), so this
-        // targets the shell and all of its children. `exit 143` records
-        // the SIGTERM exit. Limitation: a child that calls `setsid` or
-        // `setpgid` to escape the group will not be reached — for that
-        // case, replace this with a `posix_spawn`-based executor that
-        // tracks the pgid explicitly.
-        process.arguments = [
-            "-c",
-            """
-            trap 'kill -TERM -$$; exit 143' TERM INT
-            \(request.payload)
-            """
-        ]
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sandbox-exec")
+        process.arguments = ["-p", "(version 1)(allow default)(deny file-write*)(deny network*)", "/bin/pwd"]
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
@@ -74,19 +65,15 @@ public struct TerminalToolExecutor: ToolExecutor, Sendable {
         async let stderrTask = Self.readPipe(stderrPipe)
 
         defer {
-            // Even with the trap, escalate to SIGKILL on the entire process
-            // group if the shell is still alive after the grace period. The
-            // negative-pid form kills any grandchildren that survived
-            // (because the trap was bypassed by SIGKILL, a descendant called
-            // setsid to escape the group, or the trap itself failed).
+            // Stop the fixed sandboxed process when the request is cancelled.
             if process.isRunning {
-                process.terminate() // SIGTERM — trap fires, kills the group
+                process.terminate() // SIGTERM
                 let deadline = Date().addingTimeInterval(1.0)
                 while process.isRunning && Date() < deadline {
                     usleep(50_000) // 50ms in microseconds
                 }
                 if process.isRunning {
-                    kill(-process.processIdentifier, SIGKILL)
+                    kill(process.processIdentifier, SIGKILL)
                 }
             }
         }
@@ -111,13 +98,13 @@ public struct TerminalToolExecutor: ToolExecutor, Sendable {
         while process.isRunning {
             try await Task.sleep(for: pollInterval)
             if ContinuousClock.now >= deadline {
-                process.terminate() // SIGTERM — trap fires, kills the group
+                process.terminate() // SIGTERM
                 let graceDeadline = ContinuousClock.now.advanced(by: gracePeriod)
                 while process.isRunning && ContinuousClock.now < graceDeadline {
                     try await Task.sleep(for: pollInterval)
                 }
                 if process.isRunning {
-                    kill(-process.processIdentifier, SIGKILL)
+                    kill(process.processIdentifier, SIGKILL)
                 }
                 throw TerminalToolExecutorError.timeout
             }
