@@ -60,18 +60,39 @@ final class RecognitionEvents: @unchecked Sendable {
 final class AudioRequestGate: @unchecked Sendable {
     private let lock = NSLock()
     private var ended = false
-    private let request: SFSpeechAudioBufferRecognitionRequest
-    init(_ request: SFSpeechAudioBufferRecognitionRequest) { self.request = request }
+    private let appendBuffer: @Sendable (AVAudioPCMBuffer) -> Void
+    private let endAudio: @Sendable () -> Void
+
+    private final class RequestBox: @unchecked Sendable {
+        let request: SFSpeechAudioBufferRecognitionRequest
+        init(_ request: SFSpeechAudioBufferRecognitionRequest) { self.request = request }
+    }
+
+    convenience init(_ request: SFSpeechAudioBufferRecognitionRequest) {
+        let box = RequestBox(request)
+        self.init(append: { box.request.append($0) }, end: { box.request.endAudio() })
+    }
+
+    init(append: @escaping @Sendable (AVAudioPCMBuffer) -> Void, end: @escaping @Sendable () -> Void) {
+        appendBuffer = append
+        endAudio = end
+    }
+
     func append(_ buffer: AVAudioPCMBuffer) {
-        lock.lock(); defer { lock.unlock() }
+        // The realtime tap must never wait for another append or for finish.
+        guard lock.try() else { return }
+        defer { lock.unlock() }
         guard !ended else { return }
-        request.append(buffer)
+        appendBuffer(buffer)
     }
     func finish() {
-        lock.lock(); defer { lock.unlock() }
-        guard !ended else { return }
+        // Wait for any in-flight append off the audio callback, then close the
+        // gate before invoking the framework outside the lock.
+        lock.lock()
+        guard !ended else { lock.unlock(); return }
         ended = true
-        request.endAudio()
+        lock.unlock()
+        endAudio()
     }
 
 }
