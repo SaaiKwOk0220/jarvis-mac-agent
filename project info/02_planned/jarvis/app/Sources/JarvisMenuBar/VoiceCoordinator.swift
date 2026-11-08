@@ -1,5 +1,45 @@
 import Foundation
 
+/// A cancelable review window between local transcription and task creation.
+@MainActor final class VoiceAutoSubmitGate: ObservableObject {
+    @Published private(set) var pendingText: String?
+    @Published private(set) var secondsRemaining = 0
+    private let tick: Duration
+    private var generation = 0
+    private var timer: Task<Void, Never>?
+
+    init(tick: Duration = .seconds(1)) { self.tick = tick }
+
+    func schedule(_ text: String, submit: @escaping @MainActor @Sendable (String) -> Void) {
+        cancel()
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        generation += 1
+        let current = generation
+        pendingText = text
+        secondsRemaining = 3
+        let interval = tick
+        timer = Task { [weak self] in
+            for remaining in stride(from: 2, through: 0, by: -1) {
+                do { try await Task.sleep(for: interval) } catch { return }
+                guard !Task.isCancelled, let self, self.generation == current else { return }
+                self.secondsRemaining = remaining
+            }
+            guard !Task.isCancelled, let self, self.generation == current,
+                  self.pendingText == text else { return }
+            self.pendingText = nil
+            self.timer = nil
+            submit(text)
+        }
+    }
+
+    func cancel() {
+        generation += 1
+        timer?.cancel(); timer = nil
+        pendingText = nil
+        secondsRemaining = 0
+    }
+}
+
 /// Preserves the editable draft while a new recording produces partial text.
 struct VoiceDraftPrefix {
     private let draft: String
@@ -13,6 +53,9 @@ struct VoiceDraftPrefix {
     }
     static func canRun(draft: String, serviceAvailable: Bool, isRunning: Bool, voiceBusy: Bool) -> Bool {
         serviceAvailable && !isRunning && !voiceBusy && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+    static func allowsAutomaticSubmission(draft: String, serviceAvailable: Bool) -> Bool {
+        serviceAvailable && draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
     static func idleStatus(draft: String, serviceAvailable: Bool, isRunning: Bool) -> String {
         if isRunning { return "正在创建任务…" }

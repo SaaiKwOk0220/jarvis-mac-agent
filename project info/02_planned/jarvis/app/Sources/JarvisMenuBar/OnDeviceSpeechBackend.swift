@@ -128,16 +128,29 @@ final class AudioPauseMonitor: @unchecked Sendable {
     func observe(_ buffer: AVAudioPCMBuffer) {
         guard lock.try() else { return }
         defer { lock.unlock() }
-        guard let channels = buffer.floatChannelData, buffer.frameLength > 0,
-              buffer.format.sampleRate > 0, buffer.stride > 0 else { return }
+        let channelCount = Int(buffer.format.channelCount)
+        guard buffer.format.commonFormat == .pcmFormatFloat32,
+              channelCount > 0, channelCount <= 8,
+              let channels = buffer.floatChannelData, buffer.frameLength > 0,
+              buffer.format.sampleRate.isFinite, buffer.format.sampleRate > 0, buffer.stride > 0 else { return }
         let count = Int(buffer.frameLength)
-        var sum: Double = 0
-        for index in 0..<count {
-            let sample = Double(channels[0][index * Int(buffer.stride)])
-            sum += sample * sample
+        // Decimate for a bounded tap cost (at most 256 samples/channel for
+        // the configured 1024-frame tap). Sampling can miss or overestimate
+        // energy; this is not a speech classifier. Auto-submit has a review countdown.
+        let sampleStep = 4
+        let sampleCount = (count + sampleStep - 1) / sampleStep
+        var maxLevel: Float = 0
+        for channel in 0..<channelCount {
+            var sum: Double = 0
+            for index in stride(from: 0, to: count, by: sampleStep) {
+                let sample = Double(channels[channel][index * Int(buffer.stride)])
+                sum += sample * sample
+            }
+            let level = Float((sum / Double(sampleCount)).squareRoot())
+            guard level.isFinite else { return }
+            maxLevel = max(maxLevel, level)
         }
-        let level = Float((sum / Double(count)).squareRoot())
-        if detector.observe(level: level, duration: Double(count) / buffer.format.sampleRate) {
+        if detector.observe(level: maxLevel, duration: Double(count) / buffer.format.sampleRate) {
             DispatchQueue.main.async { [onSilence] in onSilence() }
         }
     }

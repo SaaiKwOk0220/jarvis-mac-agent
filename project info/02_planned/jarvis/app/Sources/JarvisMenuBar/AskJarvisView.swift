@@ -101,6 +101,7 @@ struct AskJarvisView: View {
 
     @StateObject private var log = AgentRunLog()
     @StateObject private var voice = VoiceCoordinator(backend: OnDeviceSpeechBackend(), speaker: SystemVoiceSpeaker())
+    @StateObject private var autoSubmit = VoiceAutoSubmitGate()
     @State private var lastAnswer = ""
     @State private var goal = ""
     @State private var voiceDraftPrefix = VoiceDraftPrefix(draft: "")
@@ -119,7 +120,10 @@ struct AskJarvisView: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("Goal").font(.caption).foregroundStyle(.secondary)
-                TextEditor(text: $goal)
+                TextEditor(text: Binding(get: { goal }, set: { value in
+                    if value != goal { autoSubmit.cancel() }
+                    goal = value
+                }))
                     .font(.system(.body, design: .monospaced))
                     .frame(minHeight: 70)
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)))
@@ -137,11 +141,20 @@ struct AskJarvisView: View {
                 }
                 Text((voice.isRecording || voice.isStarting || voice.isFinishing
                       ? voiceWillAutoSubmit
-                      : (service != nil && goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
+                      : VoiceDraftPrefix.allowsAutomaticSubmission(draft: goal, serviceAvailable: service != nil))
                      ? "说话停顿并识别完成后会自动运行；也可手动停止。"
                      : "已有草稿将保留，转写后请手动运行。")
                     .font(.caption).foregroundStyle(.secondary)
                 if let error = voice.errorMessage { Text(error).foregroundStyle(.red).font(.caption) }
+                if let pending = autoSubmit.pendingText {
+                    VStack(alignment: .leading) {
+                        Text("即将运行：\(pending)").textSelection(.enabled)
+                        HStack {
+                            Text("\(autoSubmit.secondsRemaining) 秒后自动运行；编辑文字也会取消。")
+                            Button("取消自动运行") { autoSubmit.cancel() }
+                        }
+                    }.font(.caption).foregroundStyle(.orange)
+                }
                 if voice.needsConfirmation {
                     HStack {
                         Text("最终转写未确认，请检查文字后确认。")
@@ -168,7 +181,7 @@ struct AskJarvisView: View {
         }
         .padding(24)
         .onAppear { isVisible = true }
-        .onDisappear { isVisible = false; voiceRun = false; voice.stop(); voice.stopSpeaking() }
+        .onDisappear { isVisible = false; voiceRun = false; autoSubmit.cancel(); voice.stop(); voice.stopSpeaking() }
     }
 
     @ViewBuilder private var progressLog: some View {
@@ -218,13 +231,14 @@ struct AskJarvisView: View {
 
     /// Existing drafts are never automatically submitted with new speech.
     private func beginVoice() {
+        autoSubmit.cancel()
         guard !isRunning && !voice.isStarting && !voice.needsConfirmation else { return }
         Task { @MainActor in
             guard isVisible, !isRunning, !voice.isStarting, !voice.isRecording,
                   !voice.isFinishing, !voice.needsConfirmation else { return }
             let prefix = VoiceDraftPrefix(draft: goal)
             voiceDraftPrefix = prefix
-            let canAutoSubmit = goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && service != nil
+            let canAutoSubmit = VoiceDraftPrefix.allowsAutomaticSubmission(draft: goal, serviceAvailable: service != nil)
             voiceWillAutoSubmit = canAutoSubmit
             let update: @MainActor @Sendable (String) -> Void = { text in
                 if let updated = prefix.render(transcript: text) { goal = updated }
@@ -232,7 +246,10 @@ struct AskJarvisView: View {
             let submit: @MainActor @Sendable (String) -> Void = { text in
                 guard isVisible, !isRunning, service != nil else { return }
                 goal = text
-                start(fromVoice: true)
+                autoSubmit.schedule(text) { pending in
+                    guard isVisible, !isRunning, canRun, goal == pending else { return }
+                    start(fromVoice: true)
+                }
             }
             if canAutoSubmit { await voice.start(onTranscript: update, autoSubmit: submit) }
             else { await voice.start(onTranscript: update) }
@@ -241,6 +258,7 @@ struct AskJarvisView: View {
 
     private func start(fromVoice: Bool = false) {
         guard canRun, let service else { return }
+        autoSubmit.cancel()
         let submittedGoal = goal.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !submittedGoal.isEmpty else { return }
         voice.stop()

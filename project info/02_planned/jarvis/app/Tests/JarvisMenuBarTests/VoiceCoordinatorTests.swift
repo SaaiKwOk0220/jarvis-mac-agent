@@ -46,6 +46,35 @@ private final class GateProbe: @unchecked Sendable {
 }
 
 @MainActor final class VoiceCoordinatorTests: XCTestCase {
+    func testAutoSubmitCountdownCanBeCancelledForEditOrClose() async throws {
+        let gate = VoiceAutoSubmitGate(tick: .milliseconds(20))
+        var sent: [String] = []
+        gate.schedule("草稿") { sent.append($0) }
+        try await Task.sleep(for: .milliseconds(25))
+        gate.cancel()
+        try await Task.sleep(for: .milliseconds(80))
+        XCTAssertTrue(sent.isEmpty)
+        XCTAssertNil(gate.pendingText)
+    }
+
+    func testNewSessionInvalidatesOldCountdownAndSubmitsOnlyOnce() async throws {
+        let gate = VoiceAutoSubmitGate(tick: .milliseconds(20))
+        var sent: [String] = []
+        gate.schedule("旧") { sent.append($0) }
+        try await Task.sleep(for: .milliseconds(25))
+        gate.schedule("新") { sent.append($0) }
+        try await Task.sleep(for: .milliseconds(120))
+        XCTAssertEqual(sent, ["新"])
+        XCTAssertNil(gate.pendingText)
+    }
+
+    func testContinuousNoiseAndShortPausesDoNotEndRecording() {
+        var detector = SpeechPauseDetector()
+        for _ in 0..<20 { XCTAssertFalse(detector.observe(level: 0.08, duration: 0.1)) }
+        XCTAssertFalse(detector.observe(level: 0, duration: 1.0))
+        XCTAssertFalse(detector.observe(level: 0.08, duration: 0.4))
+        XCTAssertFalse(detector.observe(level: 0, duration: 1.0))
+    }
     func testSpeakingStateAndInterruptionIgnoreStaleCompletion() async {
         let speaker = FakeSpeaker(); let voice = VoiceCoordinator(backend: FakeVoiceBackend(), speaker: speaker)
         voice.speak("回答")
@@ -165,6 +194,49 @@ private final class GateProbe: @unchecked Sendable {
         monitor.observe(silence)
         await fulfillment(of: [paused], timeout: 2)
     }
+
+    func testSpeechOnSecondChannelStillDetectsPause() async throws {
+        let paused = expectation(description: "second channel detected")
+        let monitor = AudioPauseMonitor(onSilence: { paused.fulfill() })
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 2))
+        let speech = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 6400))
+        speech.frameLength = 6400
+        let channels = try XCTUnwrap(speech.floatChannelData)
+        for index in 0..<6400 { channels[0][index] = 0; channels[1][index] = 0.1 }
+        let silence = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 25600))
+        silence.frameLength = 25600
+        let zero = try XCTUnwrap(silence.floatChannelData)
+        for index in 0..<25600 { zero[0][index] = 0; zero[1][index] = 0 }
+        monitor.observe(speech); monitor.observe(silence)
+        await fulfillment(of: [paused], timeout: 2)
+    }
+
+    func testInterleavedStereoDetectsSpeechOnSecondChannel() async throws {
+        let paused = expectation(description: "interleaved second channel detected")
+        let monitor = AudioPauseMonitor(onSilence: { paused.fulfill() })
+        let format = try XCTUnwrap(AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 2, interleaved: true))
+        let speech = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 6400))
+        speech.frameLength = 6400
+        let channels = try XCTUnwrap(speech.floatChannelData)
+        for index in 0..<6400 { channels[0][index * 2] = 0; channels[1][index * 2] = 0.1 }
+        let silence = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 25600))
+        silence.frameLength = 25600
+        let zero = try XCTUnwrap(silence.floatChannelData)
+        for index in 0..<25600 { zero[0][index * 2] = 0; zero[1][index * 2] = 0 }
+        monitor.observe(speech); monitor.observe(silence)
+        await fulfillment(of: [paused], timeout: 2)
+    }
+
+    func testNonFloatAudioNeverTriggersAutomaticPause() async throws {
+        let paused = expectation(description: "unsupported format must not trigger")
+        paused.isInverted = true
+        let monitor = AudioPauseMonitor(onSilence: { paused.fulfill() })
+        let format = try XCTUnwrap(AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: false))
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 16000))
+        buffer.frameLength = 16000
+        monitor.observe(buffer); monitor.observe(buffer)
+        await fulfillment(of: [paused], timeout: 0.1)
+    }
     func testNewRecordingDoesNotEraseExistingEditableDraft() async {
         let backend = FakeVoiceBackend(); let speaker = FakeSpeaker()
         let voice = VoiceCoordinator(backend: backend, speaker: speaker)
@@ -186,6 +258,12 @@ private final class GateProbe: @unchecked Sendable {
         XCTAssertFalse(VoiceDraftPrefix.canRun(draft: "文字", serviceAvailable: true, isRunning: false, voiceBusy: true))
         XCTAssertFalse(VoiceDraftPrefix.canRun(draft: " \n", serviceAvailable: true, isRunning: false, voiceBusy: false))
         XCTAssertTrue(VoiceDraftPrefix.canRun(draft: "文字", serviceAvailable: true, isRunning: false, voiceBusy: false))
+    }
+
+    func testAutomaticVoiceSubmissionNeverUsesExistingDraftOrMissingService() {
+        XCTAssertFalse(VoiceDraftPrefix.allowsAutomaticSubmission(draft: "原有草稿", serviceAvailable: true))
+        XCTAssertFalse(VoiceDraftPrefix.allowsAutomaticSubmission(draft: "", serviceAvailable: false))
+        XCTAssertTrue(VoiceDraftPrefix.allowsAutomaticSubmission(draft: " \n", serviceAvailable: true))
     }
 
     func testStartingRunDoesNotShowReadyBeforeTaskIDExists() {
