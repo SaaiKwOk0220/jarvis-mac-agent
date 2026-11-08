@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import Foundation
 import Carbon.HIToolbox
 import JarvisDomain
@@ -8,10 +9,23 @@ import JarvisService
 
 @main
 struct JarvisMenuBarApp: App {
+    @NSApplicationDelegateAdaptor(JarvisApplicationDelegate.self) private var appDelegate
     @StateObject private var client: ServiceClient
     private let runtime: Runtime
+    private let instanceLock: SingleInstanceLock
 
     init() {
+        do { instanceLock = try SingleInstanceLock() }
+        catch {
+            let message = "Jarvis is already running, or its instance lock is unavailable. Close older Jarvis instances and try again."
+            FileHandle.standardError.write(Data("\(message)\n".utf8))
+            let alert = NSAlert()
+            alert.messageText = "Jarvis could not start"
+            alert.informativeText = message
+            alert.alertStyle = .warning
+            alert.runModal()
+            exit(EXIT_FAILURE)
+        }
         let client = ServiceClient()
         _client = StateObject(wrappedValue: client)
         runtime = Runtime(client: client)
@@ -19,9 +33,6 @@ struct JarvisMenuBarApp: App {
     }
 
     var body: some Scene {
-        MenuBarExtra("Jarvis", systemImage: "bolt.horizontal.circle") {
-            TaskListView(client: client)
-        }
         Window("Welcome to Jarvis", id: "welcome") {
             WelcomeView()
                 .frame(minWidth: 540, minHeight: 460)
