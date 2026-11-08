@@ -20,11 +20,19 @@ public enum TerminalToolExecutorError: Error, Equatable, Sendable {
 /// `TaskService.bounded(_:)`'s 512-character audit envelope.
 public struct TerminalToolExecutor: ToolExecutor, Sendable {
     public let timeout: Duration
+    private let sandboxExecutableURL: URL
+    static let sandboxProfile = "(version 1)(allow default)(deny file-write*)(deny network*)"
     private static let outputPreviewLimit = 200
     private static let gracePeriod: Duration = .seconds(1)
 
     public init(timeout: Duration = .seconds(30)) {
         self.timeout = timeout
+        self.sandboxExecutableURL = URL(fileURLWithPath: "/usr/bin/sandbox-exec")
+    }
+
+    init(timeout: Duration = .seconds(30), sandboxExecutableURL: URL) {
+        self.timeout = timeout
+        self.sandboxExecutableURL = sandboxExecutableURL
     }
 
     public func execute(_ request: ToolRequest) async throws -> ToolResult {
@@ -39,8 +47,8 @@ public struct TerminalToolExecutor: ToolExecutor, Sendable {
             throw TerminalToolExecutorError.unsupportedCommand
         }
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/sandbox-exec")
-        process.arguments = ["-p", "(version 1)(allow default)(deny file-write*)(deny network*)", "/bin/pwd"]
+        process.executableURL = sandboxExecutableURL
+        process.arguments = ["-p", Self.sandboxProfile, "/bin/pwd"]
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()

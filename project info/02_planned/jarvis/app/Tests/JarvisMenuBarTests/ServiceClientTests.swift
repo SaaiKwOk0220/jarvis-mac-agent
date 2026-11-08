@@ -419,7 +419,7 @@ final class ServiceClientTests: XCTestCase {
 
         try await client.submitShellCommand(
             taskID: task.id,
-            command: "echo menu-shell",
+            command: "pwd",
             workingDirectory: "/tmp/jarvis-shell-ui"
         )
 
@@ -441,7 +441,7 @@ final class ServiceClientTests: XCTestCase {
             name: "shell",
             sideEffect: .localExecute,
             target: "/tmp/jarvis-shell-ui",
-            payload: "echo menu-shell",
+            payload: "pwd",
             scope: ToolScope(workingDirectory: "/tmp/jarvis-shell-ui")
         )
         XCTAssertEqual(request.digest, expectedDigest,
