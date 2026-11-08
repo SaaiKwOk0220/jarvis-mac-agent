@@ -83,6 +83,102 @@ private final class LockedBox<T>: @unchecked Sendable {
 private extension NSLock { func withLock<T>(_ body: () throws -> T) rethrows -> T { lock(); defer { unlock() }; return try body() } }
 
 final class OllamaProviderTests: XCTestCase {
+    func testOrdinaryContentWithThinkMarkerIsPreserved() async throws {
+        MockURLProtocol.handler = { request in
+            (jsonResponse(request), Data(#"{"message":{"content":"Let me think. </think> 2+3=5"}}"#.utf8))
+        }
+        let response = try await OllamaProvider(model: "qwen3:4b", session: MockURLSessionFactory.make()).complete(messages: [], tools: [])
+        XCTAssertEqual(response.content, "Let me think. </think> 2+3=5")
+    }
+    func testRejectsInvalidRawInputBeforeSending() async throws {
+        let call = LLMToolCall(id: "1", name: "shell", arguments: [:], rawInputJSON: "{bad}")
+        do { _ = try await makeProvider().complete(messages: [.init(role: .assistant, content: "", toolCalls: [call])], tools: []); XCTFail("expected invalid input") }
+        catch let error as LLMError { guard case .invalidResponse = error else { return XCTFail("wrong error") } }
+    }
+
+    func testRejectsEmptyResponseAndRedactsErrors() async throws {
+        MockURLProtocol.handler = { request in (jsonResponse(request), Data(#"{"message":{}}"#.utf8)) }
+        do { _ = try await makeProvider().complete(messages: [], tools: []); XCTFail("expected invalid response") }
+        catch let error as LLMError { guard case .invalidResponse = error else { return XCTFail("wrong error") } }
+        XCTAssertFalse(LLMError.invalidResponse("secret").localizedDescription.contains("secret"))
+        XCTAssertFalse(LLMError.httpStatus(500, "secret").localizedDescription.contains("secret"))
+    }
+
+    func testDecodedNumberSurvivesSecondRequest() async throws {
+        let captured = LockedBox<Data?>(initial: nil)
+        MockURLProtocol.handler = { request in
+            (jsonResponse(request), Data(#"{"message":{"content":"","tool_calls":[{"function":{"name":"shell","arguments":{"value":9007199254740993}}}]}}"#.utf8))
+        }
+        let provider = makeProvider()
+        let first = try await provider.complete(messages: [], tools: [])
+        MockURLProtocol.handler = { request in
+            captured.set(bodyData(of: request))
+            return (jsonResponse(request), Data(#"{"message":{"content":"done"}}"#.utf8))
+        }
+        _ = try await provider.complete(messages: [.init(role: .assistant, content: "", toolCalls: first.toolCalls)], tools: [])
+        XCTAssertTrue(String(data: try XCTUnwrap(captured.get()), encoding: .utf8)?.contains("9007199254740993") == true)
+    }
+
+    func testMissingModelMaps404() async throws {
+        MockURLProtocol.handler = { request in (jsonResponse(request, status: 404), Data("secret".utf8)) }
+        do { _ = try await makeProvider().complete(messages: [], tools: []); XCTFail("expected missing model") }
+        catch let error as LLMError {
+            guard case .modelNotFound = error else { return XCTFail("wrong error") }
+            XCTAssertFalse(error.localizedDescription.contains("secret"))
+        }
+    }
+
+    func testDefaultModelIsQwen() {
+        XCTAssertEqual(OllamaProvider().model, "qwen3:4b-instruct")
+    }
+
+    func testUnavailableAndMissingModelHaveActionableMessages() {
+        XCTAssertTrue(LLMError.unavailable("offline").localizedDescription.contains("Ollama"))
+        XCTAssertTrue(LLMError.modelNotFound("missing").localizedDescription.contains("ollama pull"))
+    }
+
+    func testLargeToolNumberIsReplayedExactly() async throws {
+        MockURLProtocol.handler = { request in
+            (jsonResponse(request), Data(#"{"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"shell","arguments":{"value":9007199254740993}}}]}}"#.utf8))
+        }
+        let response = try await makeProvider().complete(messages: [], tools: [])
+        XCTAssertEqual(response.toolCalls.first?.arguments["value"], "9007199254740993")
+        XCTAssertTrue(response.toolCalls.first?.rawInputJSON?.contains("9007199254740993") == true)
+    }
+
+    func testUnsupportedToolNumberIsRejected() async throws {
+        MockURLProtocol.handler = { request in
+            (jsonResponse(request), Data(#"{"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"shell","arguments":{"value":123456789012345678901234567890123456789}}}]}}"#.utf8))
+        }
+        do {
+            _ = try await makeProvider().complete(messages: [], tools: [])
+            XCTFail("Expected unsupported precision to be rejected")
+        } catch let error as LLMError {
+            guard case .invalidResponse = error else { return XCTFail("Unexpected error: \(error)") }
+        }
+    }
+
+    func testToolHistoryAndQwenSelectionAreSent() async throws {
+        let captured = LockedBox<Data?>(initial: nil)
+        MockURLProtocol.handler = { request in
+            captured.set(bodyData(of: request))
+            return (jsonResponse(request), Data(#"{"message":{"role":"assistant","content":"done"}}"#.utf8))
+        }
+        let call = LLMToolCall(id: "abc", name: "shell", arguments: ["command": "pwd"])
+        let provider = OllamaProvider(model: "qwen3:4b", session: MockURLSessionFactory.make())
+        _ = try await provider.complete(messages: [
+            LLMMessage(role: .assistant, content: "", toolCalls: [call]),
+            LLMMessage(role: .tool, content: "ok", toolCallID: "abc")
+        ], tools: [])
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(captured.get())) as? [String: Any])
+        XCTAssertEqual(root["model"] as? String, "qwen3:4b")
+        let messages = try XCTUnwrap(root["messages"] as? [[String: Any]])
+        let calls = try XCTUnwrap(messages[0]["tool_calls"] as? [[String: Any]])
+        let function = try XCTUnwrap(calls[0]["function"] as? [String: Any])
+        XCTAssertEqual(function["name"] as? String, "shell")
+        XCTAssertEqual((function["arguments"] as? [String: String])?["command"], "pwd")
+        XCTAssertEqual(messages[1]["tool_name"] as? String, "shell")
+    }
 
     override func tearDown() {
         MockURLProtocol.handler = nil
@@ -170,7 +266,7 @@ final class OllamaProviderTests: XCTestCase {
 
         let body = try XCTUnwrap(capturedBody.get())
         let root = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
-        XCTAssertEqual(root["model"] as? String, "llama3.2")
+        XCTAssertEqual(root["model"] as? String, "qwen3:4b-instruct")
         XCTAssertEqual(root["stream"] as? Bool, false)
 
         let tools = try XCTUnwrap(root["tools"] as? [[String: Any]])

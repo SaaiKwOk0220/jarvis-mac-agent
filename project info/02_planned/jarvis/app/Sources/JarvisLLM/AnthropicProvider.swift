@@ -165,7 +165,7 @@ public struct AnthropicProvider: LLMProvider {
     /// adjusted exponents outside -100...100. This conservative limit applies
     /// to every number in the response, including fields outside tool input.
     /// Inspect bytes before JSONDecoder can round them. JSON strings are skipped.
-    private static func hasSupportedNumbers(_ data: Data) -> Bool {
+    static func hasSupportedNumbers(_ data: Data) -> Bool {
         let bytes = Array(data)
         var i = 0
         var inString = false

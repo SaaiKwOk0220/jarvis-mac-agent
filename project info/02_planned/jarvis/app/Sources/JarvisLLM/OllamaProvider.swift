@@ -16,7 +16,7 @@ public struct OllamaProvider: LLMProvider {
 
     public init(
         baseURL: URL = URL(string: "http://127.0.0.1:11434")!,
-        model: String = "llama3.2",
+        model: String = "qwen3:4b-instruct",
         session: URLSession = .shared,
         timeout: TimeInterval = 120
     ) {
@@ -32,7 +32,7 @@ public struct OllamaProvider: LLMProvider {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = timeout
         request.httpBody = try JSONEncoder().encode(
-            ChatRequest(model: model, messages: messages, tools: tools)
+            try ChatRequest(model: model, messages: messages, tools: tools)
         )
 
         let data: Data
@@ -58,10 +58,13 @@ public struct OllamaProvider: LLMProvider {
 
     /// Projects a decoded chat response onto the provider-neutral contract.
     private static func map(data: Data) throws -> LLMResponse {
-        guard let decoded = try? JSONDecoder().decode(ChatResponse.self, from: data),
+        guard AnthropicProvider.hasSupportedNumbers(data), let decoded = try? JSONDecoder().decode(ChatResponse.self, from: data),
               let message = decoded.message
         else {
             throw LLMError.invalidResponse(String(data: data, encoding: .utf8) ?? "<non-utf8 body>")
+        }
+        guard normalisedContent(message.content) != nil || !(message.toolCalls ?? []).isEmpty else {
+            throw LLMError.invalidResponse("empty assistant response")
         }
 
         let toolCalls = (message.toolCalls ?? []).enumerated().map { index, call in
@@ -70,7 +73,8 @@ public struct OllamaProvider: LLMProvider {
                 // one for the agent loop to key results off.
                 id: call.id ?? "call_\(index)",
                 name: call.function.name,
-                arguments: call.function.arguments?.flattened ?? [:]
+                arguments: call.function.arguments?.flattened ?? [:],
+                rawInputJSON: call.function.arguments.flatMap { try? JSONEncoder().encode($0.pairs) }.flatMap { String(data: $0, encoding: .utf8) }
             )
         }
 
@@ -103,10 +107,21 @@ public struct OllamaProvider: LLMProvider {
         let messages: [Message]
         let tools: [Tool]
         let stream = false
+        let think = false
 
         struct Message: Encodable {
             let role: String
             let content: String
+            let tool_calls: [Call]?
+            let tool_name: String?
+
+            struct Call: Encodable {
+                let function: Function
+                struct Function: Encodable {
+                    let name: String
+                    let arguments: [String: JSONValue]
+                }
+            }
         }
 
         struct Tool: Encodable {
@@ -131,9 +146,25 @@ public struct OllamaProvider: LLMProvider {
             }
         }
 
-        init(model: String, messages: [LLMMessage], tools: [LLMTool]) {
+        init(model: String, messages: [LLMMessage], tools: [LLMTool]) throws {
             self.model = model
-            self.messages = messages.map { Message(role: $0.role.rawValue, content: $0.content) }
+            var names: [String: String] = [:]
+            self.messages = try messages.map { message in
+                let calls = try message.toolCalls?.map { call in
+                    names[call.id] = call.name
+                    let arguments: [String: JSONValue]
+                    if let raw = call.rawInputJSON {
+                        guard let data = raw.data(using: .utf8), AnthropicProvider.hasSupportedNumbers(data),
+                              let parsed = try? JSONDecoder().decode([String: JSONValue].self, from: data) else {
+                            throw LLMError.invalidResponse("invalid tool input")
+                        }
+                        arguments = parsed
+                    } else { arguments = call.arguments.mapValues { JSONValue.string($0) } }
+                    return Message.Call(function: .init(name: call.name, arguments: arguments))
+                }
+                return Message(role: message.role.rawValue, content: message.content, tool_calls: calls,
+                               tool_name: message.toolCallID.flatMap { names[$0] })
+            }
             self.tools = tools.map { tool in
                 Tool(function: .init(
                     name: tool.name,
@@ -195,10 +226,11 @@ public struct OllamaProvider: LLMProvider {
                 pairs = object
             } else if let json = try? container.decode(String.self),
                       let data = json.data(using: .utf8),
+                      AnthropicProvider.hasSupportedNumbers(data),
                       let object = try? JSONDecoder().decode([String: JSONValue].self, from: data) {
                 pairs = object
             } else {
-                pairs = [:]
+                throw DecodingError.dataCorruptedError(in: container, debugDescription: "Invalid or unsupported tool arguments")
             }
         }
 
@@ -210,7 +242,7 @@ public struct OllamaProvider: LLMProvider {
 /// tool-call arguments onto `[String: String]`.
 private enum JSONValue: Codable {
     case string(String)
-    case number(Double)
+    case number(Decimal)
     case bool(Bool)
     case null
     case object([String: JSONValue])
@@ -222,7 +254,7 @@ private enum JSONValue: Codable {
             self = .null
         } else if let value = try? container.decode(Bool.self) {
             self = .bool(value)
-        } else if let value = try? container.decode(Double.self) {
+        } else if let value = try? container.decode(Decimal.self) {
             self = .number(value)
         } else if let value = try? container.decode(String.self) {
             self = .string(value)
@@ -256,7 +288,7 @@ private enum JSONValue: Codable {
     var flattened: String {
         switch self {
         case .string(let value): return value
-        case .number(let value): return Self.format(value)
+        case .number(let value): return NSDecimalNumber(decimal: value).stringValue
         case .bool(let value): return value ? "true" : "false"
         case .null: return ""
         case .object, .array:
@@ -267,8 +299,4 @@ private enum JSONValue: Codable {
         }
     }
 
-    private static func format(_ value: Double) -> String {
-        if value.rounded() == value, abs(value) < 1e15 { return String(Int(value)) }
-        return String(value)
-    }
 }
