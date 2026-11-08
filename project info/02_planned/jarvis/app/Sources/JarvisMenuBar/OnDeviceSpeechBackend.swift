@@ -23,7 +23,7 @@ enum SpeechCallbackBridge {
 
     nonisolated static func recognition(onText: @escaping @MainActor @Sendable (String) -> Void,
                                         onFailure: @escaping @MainActor @Sendable (String) -> Void,
-                                        onFinish: @escaping @MainActor @Sendable () -> Void) -> @Sendable (SFSpeechRecognitionResult?, Error?) -> Void {
+                                        onFinish: @escaping @MainActor @Sendable (Bool) -> Void) -> @Sendable (SFSpeechRecognitionResult?, Error?) -> Void {
         let events = RecognitionEvents(onText: onText, onFailure: onFailure, onFinish: onFinish)
         return { @Sendable result, error in
             events.submit(text: result?.bestTranscription.formattedString,
@@ -38,10 +38,10 @@ final class RecognitionEvents: @unchecked Sendable {
     private var terminal = false
     private let onText: @MainActor @Sendable (String) -> Void
     private let onFailure: @MainActor @Sendable (String) -> Void
-    private let onFinish: @MainActor @Sendable () -> Void
+    private let onFinish: @MainActor @Sendable (Bool) -> Void
     init(onText: @escaping @MainActor @Sendable (String) -> Void,
          onFailure: @escaping @MainActor @Sendable (String) -> Void,
-         onFinish: @escaping @MainActor @Sendable () -> Void) {
+         onFinish: @escaping @MainActor @Sendable (Bool) -> Void) {
         self.onText = onText; self.onFailure = onFailure; self.onFinish = onFinish
     }
     func submit(text: String?, failed: Bool, finished: Bool) {
@@ -51,7 +51,7 @@ final class RecognitionEvents: @unchecked Sendable {
         DispatchQueue.main.async { [onText, onFailure, onFinish] in
             if let text { onText(text) }
             if failed { onFailure("离线语音识别已停止，请重试。") }
-            else if finished { onFinish() }
+            else if finished { onFinish(!(text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)) }
         }
     }
 }
@@ -110,7 +110,7 @@ final class AudioRequestGate: @unchecked Sendable {
     func requestSpeechPermission() async -> Bool { await SpeechCallbackBridge.requestSpeechAuthorization() }
     func requestMicrophonePermission() async -> Bool { await AVCaptureDevice.requestAccess(for: .audio) }
 
-    func start(onText: @escaping @MainActor @Sendable (String) -> Void, onFailure: @escaping @MainActor @Sendable (String) -> Void, onFinish: @escaping @MainActor @Sendable () -> Void) throws {
+    func start(onText: @escaping @MainActor @Sendable (String) -> Void, onFailure: @escaping @MainActor @Sendable (String) -> Void, onFinish: @escaping @MainActor @Sendable (Bool) -> Void) throws {
         guard let recognizer, isOnDeviceSupported else { throw SpeechError.unavailable }
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.requiresOnDeviceRecognition = true

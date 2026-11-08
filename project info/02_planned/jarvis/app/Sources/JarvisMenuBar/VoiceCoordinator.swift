@@ -26,7 +26,7 @@ struct VoiceDraftPrefix {
     var isOnDeviceSupported: Bool { get }
     func requestSpeechPermission() async -> Bool
     func requestMicrophonePermission() async -> Bool
-    func start(onText: @escaping @MainActor @Sendable (String) -> Void, onFailure: @escaping @MainActor @Sendable (String) -> Void, onFinish: @escaping @MainActor @Sendable () -> Void) throws
+    func start(onText: @escaping @MainActor @Sendable (String) -> Void, onFailure: @escaping @MainActor @Sendable (String) -> Void, onFinish: @escaping @MainActor @Sendable (Bool) -> Void) throws
     func finish()
     func stop()
 }
@@ -46,7 +46,6 @@ struct VoiceDraftPrefix {
     private let backend: any VoiceBackend
     private let speaker: (any VoiceSpeaker)?
     private var generation = 0
-    private var lastResultWasEmpty = false
     private var finishTimeout: Task<Void, Never>?
 
     init(backend: any VoiceBackend, speaker: (any VoiceSpeaker)? = nil) { self.backend = backend; self.speaker = speaker }
@@ -67,10 +66,8 @@ struct VoiceDraftPrefix {
         guard backend.isOnDeviceSupported else { errorMessage = "本机不支持离线中文语音识别。"; return }
         do {
             transcript = ""
-            lastResultWasEmpty = false
             try backend.start { [weak self] text in
                 guard let self, self.generation == current else { return }
-                self.lastResultWasEmpty = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 // Some recognizers may produce an empty final hypothesis after
                 // a useful partial. Do not erase the user's only transcript.
                 guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
@@ -80,9 +77,9 @@ struct VoiceDraftPrefix {
                 self.needsConfirmation = !self.transcript.isEmpty
                 self.stop()
                 self.errorMessage = message
-            } onFinish: { [weak self] in
+            } onFinish: { [weak self] finalHasText in
                 guard let self, self.generation == current else { return }
-                self.needsConfirmation = self.lastResultWasEmpty && !self.transcript.isEmpty
+                self.needsConfirmation = !finalHasText && !self.transcript.isEmpty
                 self.stop()
             }
             isRecording = true
