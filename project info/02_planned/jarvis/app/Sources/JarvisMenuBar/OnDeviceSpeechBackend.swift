@@ -17,8 +17,10 @@ enum SpeechCallbackBridge {
         }
     }
 
-    nonisolated static func tap(gate: AudioRequestGate) -> @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void {
-        return { @Sendable buffer, _ in gate.append(buffer) }
+    nonisolated static func tap(gate: AudioRequestGate, monitor: AudioPauseMonitor? = nil) -> @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void {
+        return { @Sendable buffer, _ in
+            if gate.append(buffer) { monitor?.observe(buffer) }
+        }
     }
 
     nonisolated static func recognition(onText: @escaping @MainActor @Sendable (String) -> Void,
@@ -78,12 +80,13 @@ final class AudioRequestGate: @unchecked Sendable {
         endAudio = end
     }
 
-    func append(_ buffer: AVAudioPCMBuffer) {
+    @discardableResult func append(_ buffer: AVAudioPCMBuffer) -> Bool {
         // The realtime tap must never wait for another append or for finish.
-        guard lock.try() else { return }
+        guard lock.try() else { return false }
         defer { lock.unlock() }
-        guard !ended else { return }
+        guard !ended else { return false }
         appendBuffer(buffer)
+        return true
     }
     func finish() {
         // Wait for any in-flight append off the audio callback, then close the
@@ -95,6 +98,49 @@ final class AudioRequestGate: @unchecked Sendable {
         endAudio()
     }
 
+}
+
+/// Time is measured from samples, not recognition callbacks. Unknown formats
+/// never trigger automatic submission; the coordinator stops after a timeout.
+struct SpeechPauseDetector {
+    private var speechDuration = 0.0
+    private var silenceDuration = 0.0
+    private var fired = false
+    mutating func observe(level: Float, duration: Double) -> Bool {
+        guard !fired, level.isFinite, duration.isFinite, duration > 0 else { return false }
+        if level >= 0.015 {
+            speechDuration += duration
+            silenceDuration = 0
+        } else if speechDuration >= 0.3 {
+            silenceDuration += duration
+            if silenceDuration >= 1.5 { fired = true; return true }
+        }
+        return false
+    }
+}
+
+/// Consumes buffer samples synchronously on the tap; it never retains a buffer.
+final class AudioPauseMonitor: @unchecked Sendable {
+    private let lock = NSLock()
+    private var detector = SpeechPauseDetector()
+    private let onSilence: @MainActor @Sendable () -> Void
+    init(onSilence: @escaping @MainActor @Sendable () -> Void) { self.onSilence = onSilence }
+    func observe(_ buffer: AVAudioPCMBuffer) {
+        guard lock.try() else { return }
+        defer { lock.unlock() }
+        guard let channels = buffer.floatChannelData, buffer.frameLength > 0,
+              buffer.format.sampleRate > 0, buffer.stride > 0 else { return }
+        let count = Int(buffer.frameLength)
+        var sum: Double = 0
+        for index in 0..<count {
+            let sample = Double(channels[0][index * Int(buffer.stride)])
+            sum += sample * sample
+        }
+        let level = Float((sum / Double(count)).squareRoot())
+        if detector.observe(level: level, duration: Double(count) / buffer.format.sampleRate) {
+            DispatchQueue.main.async { [onSilence] in onSilence() }
+        }
+    }
 }
 
 /// Speech recognition always requests Apple's on-device path; no network fallback.
@@ -110,7 +156,7 @@ final class AudioRequestGate: @unchecked Sendable {
     func requestSpeechPermission() async -> Bool { await SpeechCallbackBridge.requestSpeechAuthorization() }
     func requestMicrophonePermission() async -> Bool { await AVCaptureDevice.requestAccess(for: .audio) }
 
-    func start(onText: @escaping @MainActor @Sendable (String) -> Void, onFailure: @escaping @MainActor @Sendable (String) -> Void, onFinish: @escaping @MainActor @Sendable (Bool) -> Void) throws {
+    func start(onText: @escaping @MainActor @Sendable (String) -> Void, onFailure: @escaping @MainActor @Sendable (String) -> Void, onFinish: @escaping @MainActor @Sendable (Bool) -> Void, onSilence: @escaping @MainActor @Sendable () -> Void) throws {
         guard let recognizer, isOnDeviceSupported else { throw SpeechError.unavailable }
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.requiresOnDeviceRecognition = true
@@ -120,7 +166,7 @@ final class AudioRequestGate: @unchecked Sendable {
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else { throw SpeechError.unavailable }
-        input.installTap(onBus: 0, bufferSize: 1024, format: format, block: SpeechCallbackBridge.tap(gate: gate))
+        input.installTap(onBus: 0, bufferSize: 1024, format: format, block: SpeechCallbackBridge.tap(gate: gate, monitor: AudioPauseMonitor(onSilence: onSilence)))
         hasTap = true
         recognitionTask = recognizer.recognitionTask(with: request, resultHandler: SpeechCallbackBridge.recognition(onText: onText, onFailure: onFailure, onFinish: onFinish))
         engine.prepare()
@@ -146,12 +192,31 @@ final class AudioRequestGate: @unchecked Sendable {
     }
 }
 
-@MainActor final class SystemVoiceSpeaker: VoiceSpeaker {
+/// Stores completion callbacks by utterance so a cancelled old utterance can
+/// never end the state of a newer one; framework callbacks may arrive off-main.
+private final class SpeechCompletionStore: @unchecked Sendable {
+    private let lock = NSLock()
+    private var callbacks: [ObjectIdentifier: @MainActor @Sendable () -> Void] = [:]
+    func insert(_ id: ObjectIdentifier, _ callback: @escaping @MainActor @Sendable () -> Void) { lock.lock(); defer { lock.unlock() }; callbacks[id] = callback }
+    func take(_ id: ObjectIdentifier) -> (@MainActor @Sendable () -> Void)? { lock.lock(); defer { lock.unlock() }; return callbacks.removeValue(forKey: id) }
+    func clear() { lock.lock(); defer { lock.unlock() }; callbacks.removeAll() }
+}
+
+@MainActor final class SystemVoiceSpeaker: NSObject, VoiceSpeaker, AVSpeechSynthesizerDelegate {
     private let synthesizer = AVSpeechSynthesizer()
-    func speak(_ text: String) {
+    private nonisolated let completions = SpeechCompletionStore()
+    override init() { super.init(); synthesizer.delegate = self }
+    func speak(_ text: String, onFinish: @escaping @MainActor @Sendable () -> Void) {
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = AVSpeechSynthesisVoice(language: "zh-CN")
+        completions.insert(ObjectIdentifier(utterance), onFinish)
         synthesizer.speak(utterance)
     }
-    func stop() { synthesizer.stopSpeaking(at: .immediate) }
+    func stop() { completions.clear(); synthesizer.stopSpeaking(at: .immediate) }
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        if let callback = completions.take(ObjectIdentifier(utterance)) { Task { @MainActor in callback() } }
+    }
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        if let callback = completions.take(ObjectIdentifier(utterance)) { Task { @MainActor in callback() } }
+    }
 }

@@ -107,6 +107,9 @@ struct AskJarvisView: View {
     @State private var isRunning = false
     @State private var runningTaskID: UUID?
     @State private var run: Task<Void, Never>?
+    @State private var isVisible = false
+    @State private var voiceRun = false
+    @State private var voiceWillAutoSubmit = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -122,15 +125,22 @@ struct AskJarvisView: View {
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)))
                     .disabled(isRunning || voice.isRecording || voice.isStarting || voice.isFinishing)
                 HStack {
-                    Button(voice.isRecording ? "停止录音" : (voice.isFinishing ? "取消转写" : "按下开始说话")) {
+                    Button(voice.isRecording ? "停止录音" : (voice.isFinishing ? "取消转写" : "开始说话 ⌘⇧V")) {
                         if voice.isRecording { voice.finishRecording() }
                         else if voice.isFinishing { voice.stop(); voice.discardTranscript(); goal = voiceDraftPrefix.originalDraft }
-                        else { voiceDraftPrefix = VoiceDraftPrefix(draft: goal); Task { await voice.start() } }
-                    }.disabled(isRunning || voice.isStarting || voice.needsConfirmation)
-                    if voice.isRecording { Text("● 正在录音").foregroundStyle(.red) }
+                        else { beginVoice() }
+                    }.keyboardShortcut("v", modifiers: [.command, .shift])
+                     .disabled(isRunning || voice.isStarting || voice.needsConfirmation)
+                    if voice.isRecording { Text("● 正在聆听；停顿后结束") .foregroundStyle(.red) }
                     if voice.isStarting { Text("正在请求权限…") }
                     if voice.isFinishing { Text("正在完成转写…") }
                 }
+                Text((voice.isRecording || voice.isStarting || voice.isFinishing
+                      ? voiceWillAutoSubmit
+                      : (service != nil && goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
+                     ? "说话停顿并识别完成后会自动运行；也可手动停止。"
+                     : "已有草稿将保留，转写后请手动运行。")
+                    .font(.caption).foregroundStyle(.secondary)
                 if let error = voice.errorMessage { Text(error).foregroundStyle(.red).font(.caption) }
                 if voice.needsConfirmation {
                     HStack {
@@ -157,10 +167,8 @@ struct AskJarvisView: View {
             }
         }
         .padding(24)
-        .onChange(of: voice.transcript) { _, value in
-            if let updated = voiceDraftPrefix.render(transcript: value) { goal = updated }
-        }
-        .onDisappear { voice.stop(); voice.stopSpeaking() }
+        .onAppear { isVisible = true }
+        .onDisappear { isVisible = false; voiceRun = false; voice.stop(); voice.stopSpeaking() }
     }
 
     @ViewBuilder private var progressLog: some View {
@@ -197,7 +205,9 @@ struct AskJarvisView: View {
 
     private var statusText: String {
         if voice.isStarting { return "等待语音权限。" }
-        if voice.isRecording { return "录音中，请先停止录音。" }
+        if voice.isSpeaking { return "正在朗读；按 ⌘⇧V 可打断并说话。" }
+        if isRunning { return "正在思考或等待审批…" }
+        if voice.isRecording { return "正在聆听；停顿后结束，也可手动停止。" }
         if voice.isFinishing { return "正在等待最终转写。" }
         if voice.needsConfirmation { return "请检查并确认转写后再运行。" }
         guard let runningTaskID else {
@@ -206,13 +216,37 @@ struct AskJarvisView: View {
         return "Task \(runningTaskID.uuidString.prefix(8))"
     }
 
-    private func start() {
-        guard let service else { return }
+    /// Existing drafts are never automatically submitted with new speech.
+    private func beginVoice() {
+        guard !isRunning && !voice.isStarting && !voice.needsConfirmation else { return }
+        Task { @MainActor in
+            guard isVisible, !isRunning, !voice.isStarting, !voice.isRecording,
+                  !voice.isFinishing, !voice.needsConfirmation else { return }
+            let prefix = VoiceDraftPrefix(draft: goal)
+            voiceDraftPrefix = prefix
+            let canAutoSubmit = goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && service != nil
+            voiceWillAutoSubmit = canAutoSubmit
+            let update: @MainActor @Sendable (String) -> Void = { text in
+                if let updated = prefix.render(transcript: text) { goal = updated }
+            }
+            let submit: @MainActor @Sendable (String) -> Void = { text in
+                guard isVisible, !isRunning, service != nil else { return }
+                goal = text
+                start(fromVoice: true)
+            }
+            if canAutoSubmit { await voice.start(onTranscript: update, autoSubmit: submit) }
+            else { await voice.start(onTranscript: update) }
+        }
+    }
+
+    private func start(fromVoice: Bool = false) {
+        guard canRun, let service else { return }
         let submittedGoal = goal.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !submittedGoal.isEmpty else { return }
         voice.stop()
         voice.stopSpeaking()
         lastAnswer = ""
+        voiceRun = fromVoice
         log.reset()
         runningTaskID = nil
         isRunning = true
@@ -292,7 +326,12 @@ struct AskJarvisView: View {
         log.recordOutcome(result)
         if case .completed(let text) = result {
             lastAnswer = text
-            try? await service.complete(taskID: taskID)
+            do {
+                try await service.complete(taskID: taskID)
+                if voiceRun && isVisible && !Task.isCancelled { voice.speak(text) }
+            } catch {
+                log.append(AgentLogEntry(kind: .error, text: "无法完成任务：\(error.localizedDescription)"))
+            }
         }
     }
 

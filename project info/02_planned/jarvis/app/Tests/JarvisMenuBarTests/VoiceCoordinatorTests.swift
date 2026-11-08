@@ -12,6 +12,7 @@ import XCTest
     var handler: (@MainActor @Sendable (String) -> Void)?
     var failureHandler: (@MainActor @Sendable (String) -> Void)?
     var finishHandler: (@MainActor @Sendable (Bool) -> Void)?
+    var silenceHandler: (@MainActor @Sendable () -> Void)?
     var deferPermission = false
     var permissionContinuation: CheckedContinuation<Bool, Never>?
     var microphoneRequested = false
@@ -21,7 +22,7 @@ import XCTest
         return permissionGranted
     }
     func requestMicrophonePermission() async -> Bool { microphoneRequested = true; return microphoneGranted }
-    func start(onText: @escaping @MainActor @Sendable (String) -> Void, onFailure: @escaping @MainActor @Sendable (String) -> Void, onFinish: @escaping @MainActor @Sendable (Bool) -> Void) throws { started = true; handler = onText; failureHandler = onFailure; finishHandler = onFinish }
+    func start(onText: @escaping @MainActor @Sendable (String) -> Void, onFailure: @escaping @MainActor @Sendable (String) -> Void, onFinish: @escaping @MainActor @Sendable (Bool) -> Void, onSilence: @escaping @MainActor @Sendable () -> Void) throws { started = true; handler = onText; failureHandler = onFailure; finishHandler = onFinish; silenceHandler = onSilence }
     func stop() { stopped = true }
     func finish() { finished = true }
 }
@@ -29,7 +30,8 @@ import XCTest
 @MainActor private final class FakeSpeaker: VoiceSpeaker {
     var stopCount = 0
     var spoken: [String] = []
-    func speak(_ text: String) { spoken.append(text) }
+    var completion: (@MainActor @Sendable () -> Void)?
+    func speak(_ text: String, onFinish: @escaping @MainActor @Sendable () -> Void) { spoken.append(text); completion = onFinish }
     func stop() { stopCount += 1 }
 }
 
@@ -44,6 +46,125 @@ private final class GateProbe: @unchecked Sendable {
 }
 
 @MainActor final class VoiceCoordinatorTests: XCTestCase {
+    func testSpeakingStateAndInterruptionIgnoreStaleCompletion() async {
+        let speaker = FakeSpeaker(); let voice = VoiceCoordinator(backend: FakeVoiceBackend(), speaker: speaker)
+        voice.speak("回答")
+        XCTAssertTrue(voice.isSpeaking)
+        let oldCompletion = speaker.completion
+        await voice.start()
+        XCTAssertFalse(voice.isSpeaking)
+        voice.stop()
+        voice.speak("新回答")
+        oldCompletion?()
+        XCTAssertTrue(voice.isSpeaking)
+        speaker.completion?()
+        XCTAssertFalse(voice.isSpeaking)
+    }
+    func testSilenceDetectorRequiresSpeechBeforePauseAndFiresOnce() {
+        var detector = SpeechPauseDetector()
+        XCTAssertFalse(detector.observe(level: 0, duration: 3))
+        XCTAssertFalse(detector.observe(level: 0.08, duration: 0.4))
+        XCTAssertFalse(detector.observe(level: 0, duration: 1.0))
+        XCTAssertTrue(detector.observe(level: 0, duration: 0.6))
+        XCTAssertFalse(detector.observe(level: 0, duration: 3))
+    }
+
+    func testAutoFinalOnlyOnceAndOnlyAfterDetectedPause() async {
+        let backend = FakeVoiceBackend(); let voice = VoiceCoordinator(backend: backend)
+        var sent: [String] = []
+        await voice.start(autoSubmit: { sent.append($0) })
+        backend.handler?("测试")
+        backend.silenceHandler?()
+        backend.finishHandler?(true)
+        backend.finishHandler?(true)
+        XCTAssertEqual(sent, ["测试"])
+    }
+
+    func testDraftUpdatePrecedesAutoSubmitAndLateTextIsIgnored() async {
+        let backend = FakeVoiceBackend(); let voice = VoiceCoordinator(backend: backend)
+        var events: [String] = []
+        await voice.start(onTranscript: { events.append("draft:" + $0) }, autoSubmit: { events.append("run:" + $0) })
+        backend.handler?("最终")
+        let staleText = backend.handler
+        backend.silenceHandler?()
+        backend.finishHandler?(true)
+        staleText?("迟到")
+        XCTAssertEqual(events, ["draft:最终", "run:最终"])
+    }
+
+    func testAutoFinalRejectsEmptyFailureAndCancellation() async {
+        let backend = FakeVoiceBackend(); let voice = VoiceCoordinator(backend: backend)
+        var sent: [String] = []
+        await voice.start(autoSubmit: { sent.append($0) })
+        backend.handler?("部分")
+        backend.silenceHandler?()
+        backend.finishHandler?(false)
+        XCTAssertTrue(sent.isEmpty)
+        voice.confirmTranscript()
+        await voice.start(autoSubmit: { sent.append($0) })
+        backend.handler?("旧结果")
+        backend.silenceHandler?()
+        voice.stop()
+        backend.finishHandler?(true)
+        XCTAssertTrue(sent.isEmpty)
+    }
+
+    func testAutoSubmitRequiresPauseAndIsSuppressedAfterFailure() async {
+        let backend = FakeVoiceBackend(); let voice = VoiceCoordinator(backend: backend)
+        var sent: [String] = []
+        await voice.start(autoSubmit: { sent.append($0) })
+        backend.handler?("未等待停顿")
+        voice.finishRecording()
+        backend.finishHandler?(true)
+        XCTAssertTrue(sent.isEmpty, "Manual stop must not auto-submit")
+        await voice.start(autoSubmit: { sent.append($0) })
+        backend.handler?("部分结果")
+        backend.silenceHandler?()
+        let staleFinal = backend.finishHandler
+        backend.failureHandler?("error")
+        staleFinal?(true)
+        XCTAssertTrue(sent.isEmpty, "A result after an error must not auto-submit")
+        XCTAssertTrue(voice.needsConfirmation)
+    }
+
+    func testRecordingTimeoutFallsBackToManualEvenWithFinalText() async throws {
+        let backend = FakeVoiceBackend()
+        let voice = VoiceCoordinator(backend: backend, recordingLimit: .milliseconds(20))
+        var sent: [String] = []
+        await voice.start(autoSubmit: { sent.append($0) })
+        backend.handler?("测试")
+        try await Task.sleep(for: .milliseconds(60))
+        XCTAssertTrue(voice.isFinishing)
+        XCTAssertTrue(backend.finished)
+        backend.finishHandler?(true)
+        XCTAssertTrue(sent.isEmpty)
+        XCTAssertEqual(voice.transcript, "测试")
+        XCTAssertNotNil(voice.errorMessage)
+    }
+
+    func testSilenceDetectorDoesNotTreatInvalidMeasurementsAsPause() {
+        var detector = SpeechPauseDetector()
+        XCTAssertFalse(detector.observe(level: .nan, duration: 1))
+        XCTAssertFalse(detector.observe(level: 0.1, duration: .infinity))
+        XCTAssertFalse(detector.observe(level: 0, duration: 9))
+    }
+
+    func testAudioSamplesTriggerPauseOnlyAfterSpeechAndSilence() async throws {
+        let paused = expectation(description: "detected pause")
+        let monitor = AudioPauseMonitor(onSilence: { paused.fulfill() })
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1))
+        let speech = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 6400))
+        speech.frameLength = 6400
+        let samples = try XCTUnwrap(speech.floatChannelData)
+        for index in 0..<6400 { samples[0][index] = 0.1 }
+        let silence = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 25600))
+        silence.frameLength = 25600
+        let zero = try XCTUnwrap(silence.floatChannelData)
+        for index in 0..<25600 { zero[0][index] = 0 }
+        monitor.observe(speech)
+        monitor.observe(silence)
+        await fulfillment(of: [paused], timeout: 2)
+    }
     func testNewRecordingDoesNotEraseExistingEditableDraft() async {
         let backend = FakeVoiceBackend(); let speaker = FakeSpeaker()
         let voice = VoiceCoordinator(backend: backend, speaker: speaker)
