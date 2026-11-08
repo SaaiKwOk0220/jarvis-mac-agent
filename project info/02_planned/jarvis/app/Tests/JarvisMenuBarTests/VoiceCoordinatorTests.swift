@@ -1,4 +1,6 @@
 import XCTest
+@preconcurrency import AVFoundation
+@preconcurrency import Speech
 @testable import JarvisMenuBar
 
 @MainActor private final class FakeVoiceBackend: VoiceBackend {
@@ -7,16 +9,16 @@ import XCTest
     var started = false
     var stopped = false
     var finished = false
-    var handler: ((String) -> Void)?
-    var failureHandler: ((String) -> Void)?
-    var finishHandler: (() -> Void)?
+    var handler: (@MainActor @Sendable (String) -> Void)?
+    var failureHandler: (@MainActor @Sendable (String) -> Void)?
+    var finishHandler: (@MainActor @Sendable () -> Void)?
     var deferPermission = false
     var permissionContinuation: CheckedContinuation<Bool, Never>?
     func requestPermission() async -> Bool {
         if deferPermission { return await withCheckedContinuation { permissionContinuation = $0 } }
         return permissionGranted
     }
-    func start(onText: @escaping (String) -> Void, onFailure: @escaping (String) -> Void, onFinish: @escaping () -> Void) throws { started = true; handler = onText; failureHandler = onFailure; finishHandler = onFinish }
+    func start(onText: @escaping @MainActor @Sendable (String) -> Void, onFailure: @escaping @MainActor @Sendable (String) -> Void, onFinish: @escaping @MainActor @Sendable () -> Void) throws { started = true; handler = onText; failureHandler = onFailure; finishHandler = onFinish }
     func stop() { stopped = true }
     func finish() { finished = true }
 }
@@ -29,6 +31,19 @@ import XCTest
 }
 
 @MainActor final class VoiceCoordinatorTests: XCTestCase {
+    func testAuthorizationCallbackCanArriveOnBackgroundQueue() async {
+        let allowed = await SpeechCallbackBridge.authorization { callback in
+            DispatchQueue.global().async { callback(true) }
+        }
+        XCTAssertTrue(allowed)
+    }
+
+    func testRecognitionCallbackCanArriveOnBackgroundQueue() async {
+        let delivered = expectation(description: "failure delivered to main actor")
+        let callback = SpeechCallbackBridge.recognition(onText: { _ in XCTFail("unexpected text") }, onFailure: { _ in delivered.fulfill() }, onFinish: { XCTFail("unexpected completion") })
+        DispatchQueue.global().async { callback(nil, NSError(domain: "test", code: 1)) }
+        await fulfillment(of: [delivered], timeout: 2)
+    }
     func testStartingRecordingStopsSpeechAndBlocksSpeechUntilFinished() async {
         let backend = FakeVoiceBackend(); let speaker = FakeSpeaker()
         let voice = VoiceCoordinator(backend: backend, speaker: speaker)
