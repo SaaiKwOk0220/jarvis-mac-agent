@@ -33,6 +33,16 @@ import XCTest
     func stop() { stopCount += 1 }
 }
 
+private final class GateProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var active = false
+    private var ended = false
+    private var violation = false
+    func append() { lock.lock(); if active || ended { violation = true }; active = true; lock.unlock(); usleep(100); lock.lock(); active = false; lock.unlock() }
+    func finish() { lock.lock(); if active || ended { violation = true }; ended = true; lock.unlock() }
+    var valid: Bool { lock.lock(); defer { lock.unlock() }; return ended && !violation }
+}
+
 @MainActor final class VoiceCoordinatorTests: XCTestCase {
     func testAuthorizationCallbackCanArriveOnBackgroundQueue() async {
         let allowed = await SpeechCallbackBridge.authorization { callback in
@@ -75,6 +85,49 @@ import XCTest
             done.fulfill()
         }
         await fulfillment(of: [done], timeout: 2)
+    }
+
+    func testBusyAudioTapDropsFrameAndFinishWaitsForAppend() async throws {
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let endCalled = DispatchSemaphore(value: 0)
+        let done = expectation(description: "append and finish")
+        done.expectedFulfillmentCount = 2
+        let gate = AudioRequestGate(append: { _ in entered.signal(); _ = release.wait(timeout: .now() + 2) }, end: { endCalled.signal(); done.fulfill() })
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1))
+        let first = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 64))
+        let second = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 64))
+        let tap = SpeechCallbackBridge.tap(gate: gate)
+        DispatchQueue.global().async {
+            tap(first, AVAudioTime(hostTime: 0)); done.fulfill()
+        }
+        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success)
+        // This must return immediately, not wait for the in-flight append.
+        let start = Date()
+        tap(second, AVAudioTime(hostTime: 0))
+        XCTAssertLessThan(Date().timeIntervalSince(start), 0.5, "Audio callback waited for the held gate")
+        DispatchQueue.global().async { gate.finish() }
+        XCTAssertEqual(endCalled.wait(timeout: .now() + 0.1), .timedOut, "endAudio ran during append")
+        release.signal()
+        await fulfillment(of: [done], timeout: 3)
+    }
+
+    func testConcurrentAudioTapsAndFinishDoNotOverlap() async {
+        let probe = GateProbe()
+        let gate = AudioRequestGate(append: { _ in probe.append() }, end: { probe.finish() })
+        let done = expectation(description: "concurrent taps and finish")
+        DispatchQueue.global().async {
+            DispatchQueue.concurrentPerform(iterations: 500) { index in
+                if index == 100 { gate.finish(); return }
+                guard let format = AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1),
+                      let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 64) else { return }
+                gate.append(buffer)
+            }
+            gate.finish()
+            done.fulfill()
+        }
+        await fulfillment(of: [done], timeout: 5)
+        XCTAssertTrue(probe.valid, "append overlapped endAudio or happened after it")
     }
     func testStartingRecordingStopsSpeechAndBlocksSpeechUntilFinished() async {
         let backend = FakeVoiceBackend(); let speaker = FakeSpeaker()
