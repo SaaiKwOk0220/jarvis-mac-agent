@@ -6,6 +6,7 @@ import XCTest
     var permissionGranted = true
     var started = false
     var stopped = false
+    var finished = false
     var handler: ((String) -> Void)?
     var failureHandler: ((String) -> Void)?
     var finishHandler: (() -> Void)?
@@ -17,9 +18,35 @@ import XCTest
     }
     func start(onText: @escaping (String) -> Void, onFailure: @escaping (String) -> Void, onFinish: @escaping () -> Void) throws { started = true; handler = onText; failureHandler = onFailure; finishHandler = onFinish }
     func stop() { stopped = true }
+    func finish() { finished = true }
+}
+
+@MainActor private final class FakeSpeaker: VoiceSpeaker {
+    var stopCount = 0
+    var spoken: [String] = []
+    func speak(_ text: String) { spoken.append(text) }
+    func stop() { stopCount += 1 }
 }
 
 @MainActor final class VoiceCoordinatorTests: XCTestCase {
+    func testStartingRecordingStopsSpeechAndBlocksSpeechUntilFinished() async {
+        let backend = FakeVoiceBackend(); let speaker = FakeSpeaker()
+        let voice = VoiceCoordinator(backend: backend, speaker: speaker)
+        voice.speak("回答")
+        XCTAssertEqual(speaker.spoken, ["回答"])
+        let before = speaker.stopCount
+        await voice.start()
+        XCTAssertGreaterThan(speaker.stopCount, before)
+        voice.speak("录音时禁止")
+        voice.finishRecording()
+        voice.speak("结束转写前禁止")
+        XCTAssertEqual(speaker.spoken, ["回答"])
+        voice.stop()
+        voice.speak("可以朗读")
+        XCTAssertEqual(speaker.spoken, ["回答", "可以朗读"])
+        voice.stopSpeaking()
+        XCTAssertGreaterThan(speaker.stopCount, before + 1)
+    }
     func testUnsupportedDeviceNeverRequestsOrStarts() async {
         let backend = FakeVoiceBackend(); backend.isOnDeviceSupported = false
         let voice = VoiceCoordinator(backend: backend)
@@ -66,6 +93,58 @@ import XCTest
         XCTAssertEqual(voice.transcript, "你好")
         XCTAssertTrue(backend.stopped)
         XCTAssertFalse(voice.isRecording)
+    }
+
+    func testManualFinishAcceptsDelayedFinalAndThenReleases() async {
+        let backend = FakeVoiceBackend(); let voice = VoiceCoordinator(backend: backend)
+        await voice.start()
+        voice.finishRecording()
+        XCTAssertTrue(backend.finished)
+        XCTAssertFalse(backend.stopped)
+        XCTAssertTrue(voice.isFinishing)
+        backend.handler?("最终文本")
+        backend.finishHandler?()
+        XCTAssertEqual(voice.transcript, "最终文本")
+        XCTAssertFalse(voice.isFinishing)
+        XCTAssertTrue(backend.stopped)
+    }
+
+    func testCancelWhileFinishingDiscardsLateResult() async {
+        let backend = FakeVoiceBackend(); let voice = VoiceCoordinator(backend: backend)
+        await voice.start()
+        voice.finishRecording()
+        voice.stop()
+        backend.handler?("迟到结果")
+        XCTAssertEqual(voice.transcript, "")
+        XCTAssertFalse(voice.isFinishing)
+    }
+
+    func testRapidRestartIgnoresPreviousSessionCallbacks() async {
+        let backend = FakeVoiceBackend(); let voice = VoiceCoordinator(backend: backend)
+        await voice.start()
+        let staleText = backend.handler
+        let staleFinish = backend.finishHandler
+        voice.stop()
+        await voice.start()
+        staleText?("旧录音")
+        staleFinish?()
+        XCTAssertTrue(voice.isRecording)
+        XCTAssertEqual(voice.transcript, "")
+        backend.handler?("新录音")
+        XCTAssertEqual(voice.transcript, "新录音")
+        voice.stop()
+    }
+
+    func testFinishTimeoutStopsAndKeepsPartialText() async throws {
+        let backend = FakeVoiceBackend(); let voice = VoiceCoordinator(backend: backend)
+        await voice.start()
+        backend.handler?("部分转写")
+        voice.finishRecording()
+        try await Task.sleep(for: .seconds(5.2))
+        XCTAssertFalse(voice.isFinishing)
+        XCTAssertEqual(voice.transcript, "部分转写")
+        XCTAssertNotNil(voice.errorMessage)
+        XCTAssertTrue(backend.stopped)
     }
 
     func testClosingDuringPermissionDoesNotStartRecording() async {

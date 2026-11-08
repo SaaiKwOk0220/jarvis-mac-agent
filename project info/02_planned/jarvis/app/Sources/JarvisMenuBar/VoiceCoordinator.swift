@@ -4,21 +4,31 @@ import Foundation
     var isOnDeviceSupported: Bool { get }
     func requestPermission() async -> Bool
     func start(onText: @escaping (String) -> Void, onFailure: @escaping (String) -> Void, onFinish: @escaping () -> Void) throws
+    func finish()
+    func stop()
+}
+
+@MainActor protocol VoiceSpeaker: AnyObject {
+    func speak(_ text: String)
     func stop()
 }
 
 @MainActor final class VoiceCoordinator: ObservableObject {
     @Published private(set) var isRecording = false
     @Published private(set) var isStarting = false
+    @Published private(set) var isFinishing = false
     @Published private(set) var transcript = ""
     @Published private(set) var errorMessage: String?
     private let backend: any VoiceBackend
+    private let speaker: (any VoiceSpeaker)?
     private var generation = 0
+    private var finishTimeout: Task<Void, Never>?
 
-    init(backend: any VoiceBackend) { self.backend = backend }
+    init(backend: any VoiceBackend, speaker: (any VoiceSpeaker)? = nil) { self.backend = backend; self.speaker = speaker }
 
     func start() async {
-        guard !isRecording && !isStarting else { return }
+        guard !isRecording && !isStarting && !isFinishing else { return }
+        speaker?.stop()
         isStarting = true
         defer { isStarting = false }
         generation += 1
@@ -48,5 +58,34 @@ import Foundation
         }
     }
 
-    func stop() { generation += 1; backend.stop(); isRecording = false }
+    func speak(_ text: String) {
+        guard !isStarting && !isRecording && !isFinishing && !text.isEmpty else { return }
+        speaker?.stop()
+        speaker?.speak(text)
+    }
+
+    func stopSpeaking() { speaker?.stop() }
+
+    func finishRecording() {
+        guard isRecording else { return }
+        isRecording = false
+        isFinishing = true
+        let current = generation
+        backend.finish()
+        guard isFinishing && generation == current else { return }
+        finishTimeout = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            guard !Task.isCancelled, let self, self.generation == current else { return }
+            self.stop()
+            self.errorMessage = "等待最终转写超时，已保留当前文字。"
+        }
+    }
+
+    func stop() {
+        generation += 1
+        finishTimeout?.cancel(); finishTimeout = nil
+        backend.stop()
+        isRecording = false
+        isFinishing = false
+    }
 }
