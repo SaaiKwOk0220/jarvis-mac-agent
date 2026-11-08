@@ -14,10 +14,13 @@ import XCTest
     var finishHandler: (@MainActor @Sendable () -> Void)?
     var deferPermission = false
     var permissionContinuation: CheckedContinuation<Bool, Never>?
-    func requestPermission() async -> Bool {
+    var microphoneRequested = false
+    var microphoneGranted = true
+    func requestSpeechPermission() async -> Bool {
         if deferPermission { return await withCheckedContinuation { permissionContinuation = $0 } }
         return permissionGranted
     }
+    func requestMicrophonePermission() async -> Bool { microphoneRequested = true; return microphoneGranted }
     func start(onText: @escaping @MainActor @Sendable (String) -> Void, onFailure: @escaping @MainActor @Sendable (String) -> Void, onFinish: @escaping @MainActor @Sendable () -> Void) throws { started = true; handler = onText; failureHandler = onFailure; finishHandler = onFinish }
     func stop() { stopped = true }
     func finish() { finished = true }
@@ -43,6 +46,35 @@ import XCTest
         let callback = SpeechCallbackBridge.recognition(onText: { _ in XCTFail("unexpected text") }, onFailure: { _ in delivered.fulfill() }, onFinish: { XCTFail("unexpected completion") })
         DispatchQueue.global().async { callback(nil, NSError(domain: "test", code: 1)) }
         await fulfillment(of: [delivered], timeout: 2)
+    }
+
+    func testRecognitionEventsAreOrderedAndTerminal() async {
+        let done = expectation(description: "final event")
+        var observed: [String] = []
+        let events = RecognitionEvents(onText: { observed.append($0) }, onFailure: { _ in XCTFail("unexpected error") }, onFinish: { observed.append("finished"); done.fulfill() })
+        DispatchQueue.global().async {
+            events.submit(text: "partial", failed: false, finished: false)
+            events.submit(text: "final", failed: false, finished: true)
+            events.submit(text: "late", failed: false, finished: false)
+        }
+        await fulfillment(of: [done], timeout: 2)
+        XCTAssertEqual(observed, ["partial", "final", "finished"])
+    }
+
+    func testAudioTapRunsOnBackgroundQueueAndCanFinish() async {
+        let done = expectation(description: "background audio tap")
+        let gate = AudioRequestGate(SFSpeechAudioBufferRecognitionRequest())
+        let tap = SpeechCallbackBridge.tap(gate: gate)
+        DispatchQueue.global().async {
+            guard let format = AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1),
+                  let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 64) else { return }
+            buffer.frameLength = 64
+            tap(buffer, AVAudioTime(hostTime: 0))
+            gate.finish()
+            tap(buffer, AVAudioTime(hostTime: 0))
+            done.fulfill()
+        }
+        await fulfillment(of: [done], timeout: 2)
     }
     func testStartingRecordingStopsSpeechAndBlocksSpeechUntilFinished() async {
         let backend = FakeVoiceBackend(); let speaker = FakeSpeaker()
@@ -74,6 +106,15 @@ import XCTest
         let backend = FakeVoiceBackend(); backend.permissionGranted = false
         let voice = VoiceCoordinator(backend: backend)
         await voice.start()
+        XCTAssertFalse(backend.started)
+        XCTAssertNotNil(voice.errorMessage)
+    }
+
+    func testMicrophoneDeniedAfterSpeechPermissionDoesNotStart() async {
+        let backend = FakeVoiceBackend(); backend.microphoneGranted = false
+        let voice = VoiceCoordinator(backend: backend)
+        await voice.start()
+        XCTAssertTrue(backend.microphoneRequested)
         XCTAssertFalse(backend.started)
         XCTAssertNotNil(voice.errorMessage)
     }
@@ -172,6 +213,7 @@ import XCTest
         backend.permissionContinuation?.resume(returning: true)
         await task.value
         XCTAssertFalse(backend.started)
+        XCTAssertFalse(backend.microphoneRequested)
         XCTAssertFalse(voice.isRecording)
     }
 }
