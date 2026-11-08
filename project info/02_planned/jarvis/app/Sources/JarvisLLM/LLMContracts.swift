@@ -105,3 +105,14 @@ public enum LLMError: Error, Equatable, Sendable {
     /// A non-2xx HTTP status, carrying the code and the raw response body.
     case httpStatus(Int, String)
 }
+
+extension LLMError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .unavailable(let detail): return "模型服务不可用。请检查 Ollama 或所选服务是否运行。\n\(detail)"
+        case .modelNotFound: return "未找到模型。默认模型可运行 ollama pull qwen3:4b-instruct 安装。"
+        case .invalidResponse: return "模型返回了无法识别的响应。"
+        case .httpStatus(let code, _): return "模型服务返回 HTTP \(code)。"
+        }
+    }
+}
