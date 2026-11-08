@@ -1,11 +1,38 @@
 import Foundation
 import JarvisLLM
 
+/// If creation finishes after cancellation, cancel the created task before
+/// returning, using a fresh task so cancellation cannot suppress cleanup.
+enum CancellableTaskCreation {
+    static func run<T: Sendable>(create: @escaping @Sendable () async throws -> T,
+                                 cancel: @escaping @Sendable (T) async -> Void) async throws -> T {
+        try Task.checkCancellation()
+        let created = try await create()
+        if Task.isCancelled {
+            await Task.detached { await cancel(created) }.value
+            throw CancellationError()
+        }
+        return created
+    }
+}
+
+/// Invalidates delayed task callbacks when a run is cancelled or its window closes.
+@MainActor final class VoiceRunLifecycle: ObservableObject {
+    private var generation = 0
+    func begin() -> Int { generation += 1; return generation }
+    func invalidate() { generation += 1 }
+    func isCurrent(_ token: Int) -> Bool { generation == token }
+    func mayRestore(token: Int, visible: Bool, currentDraft: String) -> Bool {
+        generation == token && visible && currentDraft.isEmpty
+    }
+}
+
 /// Tracks a user-started conversation; stale callbacks cannot restart it.
 @MainActor final class VoiceConversationSession: ObservableObject {
     @Published private(set) var isActive = false
     private(set) var generation = 0
     private(set) var history: [LLMMessage] = []
+    var manualRunToken: Int? { isActive ? generation : nil }
 
     @discardableResult func begin() -> Int { generation += 1; history = []; isActive = true; return generation }
     func stop() { generation += 1; isActive = false; history = [] }

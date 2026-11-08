@@ -54,6 +54,16 @@ private actor ConversationTestProvider: LLMProvider {
         return .init(content: "回答\(requests.count)", toolCalls: [], usage: nil)
     }
 }
+private actor DeferredTaskCreation {
+    private var continuation: CheckedContinuation<UUID, Never>?
+    private(set) var cancelled: [UUID] = []
+    var isWaiting: Bool { continuation != nil }
+    private let onStart: @Sendable () -> Void
+    init(onStart: @escaping @Sendable () -> Void) { self.onStart = onStart }
+    func create() async -> UUID { await withCheckedContinuation { continuation = $0; onStart() } }
+    func finish(_ id: UUID) { continuation?.resume(returning: id); continuation = nil }
+    func cancel(_ id: UUID) { cancelled.append(id) }
+}
 private struct ConversationTestRunner: AgentToolRunner {
     func tools() -> [LLMTool] { [] }
     func perform(_ call: LLMToolCall) async throws -> AgentToolOutcome { .denied("unexpected tool") }
@@ -63,6 +73,51 @@ private struct ConversationTestWaiter: ApprovalWaiter {
 }
 
 @MainActor final class VoiceCoordinatorTests: XCTestCase {
+    func testDelayedCreateAfterCancellationCancelsCreatedTask() async throws {
+        let started = expectation(description: "task creation started")
+        let deferred = DeferredTaskCreation(onStart: { started.fulfill() })
+        let lifecycle = VoiceRunLifecycle()
+        let old = lifecycle.begin()
+        let pending = Task {
+            try await CancellableTaskCreation.run(create: { await deferred.create() }, cancel: { await deferred.cancel($0) })
+        }
+        await fulfillment(of: [started], timeout: 3)
+        guard await deferred.isWaiting else { pending.cancel(); return XCTFail("create did not begin") }
+        pending.cancel()
+        lifecycle.invalidate()
+        _ = lifecycle.begin() // A new session has an empty draft.
+        var currentDraft = ""
+        let id = UUID()
+        await deferred.finish(id)
+        do { _ = try await pending.value; XCTFail("cancelled creation must not return a task") }
+        catch is CancellationError {
+            if lifecycle.mayRestore(token: old, visible: true, currentDraft: currentDraft) { currentDraft = "旧任务" }
+        }
+        catch { XCTFail("unexpected error: \(error)") }
+        let cancelled = await deferred.cancelled
+        XCTAssertEqual(cancelled, [id])
+        XCTAssertEqual(currentDraft, "", "A delayed old cancellation restored an old goal into the new session")
+    }
+    func testDelayedOldRunCannotRestoreIntoNewRunOrClosedWindow() {
+        let lifecycle = VoiceRunLifecycle()
+        let old = lifecycle.begin()
+        XCTAssertTrue(lifecycle.mayRestore(token: old, visible: true, currentDraft: ""))
+        XCTAssertFalse(lifecycle.mayRestore(token: old, visible: false, currentDraft: ""))
+        XCTAssertFalse(lifecycle.mayRestore(token: old, visible: true, currentDraft: "新草稿"))
+        lifecycle.invalidate()
+        let next = lifecycle.begin()
+        XCTAssertFalse(lifecycle.mayRestore(token: old, visible: true, currentDraft: ""))
+        XCTAssertTrue(lifecycle.mayRestore(token: next, visible: true, currentDraft: ""))
+    }
+
+    func testManualRunKeepsExplicitlyStartedConversation() {
+        let conversation = VoiceConversationSession()
+        XCTAssertNil(conversation.manualRunToken)
+        let token = conversation.begin()
+        XCTAssertEqual(conversation.manualRunToken, token)
+        conversation.stop()
+        XCTAssertNil(conversation.manualRunToken)
+    }
     func testConversationResumesOnlyWhenActiveVisibleAndDraftEmpty() {
         let session = VoiceConversationSession()
         let token = session.begin()
