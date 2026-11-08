@@ -3,7 +3,7 @@ import Foundation
 @MainActor protocol VoiceBackend: AnyObject {
     var isOnDeviceSupported: Bool { get }
     func requestPermission() async -> Bool
-    func start(onText: @escaping (String) -> Void, onFailure: @escaping (String) -> Void, onFinish: @escaping () -> Void) throws
+    func start(onText: @escaping @MainActor @Sendable (String) -> Void, onFailure: @escaping @MainActor @Sendable (String) -> Void, onFinish: @escaping @MainActor @Sendable () -> Void) throws
     func finish()
     func stop()
 }
