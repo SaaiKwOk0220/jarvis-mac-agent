@@ -45,10 +45,14 @@ import Foundation
         try engine.start()
     }
 
-    func stop() {
+    func finish() {
         engine.stop()
         if hasTap { engine.inputNode.removeTap(onBus: 0); hasTap = false }
         request?.endAudio()
+    }
+
+    func stop() {
+        finish()
         recognitionTask?.cancel()
         request = nil
         recognitionTask = nil
@@ -58,4 +62,14 @@ import Foundation
         case unavailable
         var errorDescription: String? { "离线语音识别或麦克风不可用。" }
     }
+}
+
+@MainActor final class SystemVoiceSpeaker: VoiceSpeaker {
+    private let synthesizer = AVSpeechSynthesizer()
+    func speak(_ text: String) {
+        let utterance = AVSpeechUtterance(string: text)
+        utterance.voice = AVSpeechSynthesisVoice(language: "zh-CN")
+        synthesizer.speak(utterance)
+    }
+    func stop() { synthesizer.stopSpeaking(at: .immediate) }
 }
