@@ -23,7 +23,7 @@ struct WelcomeView: View {
                 workerCard(
                     icon: "terminal",
                     title: "Run pwd (approval required)",
-                    body: "/bin/sh commands; each invocation requires explicit approval. Add allowed commands in PolicyConfig.commandNames."
+                    body: "Only pwd is currently supported; each invocation requires explicit approval."
                 )
                 workerCard(
                     icon: "globe",
@@ -44,7 +44,7 @@ struct WelcomeView: View {
 
             Spacer(minLength: 4)
 
-            Text("Add allowed commands, apps, and sites via PolicyConfig in code.")
+            Text("Allowed apps and sites are configured in PolicyConfig.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 

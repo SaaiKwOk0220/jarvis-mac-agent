@@ -61,6 +61,47 @@ final class TerminalToolExecutorTests: XCTestCase {
         } catch TerminalToolExecutorError.launchFailed { }
     }
 
+    func testRejectsWrongSideEffect() async throws {
+        let request = ToolRequest(taskID: UUID(), name: "shell", sideEffect: .read, target: "/tmp", payload: "pwd")
+        do { _ = try await TerminalToolExecutor().execute(request); XCTFail("expected rejection") }
+        catch TerminalToolExecutorError.incompatibleSideEffect(.read) { }
+    }
+
+    func testInvalidWorkingDirectoryFailsClosed() async throws {
+        let path = "/private/tmp/missing-\(UUID().uuidString)"
+        let request = ToolRequest(taskID: UUID(), name: "shell", sideEffect: .localExecute, target: path, payload: "pwd", scope: ToolScope(workingDirectory: path))
+        do { _ = try await TerminalToolExecutor().execute(request); XCTFail("expected launch failure") }
+        catch TerminalToolExecutorError.launchFailed { }
+    }
+
+    func testTimeoutStopsLaunchedProcess() async throws {
+        let executable = try slowExecutable()
+        defer { try? FileManager.default.removeItem(at: executable) }
+        let executor = TerminalToolExecutor(timeout: .milliseconds(100), sandboxExecutableURL: executable)
+        let request = ToolRequest(taskID: UUID(), name: "shell", sideEffect: .localExecute, target: "/tmp", payload: "pwd")
+        do { _ = try await executor.execute(request); XCTFail("expected timeout") }
+        catch TerminalToolExecutorError.timeout { }
+    }
+
+    func testCancellationStopsLaunchedProcess() async throws {
+        let executable = try slowExecutable()
+        defer { try? FileManager.default.removeItem(at: executable) }
+        let executor = TerminalToolExecutor(sandboxExecutableURL: executable)
+        let request = ToolRequest(taskID: UUID(), name: "shell", sideEffect: .localExecute, target: "/tmp", payload: "pwd")
+        let task = Task { try await executor.execute(request) }
+        try await Task.sleep(for: .milliseconds(150))
+        task.cancel()
+        do { _ = try await task.value; XCTFail("expected cancellation") }
+        catch is CancellationError { }
+    }
+
+    private func slowExecutable() throws -> URL {
+        let url = URL(fileURLWithPath: "/private/tmp/jarvis-slow-\(UUID().uuidString)")
+        try Data("#!/bin/sh\nexec /bin/sleep 10\n".utf8).write(to: url)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
+        return url
+    }
+
     func testRejectsShellCompositionBeforeExecution() async throws {
         let request = ToolRequest(taskID: UUID(), name: "shell", sideEffect: .localExecute, target: "/tmp", payload: "pwd; echo unsafe")
         do {
