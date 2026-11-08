@@ -67,13 +67,13 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
             LLMTool(
                 name: "shell",
                 description: """
-                Run a shell command locally via /bin/sh. Needs explicit user approval \
+                Run the read-only pwd command in a restricted process. Only pwd is supported; it needs explicit user approval \
                 before it executes, and the working directory must be inside an \
                 approved directory (Jarvis's own application-support folder by \
                 default). Output is truncated.
                 """,
                 parameters: [
-                    "command": LLMToolParameter(type: "string", description: "The shell command to run."),
+                    "command": LLMToolParameter(type: "string", description: "The command to run; only pwd is currently supported."),
                     "workingDirectory": LLMToolParameter(
                         type: "string",
                         description: "Absolute directory to run in. Must be inside an approved directory; defaults to Jarvis's application-support folder.",

@@ -373,7 +373,7 @@ final class TaskServiceTests: XCTestCase {
             name: "shell",
             sideEffect: .localExecute,
             target: "/tmp/jarvis-service",
-            payload: "echo not-yet"
+            payload: "pwd"
         )
 
         let decision = try await fixture.service.submit(request: request)

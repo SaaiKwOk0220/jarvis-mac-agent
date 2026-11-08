@@ -18,7 +18,7 @@ struct NewShellTaskView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Run shell command").font(.title2).bold()
-            Text("Creates a task and submits a shell command. The task will sit in awaiting approval until you approve it from the task-detail window.")
+            Text("Currently only pwd is supported. The task waits for approval before running.")
                 .font(.callout).foregroundStyle(.secondary)
 
             VStack(alignment: .leading, spacing: 4) {

@@ -46,6 +46,13 @@ final class PolicyTests: XCTestCase {
         }
     }
 
+    func testUnsupportedShellCommandDeniedBeforeApproval() {
+        let request = ToolRequest(taskID: taskID, name: "shell", sideEffect: .localExecute, target: "/tmp/jarvis-project", payload: "pwd; echo unsafe")
+        var shellConfig = config
+        shellConfig.commandNames.append("shell")
+        XCTAssertEqual(Policy().evaluate(request, config: shellConfig), .deny(reason: "only pwd is currently supported"))
+    }
+
     func testLocalWriteAlwaysRequiresApproval() {
         let request = ToolRequest(taskID: taskID, name: "write_file", sideEffect: .localWrite,
                                   target: "/tmp/jarvis-project/out.txt", payload: "hello")

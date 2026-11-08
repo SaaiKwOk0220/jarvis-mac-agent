@@ -38,7 +38,7 @@ final class LoopbackServerTests: XCTestCase {
             name: "shell",
             sideEffect: .localExecute,
             target: "/tmp/jarvis-loopback",
-            payload: "echo posted"
+            payload: "pwd"
         )
         let body = try JSONEncoder().encode(request)
 

@@ -22,7 +22,7 @@ struct WelcomeView: View {
             VStack(spacing: 10) {
                 workerCard(
                     icon: "terminal",
-                    title: "Run shell command",
+                    title: "Run pwd (approval required)",
                     body: "/bin/sh commands; each invocation requires explicit approval. Add allowed commands in PolicyConfig.commandNames."
                 )
                 workerCard(

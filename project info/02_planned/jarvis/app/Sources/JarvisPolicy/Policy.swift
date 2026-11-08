@@ -54,6 +54,9 @@ public struct Policy: PolicyEvaluator, Sendable {
                     return .deny(reason: "shell working directory is outside approved directories")
                 }
             }
+            if request.name == "shell" && request.payload.trimmingCharacters(in: .whitespacesAndNewlines) != "pwd" {
+                return .deny(reason: "only pwd is currently supported")
+            }
             return .requireApproval(reason: "shell command requires explicit approval")
         case .read:
             return evaluateRead(request, config: config)
