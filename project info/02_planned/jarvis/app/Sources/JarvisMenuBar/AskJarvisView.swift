@@ -61,6 +61,18 @@ final class AgentRunLog: ObservableObject {
 
     func reset() { entries = [] }
     func append(_ entry: AgentLogEntry) { entries.append(entry) }
+
+    /// Assistant text is already emitted as an event; outcomes add status only.
+    func recordOutcome(_ result: AgentLoopResult) {
+        switch result {
+        case .completed:
+            append(AgentLogEntry(kind: .info, text: "Run complete."))
+        case .awaitingApproval(_, let description):
+            append(AgentLogEntry(kind: .approval, text: "Paused for your approval: \(description). Open the task in the Jarvis menu to approve or reject it."))
+        case .exceededIterations:
+            append(AgentLogEntry(kind: .error, text: "Stopped after reaching the iteration limit. Try a narrower goal."))
+        }
+    }
 }
 
 /// "Ask Jarvis" window: type a goal, and the agent loop plans against Ollama
@@ -235,26 +247,9 @@ struct AskJarvisView: View {
     /// any other outcome leaves the task open so the user can decide what to
     /// do with it from the task-detail window.
     private func finish(_ result: AgentLoopResult, taskID: UUID, service: any TaskServiceAPI) async {
-        switch result {
-        case .completed(let finalText):
-            if !finalText.isEmpty {
-                log.append(AgentLogEntry(kind: .assistant, text: "Assistant: \(finalText)"))
-            }
-            log.append(AgentLogEntry(kind: .info, text: "Run complete."))
+        log.recordOutcome(result)
+        if case .completed = result {
             try? await service.complete(taskID: taskID)
-        case .awaitingApproval(_, let description):
-            log.append(AgentLogEntry(
-                kind: .approval,
-                text: "Paused for your approval: \(description). Open the task in the Jarvis menu to approve or reject it."
-            ))
-        case .exceededIterations(let lastText):
-            if let lastText, !lastText.isEmpty {
-                log.append(AgentLogEntry(kind: .assistant, text: "Assistant: \(lastText)"))
-            }
-            log.append(AgentLogEntry(
-                kind: .error,
-                text: "Stopped after reaching the iteration limit. Try a narrower goal."
-            ))
         }
     }
 
