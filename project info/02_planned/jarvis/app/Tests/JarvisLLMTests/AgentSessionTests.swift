@@ -173,9 +173,9 @@ final class AgentSessionTests: XCTestCase {
     }
 
     /// An approval that the tool then fails to execute is a hard stop: the
-    /// session surfaces it as `.exceededIterations` carrying the failure
+    /// session surfaces it as `.failed` carrying the failure
     /// reason, because the tool itself is no longer recoverable.
-    func testSessionReturnsExceededIterationsOnFailure() async throws {
+    func testSessionReturnsFailureOnToolFailure() async throws {
         let requestID = UUID()
         let payloadDigest = "digest-fail"
         let provider = ScriptedProvider(responses: [
@@ -201,11 +201,11 @@ final class AgentSessionTests: XCTestCase {
 
         let result = try await session.run(goal: "try shell")
 
-        XCTAssertEqual(result, .exceededIterations(lastText: "shell exited 1"))
+        XCTAssertEqual(result, .failed(reason: "shell exited 1"))
         XCTAssertEqual(provider.callCount, 1, "must not call the provider again after a tool failure")
     }
 
-    /// A whole-task cancellation surfaces as `.exceededIterations` so the UI
+    /// A whole-task cancellation surfaces as `.cancelled` so the UI
     /// can distinguish "stopped because the user cancelled" from a normal
     /// budget exhaustion.
     func testSessionStopsOnCancelled() async throws {
@@ -234,7 +234,7 @@ final class AgentSessionTests: XCTestCase {
 
         let result = try await session.run(goal: "try shell")
 
-        XCTAssertEqual(result, .exceededIterations(lastText: "cancelled by user"))
+        XCTAssertEqual(result, .cancelled)
         XCTAssertEqual(provider.callCount, 1)
     }
 
@@ -265,7 +265,7 @@ final class AgentSessionTests: XCTestCase {
 
         let result = try await session.run(goal: "try shell")
 
-        XCTAssertEqual(result, .exceededIterations(lastText: "approval timed out"))
+        XCTAssertEqual(result, .approvalTimedOut)
         XCTAssertEqual(provider.callCount, 1)
     }
 }

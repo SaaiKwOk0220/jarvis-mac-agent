@@ -10,6 +10,9 @@ public enum AgentLoopResult: Sendable, Equatable {
     /// The LLM kept calling tools past `maxIterations`. The last assistant
     /// text, if any, is carried out so the caller can show partial progress.
     case exceededIterations(lastText: String?)
+    case failed(reason: String)
+    case cancelled
+    case approvalTimedOut
 }
 
 /// A single observable step of a run. The loop emits these as they happen so
