@@ -83,6 +83,30 @@ private final class LockedBox<T>: @unchecked Sendable {
 private extension NSLock { func withLock<T>(_ body: () throws -> T) rethrows -> T { lock(); defer { unlock() }; return try body() } }
 
 final class OllamaProviderTests: XCTestCase {
+    /// Opt in with JARVIS_OLLAMA_INTEGRATION=1; requires a running local Ollama
+    /// with qwen3:4b-instruct downloaded. Model output is nondeterministic,
+    /// so this diagnostic is deliberately not a required CI check.
+    func testLiveQwenConversationAndSimulatedToolRoundTrip() async throws {
+        guard ProcessInfo.processInfo.environment["JARVIS_OLLAMA_INTEGRATION"] == "1" else {
+            throw XCTSkip("Set JARVIS_OLLAMA_INTEGRATION=1 to run the local model integration test")
+        }
+        let provider = OllamaProvider(model: "qwen3:4b-instruct", timeout: 120)
+        let chat = try await provider.complete(messages: [.init(role: .user, content: "Reply with exactly: OK")], tools: [])
+        XCTAssertFalse((chat.content ?? "").isEmpty, "Qwen returned no conversational answer")
+
+        let tool = LLMTool(name: "get_weather", description: "Get weather for a city", parameters: [
+            "city": LLMToolParameter(type: "string", description: "City name")
+        ])
+        let marker = "73149"
+        let runner = SessionScriptedRunner(tools: [tool], outcomes: ["get_weather": .executed("The weather code is \(marker).")])
+        let waiter = ScriptedApprovalWaiter(resolutions: [])
+        let session = AgentSession(provider: provider, runner: runner, approvalWaiter: waiter, taskID: UUID(), maxIterations: 3)
+        let final = try await session.run(goal: "Use get_weather for Paris, then report the exact weather code returned by the tool. Never guess the code.")
+        XCTAssertFalse(runner.performedCalls.isEmpty, "Qwen did not request the simulated tool")
+        XCTAssertTrue(runner.performedCalls.allSatisfy { $0.name == "get_weather" && $0.arguments["city"]?.lowercased() == "paris" }, "Unexpected tool or city")
+        guard case .completed(let text) = final else { return XCTFail("Session did not complete: \(final)") }
+        XCTAssertTrue(text.contains(marker), "Final answer did not consume the simulated tool result: \(text)")
+    }
     func testOrdinaryContentWithThinkMarkerIsPreserved() async throws {
         MockURLProtocol.handler = { request in
             (jsonResponse(request), Data(#"{"message":{"content":"Let me think. </think> 2+3=5"}}"#.utf8))
