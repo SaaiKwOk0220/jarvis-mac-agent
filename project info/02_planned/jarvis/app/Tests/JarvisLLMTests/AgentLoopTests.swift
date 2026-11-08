@@ -91,6 +91,18 @@ private func shellCall(id: String = "call_0", command: String = "ls") -> LLMTool
 
 final class AgentLoopTests: XCTestCase {
 
+    func testDefaultInstructionsReachProviderAndDescribeSafeConversation() async throws {
+        let provider = ScriptedProvider(responses: [LLMResponse(content: "你好", toolCalls: [], usage: nil)])
+        let loop = AgentLoop(provider: provider, runner: ScriptedRunner(tools: [], outcomes: [:]))
+        _ = try await loop.run(goal: "你好")
+        let prompt = try XCTUnwrap(provider.capturedMessages.first?.first?.content)
+        XCTAssertTrue(prompt.contains("user's language"))
+        XCTAssertTrue(prompt.contains("without calling tools"))
+        XCTAssertTrue(prompt.contains("fetch tool accesses the network"))
+        XCTAssertTrue(prompt.contains("do not bypass"))
+        XCTAssertFalse(prompt.contains("pick a different approach"))
+    }
+
     /// A provider turn with text and no tool calls ends the run: the loop must
     /// return the model's words verbatim and not ask again.
     func testLoopReturnsCompletedWhenProviderReturnsTextWithoutToolCalls() async throws {
