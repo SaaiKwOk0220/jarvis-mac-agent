@@ -1,4 +1,5 @@
 import SwiftUI
+import AVFoundation
 import JarvisDomain
 import JarvisLLM
 
@@ -100,6 +101,9 @@ struct AskJarvisView: View {
     let memoryContextProvider: (@Sendable () async -> String)?
 
     @StateObject private var log = AgentRunLog()
+    @StateObject private var voice = VoiceCoordinator(backend: OnDeviceSpeechBackend())
+    @State private var synthesizer = AVSpeechSynthesizer()
+    @State private var lastAnswer = ""
     @State private var goal = ""
     @State private var isRunning = false
     @State private var runningTaskID: UUID?
@@ -117,7 +121,15 @@ struct AskJarvisView: View {
                     .font(.system(.body, design: .monospaced))
                     .frame(minHeight: 70)
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)))
-                    .disabled(isRunning)
+                    .disabled(isRunning || voice.isRecording || voice.isStarting)
+                HStack {
+                    Button(voice.isRecording ? "停止录音" : "按下开始说话") {
+                        if voice.isRecording { voice.stop() } else { Task { await voice.start() } }
+                    }.disabled(isRunning || voice.isStarting)
+                    if voice.isRecording { Text("● 正在录音").foregroundStyle(.red) }
+                    if voice.isStarting { Text("正在请求权限…") }
+                }
+                if let error = voice.errorMessage { Text(error).foregroundStyle(.red).font(.caption) }
             }
 
             progressLog
@@ -125,6 +137,13 @@ struct AskJarvisView: View {
             HStack {
                 Text(statusText).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 Spacer()
+                Button("朗读回答") {
+                    synthesizer.stopSpeaking(at: .immediate)
+                    let utterance = AVSpeechUtterance(string: lastAnswer)
+                    utterance.voice = AVSpeechSynthesisVoice(language: "zh-CN")
+                    synthesizer.speak(utterance)
+                }.disabled(lastAnswer.isEmpty)
+                Button("停止朗读") { synthesizer.stopSpeaking(at: .immediate) }
                 Button("Cancel") { cancel() }
                     .disabled(!isRunning)
                 Button(isRunning ? "Running…" : "Run") { start() }
@@ -133,6 +152,8 @@ struct AskJarvisView: View {
             }
         }
         .padding(24)
+        .onChange(of: voice.transcript) { _, value in goal = value }
+        .onDisappear { voice.stop(); synthesizer.stopSpeaking(at: .immediate) }
     }
 
     @ViewBuilder private var progressLog: some View {
@@ -163,7 +184,7 @@ struct AskJarvisView: View {
     }
 
     private var canRun: Bool {
-        service != nil && !isRunning && !goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        service != nil && !isRunning && !voice.isRecording && !voice.isStarting && !goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var statusText: String {
@@ -177,6 +198,9 @@ struct AskJarvisView: View {
         guard let service else { return }
         let submittedGoal = goal.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !submittedGoal.isEmpty else { return }
+        voice.stop()
+        synthesizer.stopSpeaking(at: .immediate)
+        lastAnswer = ""
         log.reset()
         runningTaskID = nil
         isRunning = true
@@ -254,7 +278,8 @@ struct AskJarvisView: View {
     /// do with it from the task-detail window.
     private func finish(_ result: AgentLoopResult, taskID: UUID, service: any TaskServiceAPI) async {
         log.recordOutcome(result)
-        if case .completed = result {
+        if case .completed(let text) = result {
+            lastAnswer = text
             try? await service.complete(taskID: taskID)
         }
     }
