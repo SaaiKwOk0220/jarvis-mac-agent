@@ -1,5 +1,20 @@
 import Foundation
 
+/// Preserves the editable draft while a new recording produces partial text.
+struct VoiceDraftPrefix {
+    private let draft: String
+    init(draft: String) { self.draft = draft }
+    func render(transcript: String) -> String? {
+        guard !transcript.isEmpty else { return nil }
+        guard !draft.isEmpty else { return transcript }
+        let separator = draft.last?.isWhitespace == true ? "" : " "
+        return draft + separator + transcript
+    }
+    static func canRun(draft: String, serviceAvailable: Bool, isRunning: Bool, voiceBusy: Bool) -> Bool {
+        serviceAvailable && !isRunning && !voiceBusy && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
 @MainActor protocol VoiceBackend: AnyObject {
     var isOnDeviceSupported: Bool { get }
     func requestSpeechPermission() async -> Bool
@@ -45,6 +60,9 @@ import Foundation
             transcript = ""
             try backend.start { [weak self] text in
                 guard let self, self.generation == current else { return }
+                // Some recognizers may produce an empty final hypothesis after
+                // a useful partial. Do not erase the user's only transcript.
+                guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
                 self.transcript = text
             } onFailure: { [weak self] message in
                 guard let self, self.generation == current else { return }

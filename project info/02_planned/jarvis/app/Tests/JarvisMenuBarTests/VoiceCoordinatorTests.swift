@@ -44,6 +44,28 @@ private final class GateProbe: @unchecked Sendable {
 }
 
 @MainActor final class VoiceCoordinatorTests: XCTestCase {
+    func testNewRecordingDoesNotEraseExistingEditableDraft() async {
+        let backend = FakeVoiceBackend(); let speaker = FakeSpeaker()
+        let voice = VoiceCoordinator(backend: backend, speaker: speaker)
+        var draft = "已有文字"
+        let prefix = VoiceDraftPrefix(draft: draft)
+        await voice.start()
+        XCTAssertNil(prefix.render(transcript: ""), "Clearing the recognizer must not clear the draft")
+        backend.handler?("语音内容")
+        if let value = prefix.render(transcript: voice.transcript) { draft = value }
+        voice.finishRecording(); backend.finishHandler?()
+        draft += "，手动补充"
+        voice.stopSpeaking()
+        XCTAssertEqual(draft, "已有文字 语音内容，手动补充")
+        XCTAssertTrue(VoiceDraftPrefix.canRun(draft: draft, serviceAvailable: true, isRunning: false, voiceBusy: false))
+    }
+
+    func testRunRequiresServiceNonemptyDraftAndFinishedRecording() {
+        XCTAssertFalse(VoiceDraftPrefix.canRun(draft: "文字", serviceAvailable: false, isRunning: false, voiceBusy: false))
+        XCTAssertFalse(VoiceDraftPrefix.canRun(draft: "文字", serviceAvailable: true, isRunning: false, voiceBusy: true))
+        XCTAssertFalse(VoiceDraftPrefix.canRun(draft: " \n", serviceAvailable: true, isRunning: false, voiceBusy: false))
+        XCTAssertTrue(VoiceDraftPrefix.canRun(draft: "文字", serviceAvailable: true, isRunning: false, voiceBusy: false))
+    }
     func testAuthorizationCallbackCanArriveOnBackgroundQueue() async {
         let allowed = await SpeechCallbackBridge.authorization { callback in
             DispatchQueue.global().async { callback(true) }
@@ -216,6 +238,18 @@ private final class GateProbe: @unchecked Sendable {
         XCTAssertEqual(voice.transcript, "最终文本")
         XCTAssertFalse(voice.isFinishing)
         XCTAssertTrue(backend.stopped)
+    }
+
+    func testEmptyFinalCannotErasePartialTranscript() async {
+        let backend = FakeVoiceBackend(); let voice = VoiceCoordinator(backend: backend)
+        await voice.start()
+        backend.handler?("已有转写")
+        voice.finishRecording()
+        backend.handler?("")
+        backend.finishHandler?()
+        XCTAssertEqual(voice.transcript, "已有转写")
+        XCTAssertFalse(voice.isFinishing)
+        XCTAssertTrue(VoiceDraftPrefix.canRun(draft: voice.transcript, serviceAvailable: true, isRunning: false, voiceBusy: voice.isFinishing))
     }
 
     func testCancelWhileFinishingDiscardsLateResult() async {
