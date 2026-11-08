@@ -14,7 +14,7 @@ SWIFT
 chmod +x "$tmp_dir/bin/swift"
 output="$(PATH="$tmp_dir/bin:$PATH" FAKE_BUILD_DIR="$tmp_dir/build" "$app_dir/scripts/build-dev-app.sh" "$tmp_dir/output")"
 test -x "$output/Contents/MacOS/JarvisMenuBar"
-test -f "$output/Contents/MacOS/GRDB_GRDB.bundle/test.txt"
-test ! -e "$output/Contents/MacOS/Unrelated.bundle"
+test -f "$output/GRDB_GRDB.bundle/test.txt"
+test ! -e "$output/Unrelated.bundle"
 test "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$output/Contents/Info.plist")" = true
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$output/Contents/Info.plist")" = JarvisMenuBar
