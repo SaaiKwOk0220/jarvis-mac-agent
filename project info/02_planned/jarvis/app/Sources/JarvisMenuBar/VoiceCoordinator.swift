@@ -4,6 +4,7 @@ import Foundation
 struct VoiceDraftPrefix {
     private let draft: String
     init(draft: String) { self.draft = draft }
+    var originalDraft: String { draft }
     func render(transcript: String) -> String? {
         guard !transcript.isEmpty else { return nil }
         guard !draft.isEmpty else { return transcript }
@@ -12,6 +13,12 @@ struct VoiceDraftPrefix {
     }
     static func canRun(draft: String, serviceAvailable: Bool, isRunning: Bool, voiceBusy: Bool) -> Bool {
         serviceAvailable && !isRunning && !voiceBusy && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+    static func idleStatus(draft: String, serviceAvailable: Bool, isRunning: Bool) -> String {
+        if isRunning { return "正在创建任务…" }
+        if !serviceAvailable { return "Jarvis 服务不可用，无法运行任务。" }
+        if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "请输入或录入任务内容。" }
+        return "Ready."
     }
 }
 
@@ -35,15 +42,17 @@ struct VoiceDraftPrefix {
     @Published private(set) var isFinishing = false
     @Published private(set) var transcript = ""
     @Published private(set) var errorMessage: String?
+    @Published private(set) var needsConfirmation = false
     private let backend: any VoiceBackend
     private let speaker: (any VoiceSpeaker)?
     private var generation = 0
+    private var lastResultWasEmpty = false
     private var finishTimeout: Task<Void, Never>?
 
     init(backend: any VoiceBackend, speaker: (any VoiceSpeaker)? = nil) { self.backend = backend; self.speaker = speaker }
 
     func start() async {
-        guard !isRecording && !isStarting && !isFinishing else { return }
+        guard !isRecording && !isStarting && !isFinishing && !needsConfirmation else { return }
         speaker?.stop()
         isStarting = true
         defer { isStarting = false }
@@ -58,18 +67,22 @@ struct VoiceDraftPrefix {
         guard backend.isOnDeviceSupported else { errorMessage = "本机不支持离线中文语音识别。"; return }
         do {
             transcript = ""
+            lastResultWasEmpty = false
             try backend.start { [weak self] text in
                 guard let self, self.generation == current else { return }
+                self.lastResultWasEmpty = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 // Some recognizers may produce an empty final hypothesis after
                 // a useful partial. Do not erase the user's only transcript.
                 guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
                 self.transcript = text
             } onFailure: { [weak self] message in
                 guard let self, self.generation == current else { return }
+                self.needsConfirmation = !self.transcript.isEmpty
                 self.stop()
                 self.errorMessage = message
             } onFinish: { [weak self] in
                 guard let self, self.generation == current else { return }
+                self.needsConfirmation = self.lastResultWasEmpty && !self.transcript.isEmpty
                 self.stop()
             }
             isRecording = true
@@ -87,6 +100,10 @@ struct VoiceDraftPrefix {
 
     func stopSpeaking() { speaker?.stop() }
 
+    func confirmTranscript() { needsConfirmation = false }
+
+    func discardTranscript() { needsConfirmation = false; transcript = "" }
+
     func finishRecording() {
         guard isRecording else { return }
         isRecording = false
@@ -97,6 +114,7 @@ struct VoiceDraftPrefix {
         finishTimeout = Task { [weak self] in
             try? await Task.sleep(for: .seconds(5))
             guard !Task.isCancelled, let self, self.generation == current else { return }
+            self.needsConfirmation = !self.transcript.isEmpty
             self.stop()
             self.errorMessage = "等待最终转写超时，已保留当前文字。"
         }

@@ -66,6 +66,10 @@ private final class GateProbe: @unchecked Sendable {
         XCTAssertFalse(VoiceDraftPrefix.canRun(draft: " \n", serviceAvailable: true, isRunning: false, voiceBusy: false))
         XCTAssertTrue(VoiceDraftPrefix.canRun(draft: "文字", serviceAvailable: true, isRunning: false, voiceBusy: false))
     }
+
+    func testStartingRunDoesNotShowReadyBeforeTaskIDExists() {
+        XCTAssertEqual(VoiceDraftPrefix.idleStatus(draft: "任务", serviceAvailable: true, isRunning: true), "正在创建任务…")
+    }
     func testAuthorizationCallbackCanArriveOnBackgroundQueue() async {
         let allowed = await SpeechCallbackBridge.authorization { callback in
             DispatchQueue.global().async { callback(true) }
@@ -249,7 +253,17 @@ private final class GateProbe: @unchecked Sendable {
         backend.finishHandler?()
         XCTAssertEqual(voice.transcript, "已有转写")
         XCTAssertFalse(voice.isFinishing)
-        XCTAssertTrue(VoiceDraftPrefix.canRun(draft: voice.transcript, serviceAvailable: true, isRunning: false, voiceBusy: voice.isFinishing))
+        XCTAssertTrue(voice.needsConfirmation)
+        XCTAssertFalse(VoiceDraftPrefix.canRun(draft: voice.transcript, serviceAvailable: true, isRunning: false, voiceBusy: voice.isFinishing || voice.needsConfirmation))
+        voice.confirmTranscript()
+        XCTAssertFalse(voice.needsConfirmation)
+        XCTAssertTrue(VoiceDraftPrefix.canRun(draft: voice.transcript, serviceAvailable: true, isRunning: false, voiceBusy: voice.needsConfirmation))
+    }
+
+    func testCancellingTranscriptionCanRestoreOriginalDraft() {
+        let prefix = VoiceDraftPrefix(draft: "用户原有草稿")
+        XCTAssertEqual(prefix.render(transcript: "部分转写"), "用户原有草稿 部分转写")
+        XCTAssertEqual(prefix.originalDraft, "用户原有草稿")
     }
 
     func testCancelWhileFinishingDiscardsLateResult() async {
