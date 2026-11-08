@@ -11,7 +11,7 @@ import XCTest
     var finished = false
     var handler: (@MainActor @Sendable (String) -> Void)?
     var failureHandler: (@MainActor @Sendable (String) -> Void)?
-    var finishHandler: (@MainActor @Sendable () -> Void)?
+    var finishHandler: (@MainActor @Sendable (Bool) -> Void)?
     var deferPermission = false
     var permissionContinuation: CheckedContinuation<Bool, Never>?
     var microphoneRequested = false
@@ -21,7 +21,7 @@ import XCTest
         return permissionGranted
     }
     func requestMicrophonePermission() async -> Bool { microphoneRequested = true; return microphoneGranted }
-    func start(onText: @escaping @MainActor @Sendable (String) -> Void, onFailure: @escaping @MainActor @Sendable (String) -> Void, onFinish: @escaping @MainActor @Sendable () -> Void) throws { started = true; handler = onText; failureHandler = onFailure; finishHandler = onFinish }
+    func start(onText: @escaping @MainActor @Sendable (String) -> Void, onFailure: @escaping @MainActor @Sendable (String) -> Void, onFinish: @escaping @MainActor @Sendable (Bool) -> Void) throws { started = true; handler = onText; failureHandler = onFailure; finishHandler = onFinish }
     func stop() { stopped = true }
     func finish() { finished = true }
 }
@@ -53,7 +53,7 @@ private final class GateProbe: @unchecked Sendable {
         XCTAssertNil(prefix.render(transcript: ""), "Clearing the recognizer must not clear the draft")
         backend.handler?("语音内容")
         if let value = prefix.render(transcript: voice.transcript) { draft = value }
-        voice.finishRecording(); backend.finishHandler?()
+        voice.finishRecording(); backend.finishHandler?(true)
         draft += "，手动补充"
         voice.stopSpeaking()
         XCTAssertEqual(draft, "已有文字 语音内容，手动补充")
@@ -79,7 +79,7 @@ private final class GateProbe: @unchecked Sendable {
 
     func testRecognitionCallbackCanArriveOnBackgroundQueue() async {
         let delivered = expectation(description: "failure delivered to main actor")
-        let callback = SpeechCallbackBridge.recognition(onText: { _ in XCTFail("unexpected text") }, onFailure: { _ in delivered.fulfill() }, onFinish: { XCTFail("unexpected completion") })
+        let callback = SpeechCallbackBridge.recognition(onText: { _ in XCTFail("unexpected text") }, onFailure: { _ in delivered.fulfill() }, onFinish: { _ in XCTFail("unexpected completion") })
         DispatchQueue.global().async { callback(nil, NSError(domain: "test", code: 1)) }
         await fulfillment(of: [delivered], timeout: 2)
     }
@@ -87,7 +87,7 @@ private final class GateProbe: @unchecked Sendable {
     func testRecognitionEventsAreOrderedAndTerminal() async {
         let done = expectation(description: "final event")
         var observed: [String] = []
-        let events = RecognitionEvents(onText: { observed.append($0) }, onFailure: { _ in XCTFail("unexpected error") }, onFinish: { observed.append("finished"); done.fulfill() })
+        let events = RecognitionEvents(onText: { observed.append($0) }, onFailure: { _ in XCTFail("unexpected error") }, onFinish: { _ in observed.append("finished"); done.fulfill() })
         DispatchQueue.global().async {
             events.submit(text: "partial", failed: false, finished: false)
             events.submit(text: "final", failed: false, finished: true)
@@ -95,6 +95,19 @@ private final class GateProbe: @unchecked Sendable {
         }
         await fulfillment(of: [done], timeout: 2)
         XCTAssertEqual(observed, ["partial", "final", "finished"])
+    }
+
+    func testFinalValidityComesFromFinalEventRatherThanPartial() async {
+        let done = expectation(description: "all final events")
+        done.expectedFulfillmentCount = 3
+        var validity: [Bool] = []
+        for text: String? in [nil, "  ", "最终"] {
+            let events = RecognitionEvents(onText: { _ in }, onFailure: { _ in XCTFail("unexpected error") }, onFinish: { valid in validity.append(valid); done.fulfill() })
+            events.submit(text: "partial", failed: false, finished: false)
+            events.submit(text: text, failed: false, finished: true)
+        }
+        await fulfillment(of: [done], timeout: 2)
+        XCTAssertEqual(validity, [false, false, true])
     }
 
     func testAudioTapRunsOnBackgroundQueueAndCanFinish() async {
@@ -224,7 +237,7 @@ private final class GateProbe: @unchecked Sendable {
         let backend = FakeVoiceBackend(); let voice = VoiceCoordinator(backend: backend)
         await voice.start()
         backend.handler?("你好")
-        backend.finishHandler?()
+        backend.finishHandler?(true)
         XCTAssertEqual(voice.transcript, "你好")
         XCTAssertTrue(backend.stopped)
         XCTAssertFalse(voice.isRecording)
@@ -238,7 +251,7 @@ private final class GateProbe: @unchecked Sendable {
         XCTAssertFalse(backend.stopped)
         XCTAssertTrue(voice.isFinishing)
         backend.handler?("最终文本")
-        backend.finishHandler?()
+        backend.finishHandler?(true)
         XCTAssertEqual(voice.transcript, "最终文本")
         XCTAssertFalse(voice.isFinishing)
         XCTAssertTrue(backend.stopped)
@@ -250,7 +263,7 @@ private final class GateProbe: @unchecked Sendable {
         backend.handler?("已有转写")
         voice.finishRecording()
         backend.handler?("")
-        backend.finishHandler?()
+        backend.finishHandler?(false)
         XCTAssertEqual(voice.transcript, "已有转写")
         XCTAssertFalse(voice.isFinishing)
         XCTAssertTrue(voice.needsConfirmation)
@@ -258,6 +271,17 @@ private final class GateProbe: @unchecked Sendable {
         voice.confirmTranscript()
         XCTAssertFalse(voice.needsConfirmation)
         XCTAssertTrue(VoiceDraftPrefix.canRun(draft: voice.transcript, serviceAvailable: true, isRunning: false, voiceBusy: voice.needsConfirmation))
+    }
+
+    func testMissingFinalTextRequiresConfirmationInsteadOfReusingPartialState() async {
+        let backend = FakeVoiceBackend(); let voice = VoiceCoordinator(backend: backend)
+        await voice.start()
+        backend.handler?("部分结果")
+        voice.finishRecording()
+        backend.finishHandler?(false)
+        XCTAssertEqual(voice.transcript, "部分结果")
+        XCTAssertTrue(voice.needsConfirmation)
+        XCTAssertFalse(voice.isFinishing)
     }
 
     func testCancellingTranscriptionCanRestoreOriginalDraft() {
@@ -284,7 +308,7 @@ private final class GateProbe: @unchecked Sendable {
         voice.stop()
         await voice.start()
         staleText?("旧录音")
-        staleFinish?()
+        staleFinish?(true)
         XCTAssertTrue(voice.isRecording)
         XCTAssertEqual(voice.transcript, "")
         backend.handler?("新录音")
