@@ -877,3 +877,27 @@ extension VoiceCoordinatorTests {
         XCTAssertEqual(second.diagnosticSnapshot().silenceSeconds, 5, accuracy: 0.001)
     }
 }
+
+extension VoiceCoordinatorTests {
+    func testDiagnosticReasonsDistinguishManualFinishAndSilence() async {
+        let manualBackend = FakeVoiceBackend()
+        let manual = VoiceCoordinator(backend: manualBackend)
+        await manual.start()
+        manual.finishRecording()
+        manualBackend.finishHandler?(true)
+        XCTAssertEqual(manual.diagnosticReason, "手动结束录音")
+
+        let autoBackend = FakeVoiceBackend()
+        let automatic = VoiceCoordinator(backend: autoBackend)
+        await automatic.start()
+        autoBackend.silenceHandler?()
+        autoBackend.finishHandler?(true)
+        XCTAssertEqual(automatic.diagnosticReason, "检测到停顿")
+
+        let stoppedBackend = FakeVoiceBackend()
+        let stopped = VoiceCoordinator(backend: stoppedBackend)
+        await stopped.start()
+        stopped.stop()
+        XCTAssertEqual(stopped.diagnosticReason, "手动停止")
+    }
+}
