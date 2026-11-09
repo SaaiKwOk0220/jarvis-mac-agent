@@ -4,6 +4,13 @@ import JarvisDomain
 struct TaskHistoryVisibility {
     private(set) var isExpanded = false
     mutating func toggle() { isExpanded.toggle() }
+    func shows(_ status: TaskStatus) -> Bool {
+        if isExpanded { return true }
+        switch status {
+        case .completed, .failed, .cancelled: return false
+        case .draft, .planning, .running, .awaitingApproval, .blocked: return true
+        }
+    }
 }
 
 struct TaskListView: View {
@@ -49,7 +56,7 @@ struct TaskListView: View {
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 12)
             } else {
-                ForEach(client.tasks.filter { history.isExpanded || $0.status == .awaitingApproval }) { task in
+                ForEach(client.tasks.filter { history.shows($0.status) }) { task in
                     Button {
                         client.select(task)
                         openWindow(id: "task-detail")
