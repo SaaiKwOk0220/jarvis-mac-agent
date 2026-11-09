@@ -116,6 +116,7 @@ struct AskJarvisView: View {
     @State private var goal = ""
     @State private var savedVoiceDrafts: [VoiceDraft] = []
     @State private var activeVoiceDraftID: String?
+    @State private var restoredVoiceDraftID: String?
     @State private var draftStoreError: String?
     @State private var voiceDraftPrefix = VoiceDraftPrefix(draft: "")
     @State private var isRunning = false
@@ -184,10 +185,15 @@ struct AskJarvisView: View {
                      ? "说话停顿并识别完成后会自动运行；也可手动停止。"
                      : "已有草稿将保留，转写后请手动运行。")
                     .font(.caption).foregroundStyle(.secondary)
+                if !savedVoiceDrafts.isEmpty {
+                    Text("未完成的语音以明文保存在本机，直到任务成功或手动删除；删除不保证安全擦除。")
+                        .font(.caption)
+                }
                 ForEach(savedVoiceDrafts, id: \.id) { draft in
                     HStack {
-                        Button("恢复未完成的语音") { if goal.isEmpty { goal = draft.text } }.disabled(!goal.isEmpty || isRunning)
-                        Button("删除") { deleteVoiceDraft(draft.id) }.disabled(isRunning)
+                        Text(draft.text).lineLimit(2).textSelection(.enabled)
+                        Button("恢复") { if goal.isEmpty { goal = draft.text; restoredVoiceDraftID = draft.id } }.disabled(!goal.isEmpty || isRunning)
+                        Button("删除") { deleteVoiceDraft(draft.id); if restoredVoiceDraftID == draft.id { restoredVoiceDraftID = nil } }.disabled(isRunning)
                     }
                 }
                 if let draftStoreError { Text(draftStoreError).foregroundStyle(.red) }
@@ -375,9 +381,14 @@ struct AskJarvisView: View {
         autoSubmit.cancel()
         let submittedGoal = goal.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !submittedGoal.isEmpty else { return }
-        if fromVoice {
+        if fromVoice || restoredVoiceDraftID != nil {
             guard let voiceDraftStore else { draftStoreError = "无法保存语音草稿，请检查本地存储。"; return }
-            do { activeVoiceDraftID = try voiceDraftStore.save(submittedGoal); refreshVoiceDrafts() }
+            do {
+                // Save the exact submitted text first, then remove any restored predecessor.
+                activeVoiceDraftID = try voiceDraftStore.save(submittedGoal)
+                if let old = restoredVoiceDraftID { try voiceDraftStore.delete(old); restoredVoiceDraftID = nil }
+                refreshVoiceDrafts()
+            }
             catch { draftStoreError = "无法保存语音草稿，请检查本地存储。"; return }
         }
         voice.stop()
@@ -474,8 +485,8 @@ struct AskJarvisView: View {
             if let token, conversation.isCurrent(token) { conversation.stop() }
             return
         }
-        guard let token, conversation.isCurrent(token), isVisible else { return }
         if let id = activeVoiceDraftID { deleteVoiceDraft(id); activeVoiceDraftID = nil }
+        guard let token, conversation.isCurrent(token), isVisible else { return }
         conversation.record(user: submitted, answer: answer, token: token)
         voice.speak(answer) { completed in
             conversation.playbackFinished(completed: completed, token: token, visible: isVisible,
