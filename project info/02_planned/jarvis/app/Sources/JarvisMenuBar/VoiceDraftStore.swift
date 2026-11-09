@@ -22,6 +22,14 @@ final class VoiceDraftStore {
         }
         return id
     }
+    func replace(_ oldID: String, with text: String) throws -> String {
+        let id = UUID().uuidString
+        try database.write { db in
+            try db.execute(sql: "INSERT INTO voice_drafts(id, text) VALUES (?, ?)", arguments: [id, text])
+            try db.execute(sql: "DELETE FROM voice_drafts WHERE id = ?", arguments: [oldID])
+        }
+        return id
+    }
     func list() throws -> [VoiceDraft] {
         try database.read { db in
             try Row.fetchAll(db, sql: "SELECT id, text FROM voice_drafts ORDER BY rowid").map {
