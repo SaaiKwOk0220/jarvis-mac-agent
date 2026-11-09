@@ -2,6 +2,30 @@
 @preconcurrency import Speech
 import Foundation
 
+/// Local-only endpoint preferences; invalid persisted values fail safely.
+enum VoiceEndpointSettings {
+    static let pauseKey = "jarvis.voice.pauseSeconds"
+    static let maxRecordingKey = "jarvis.voice.maxRecordingSeconds"
+    static func safePause(_ value: Double) -> Double { value.isFinite ? min(8, max(2, value)) : 3.5 }
+    static func safeMaximum(_ value: Double) -> Double { value.isFinite ? min(180, max(30, value)) : 90 }
+    static func pauseSeconds(_ defaults: UserDefaults = .standard) -> Double {
+        safePause((defaults.object(forKey: pauseKey) as? NSNumber)?.doubleValue ?? 3.5)
+    }
+    static func maxRecordingSeconds(_ defaults: UserDefaults = .standard) -> Double {
+        safeMaximum((defaults.object(forKey: maxRecordingKey) as? NSNumber)?.doubleValue ?? 90)
+    }
+}
+
+/// Never include userInfo or unrecognized domain text in UI diagnostics.
+enum SpeechFailure {
+    nonisolated static func safeMessage(_ error: Error) -> String {
+        let nsError = error as NSError
+        let allowed = ["kAFAssistantErrorDomain", "kLSRErrorDomain", "SFSpeechErrorDomain", "AVFoundationErrorDomain", "NSURLErrorDomain"]
+        let domain = allowed.contains(nsError.domain) ? nsError.domain : "其他系统域"
+        return "离线语音识别中断（\(domain)，代码 \(nsError.code)）。请检查语音识别和麦克风权限及本机中文语言资源后重试；已有转写请先确认。"
+    }
+}
+
 @MainActor enum VoicePermissionPolicy {
     enum State { case granted, undetermined, denied }
     static func resolve(_ state: State, request: @MainActor () async -> Bool) async -> Bool {
@@ -40,7 +64,8 @@ enum SpeechCallbackBridge {
         let events = RecognitionEvents(onText: onText, onFailure: onFailure, onFinish: onFinish)
         return { @Sendable result, error in
             events.submit(text: result?.bestTranscription.formattedString,
-                          failed: error != nil, finished: result?.isFinal == true)
+                          failed: error != nil, finished: result?.isFinal == true,
+                          failureMessage: error.map(SpeechFailure.safeMessage))
         }
     }
 }
@@ -57,13 +82,13 @@ final class RecognitionEvents: @unchecked Sendable {
          onFinish: @escaping @MainActor @Sendable (Bool) -> Void) {
         self.onText = onText; self.onFailure = onFailure; self.onFinish = onFinish
     }
-    func submit(text: String?, failed: Bool, finished: Bool) {
+    func submit(text: String?, failed: Bool, finished: Bool, failureMessage: String? = nil) {
         lock.lock(); defer { lock.unlock() }
         guard !terminal else { return }
         if failed || finished { terminal = true }
         DispatchQueue.main.async { [onText, onFailure, onFinish] in
             if let text { onText(text) }
-            if failed { onFailure("离线语音识别已停止，请重试。") }
+            if failed { onFailure(failureMessage ?? "离线语音识别中断，请检查系统权限和本机中文语言资源后重试。") }
             else if finished { onFinish(!(text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)) }
         }
     }
@@ -114,9 +139,11 @@ final class AudioRequestGate: @unchecked Sendable {
 /// Time is measured from samples, not recognition callbacks. Unknown formats
 /// never trigger automatic submission; the coordinator stops after a timeout.
 struct SpeechPauseDetector {
+    private let pauseDuration: Double
     private var speechDuration = 0.0
     private var silenceDuration = 0.0
     private var fired = false
+    init(pauseDuration: Double = 3.5) { self.pauseDuration = pauseDuration }
     mutating func observe(level: Float, duration: Double) -> Bool {
         guard !fired, level.isFinite, duration.isFinite, duration > 0 else { return false }
         if level >= 0.015 {
@@ -124,7 +151,7 @@ struct SpeechPauseDetector {
             silenceDuration = 0
         } else if speechDuration >= 0.3 {
             silenceDuration += duration
-            if silenceDuration >= 1.5 { fired = true; return true }
+            if silenceDuration >= pauseDuration { fired = true; return true }
         }
         return false
     }
@@ -133,9 +160,12 @@ struct SpeechPauseDetector {
 /// Consumes buffer samples synchronously on the tap; it never retains a buffer.
 final class AudioPauseMonitor: @unchecked Sendable {
     private let lock = NSLock()
-    private var detector = SpeechPauseDetector()
+    private var detector: SpeechPauseDetector
     private let onSilence: @MainActor @Sendable () -> Void
-    init(onSilence: @escaping @MainActor @Sendable () -> Void) { self.onSilence = onSilence }
+    init(pauseDuration: Double = 3.5, onSilence: @escaping @MainActor @Sendable () -> Void) {
+        detector = SpeechPauseDetector(pauseDuration: pauseDuration)
+        self.onSilence = onSilence
+    }
     func observe(_ buffer: AVAudioPCMBuffer) {
         guard lock.try() else { return }
         defer { lock.unlock() }
@@ -206,7 +236,7 @@ final class AudioPauseMonitor: @unchecked Sendable {
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else { throw SpeechError.unavailable }
-        input.installTap(onBus: 0, bufferSize: 1024, format: format, block: SpeechCallbackBridge.tap(gate: gate, monitor: AudioPauseMonitor(onSilence: onSilence)))
+        input.installTap(onBus: 0, bufferSize: 1024, format: format, block: SpeechCallbackBridge.tap(gate: gate, monitor: AudioPauseMonitor(pauseDuration: VoiceEndpointSettings.pauseSeconds(), onSilence: onSilence)))
         hasTap = true
         recognitionTask = recognizer.recognitionTask(with: request, resultHandler: SpeechCallbackBridge.recognition(onText: onText, onFailure: onFailure, onFinish: onFinish))
         engine.prepare()

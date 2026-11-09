@@ -149,7 +149,7 @@ struct VoiceDraftPrefix {
     @Published private(set) var needsConfirmation = false
     private let backend: any VoiceBackend
     private let speaker: (any VoiceSpeaker)?
-    private let recordingLimit: Duration
+    private let recordingLimit: Duration?
     private var speakerGeneration = 0
     private var generation = 0
     private var finishTimeout: Task<Void, Never>?
@@ -157,7 +157,7 @@ struct VoiceDraftPrefix {
     private var automaticFinish = false
     private var autoSubmit: (@MainActor @Sendable (String) -> Void)?
 
-    init(backend: any VoiceBackend, speaker: (any VoiceSpeaker)? = nil, recordingLimit: Duration = .seconds(30)) {
+    init(backend: any VoiceBackend, speaker: (any VoiceSpeaker)? = nil, recordingLimit: Duration? = nil) {
         self.backend = backend; self.speaker = speaker; self.recordingLimit = recordingLimit
     }
 
@@ -205,7 +205,7 @@ struct VoiceDraftPrefix {
                 self.finishRecording()
             }
             isRecording = true
-            let limit = recordingLimit
+            let limit = recordingLimit ?? .seconds(VoiceEndpointSettings.maxRecordingSeconds())
             recordingTimeout = Task { [weak self] in
                 try? await Task.sleep(for: limit)
                 guard !Task.isCancelled, let self, self.generation == current, self.isRecording else { return }
@@ -215,7 +215,7 @@ struct VoiceDraftPrefix {
             }
         } catch {
             backend.stop()
-            errorMessage = "无法启动离线语音识别：\(error.localizedDescription)"
+            errorMessage = SpeechFailure.safeMessage(error)
         }
     }
 

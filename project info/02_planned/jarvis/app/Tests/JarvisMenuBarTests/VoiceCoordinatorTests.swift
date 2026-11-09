@@ -73,6 +73,71 @@ private struct ConversationTestWaiter: ApprovalWaiter {
 }
 
 @MainActor final class VoiceCoordinatorTests: XCTestCase {
+    func testLongSentencePauseDoesNotFinishAtOneAndHalfSeconds() {
+        var detector = SpeechPauseDetector(pauseDuration: 3.5)
+        XCTAssertFalse(detector.observe(level: 0.08, duration: 0.4))
+        XCTAssertFalse(detector.observe(level: 0, duration: 1.8))
+        XCTAssertFalse(detector.observe(level: 0.08, duration: 0.4))
+        XCTAssertFalse(detector.observe(level: 0, duration: 3.4))
+        XCTAssertTrue(detector.observe(level: 0, duration: 0.2))
+    }
+
+    func testSpeechEndpointSettingsClampInvalidValues() {
+        XCTAssertEqual(VoiceEndpointSettings.safePause(.nan), 3.5)
+        XCTAssertEqual(VoiceEndpointSettings.safePause(0.1), 2)
+        XCTAssertEqual(VoiceEndpointSettings.safePause(99), 8)
+        XCTAssertEqual(VoiceEndpointSettings.safeMaximum(.infinity), 90)
+        XCTAssertEqual(VoiceEndpointSettings.safeMaximum(1), 30)
+        XCTAssertEqual(VoiceEndpointSettings.safeMaximum(500), 180)
+    }
+
+    func testSpeechErrorMessageDoesNotLeakTranscriptOrUnknownDomain() {
+        let known = NSError(domain: "kAFAssistantErrorDomain", code: 1101,
+                            userInfo: [NSLocalizedDescriptionKey: "PRIVATE-TRANSCRIPT"])
+        let message = SpeechFailure.safeMessage(known)
+        XCTAssertTrue(message.contains("kAFAssistantErrorDomain"))
+        XCTAssertTrue(message.contains("1101"))
+        XCTAssertFalse(message.contains("PRIVATE-TRANSCRIPT"))
+        let unknown = NSError(domain: "PRIVATE-DOMAIN", code: 17, userInfo: nil)
+        XCTAssertFalse(SpeechFailure.safeMessage(unknown).contains("PRIVATE-DOMAIN"))
+    }
+
+    func testPartialUpdatesDoNotEndRecordingAndFailureNeverAutoSubmits() async {
+        let backend = FakeVoiceBackend(); let voice = VoiceCoordinator(backend: backend)
+        var sent: [String] = []
+        await voice.start(autoSubmit: { sent.append($0) })
+        backend.handler?("第一部分")
+        XCTAssertTrue(voice.isRecording)
+        backend.handler?("第一部分第二部分")
+        XCTAssertTrue(voice.isRecording)
+        backend.silenceHandler?()
+        let staleFinal = backend.finishHandler
+        backend.failureHandler?("识别中断")
+        staleFinal?(true)
+        XCTAssertEqual(voice.transcript, "第一部分第二部分")
+        XCTAssertTrue(voice.needsConfirmation)
+        XCTAssertTrue(sent.isEmpty)
+        XCTAssertFalse(voice.isRecording)
+    }
+
+    func testSimultaneousFinalAndErrorIsFailureNotSuccess() async {
+        let done = expectation(description: "error delivered")
+        var text = ""
+        var finalized = false
+        let events = RecognitionEvents(onText: { text = $0 }, onFailure: { _ in done.fulfill() }, onFinish: { _ in finalized = true })
+        events.submit(text: "保留的转写", failed: true, finished: true)
+        await fulfillment(of: [done], timeout: 2)
+        XCTAssertEqual(text, "保留的转写")
+        XCTAssertFalse(finalized, "An error must never be treated as a successful final result")
+    }
+
+    func testLowVolumeAndContinuousNoiseDoNotAutoFinish() {
+        var quiet = SpeechPauseDetector(pauseDuration: 3.5)
+        XCTAssertFalse(quiet.observe(level: 0.005, duration: 2))
+        XCTAssertFalse(quiet.observe(level: 0, duration: 5))
+        var noise = SpeechPauseDetector(pauseDuration: 3.5)
+        for _ in 0..<200 { XCTAssertFalse(noise.observe(level: 0.03, duration: 0.1)) }
+    }
     func testDelayedCreateAfterCancellationCancelsCreatedTask() async throws {
         let started = expectation(description: "task creation started")
         let deferred = DeferredTaskCreation(onStart: { started.fulfill() })
@@ -264,7 +329,7 @@ private struct ConversationTestWaiter: ApprovalWaiter {
         XCTAssertFalse(voice.isSpeaking)
     }
     func testSilenceDetectorRequiresSpeechBeforePauseAndFiresOnce() {
-        var detector = SpeechPauseDetector()
+        var detector = SpeechPauseDetector(pauseDuration: 1.5)
         XCTAssertFalse(detector.observe(level: 0, duration: 3))
         XCTAssertFalse(detector.observe(level: 0.08, duration: 0.4))
         XCTAssertFalse(detector.observe(level: 0, duration: 1.0))
@@ -354,7 +419,7 @@ private struct ConversationTestWaiter: ApprovalWaiter {
 
     func testAudioSamplesTriggerPauseOnlyAfterSpeechAndSilence() async throws {
         let paused = expectation(description: "detected pause")
-        let monitor = AudioPauseMonitor(onSilence: { paused.fulfill() })
+        let monitor = AudioPauseMonitor(pauseDuration: 1.5, onSilence: { paused.fulfill() })
         let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1))
         let speech = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 6400))
         speech.frameLength = 6400
@@ -371,7 +436,7 @@ private struct ConversationTestWaiter: ApprovalWaiter {
 
     func testSpeechOnSecondChannelStillDetectsPause() async throws {
         let paused = expectation(description: "second channel detected")
-        let monitor = AudioPauseMonitor(onSilence: { paused.fulfill() })
+        let monitor = AudioPauseMonitor(pauseDuration: 1.5, onSilence: { paused.fulfill() })
         let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 2))
         let speech = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 6400))
         speech.frameLength = 6400
@@ -387,7 +452,7 @@ private struct ConversationTestWaiter: ApprovalWaiter {
 
     func testInterleavedStereoDetectsSpeechOnSecondChannel() async throws {
         let paused = expectation(description: "interleaved second channel detected")
-        let monitor = AudioPauseMonitor(onSilence: { paused.fulfill() })
+        let monitor = AudioPauseMonitor(pauseDuration: 1.5, onSilence: { paused.fulfill() })
         let format = try XCTUnwrap(AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 2, interleaved: true))
         let speech = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 6400))
         speech.frameLength = 6400
