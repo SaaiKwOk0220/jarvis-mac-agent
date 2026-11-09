@@ -65,6 +65,11 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
     public func tools() -> [LLMTool] {
         [
             LLMTool(
+                name: "browser_open",
+                description: "Open a user-requested HTTPS page in the default browser after approval. Approval covers opening the initial URL only; the browser may redirect, run scripts, or send network requests afterward. Does not read page contents. Only an origin is supported; paths, query strings, fragments, and credentials are rejected.",
+                parameters: ["url": LLMToolParameter(type: "string", description: "HTTPS origin only, without a path, query, fragment, or credentials.")]
+            ),
+            LLMTool(
                 name: "shell",
                 description: """
                 Run the read-only pwd command in a restricted process. Only pwd is supported; it needs explicit user approval \
@@ -152,6 +157,9 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
     /// entry points hit the same allowlists.
     private func makeRequest(for call: LLMToolCall) -> ToolRequest? {
         switch call.name {
+        case "browser_open":
+            let url = call.arguments["url"] ?? ""
+            return ToolRequest(taskID: taskID, name: "browser_open", sideEffect: .externalSend, target: url, payload: "Open in browser")
         case "shell":
             let workingDirectory = resolvedWorkingDirectory(call.arguments["workingDirectory"])
             return ToolRequest(

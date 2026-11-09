@@ -32,6 +32,13 @@ struct AgentLogEntry: Identifiable, Equatable {
         switch event {
         case .assistantText(let text):
             self.init(kind: .assistant, text: "Assistant: \(text)")
+        case .toolCallRequested(let call) where call.name == "browser_open":
+            let parts = call.arguments["url"].flatMap { URLComponents(string: $0) }
+            let origin = parts.flatMap { component -> String? in
+                guard component.scheme == "https", let host = component.host else { return nil }
+                return "https://\(host)" + (component.port.map { ":\($0)" } ?? "")
+            } ?? "[REDACTED]"
+            self.init(kind: .toolCall, text: "Tool call: browser_open(\(origin))")
         case .toolCallRequested(let call):
             let arguments = call.arguments
                 .sorted { $0.key < $1.key }

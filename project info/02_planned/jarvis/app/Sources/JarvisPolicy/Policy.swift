@@ -39,6 +39,15 @@ public struct Policy: PolicyEvaluator, Sendable {
     public init() {}
 
     public func evaluate(_ request: ToolRequest, config: PolicyConfig) -> PolicyDecision {
+        if request.name == "browser_open" {
+            guard request.sideEffect == .externalSend,
+                  request.payload == "Open in browser",
+                  request.scope == nil,
+                  BrowserOpenURL.validated(request.target) != nil else {
+                return .deny(reason: "invalid browser destination")
+            }
+            return .requireApproval(reason: "opens the initial origin only; afterward the browser may navigate anywhere, redirect, run scripts, and send network requests; the domain and your original task text may be stored locally")
+        }
         switch request.sideEffect {
         case .money:
             return .deny(reason: "money actions are unsupported")

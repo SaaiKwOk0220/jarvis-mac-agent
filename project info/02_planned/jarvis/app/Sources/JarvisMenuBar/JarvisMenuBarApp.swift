@@ -131,7 +131,8 @@ private final class Runtime {
                 terminal: TerminalToolExecutor(),
                 webFetch: WebFetchToolExecutor(),
                 screenshot: ScreenshotToolExecutor(),
-                accessibility: AccessibilityQueryToolExecutor())
+                accessibility: AccessibilityQueryToolExecutor(),
+                browserOpen: BrowserOpenExecutor())
             self.taskService = service
             let server = LoopbackServer(service: service)
             self.server = server

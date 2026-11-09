@@ -76,7 +76,7 @@ final class TaskServiceToolRunnerTests: XCTestCase {
     func testToolsAdvertiseFourWorkers() {
         let runner = TaskServiceToolRunner(service: ScriptedTaskService(), taskID: UUID())
 
-        XCTAssertEqual(runner.tools().map(\.name), ["shell", "fetch", "screenshot", "ax_query"])
+        XCTAssertEqual(runner.tools().map(\.name), ["browser_open", "shell", "fetch", "screenshot", "ax_query"])
     }
 
     /// A shell call becomes a `.localExecute` request carrying the command as
