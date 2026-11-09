@@ -157,7 +157,9 @@ final class OllamaProviderTests: XCTestCase {
     }
 
     func testUnavailableAndMissingModelHaveActionableMessages() {
-        XCTAssertTrue(LLMError.unavailable("offline").localizedDescription.contains("Ollama"))
+        XCTAssertFalse(LLMError.unavailable("private diagnostic").localizedDescription.contains("private diagnostic"))
+        XCTAssertTrue(LLMError.ollamaUnavailable("private diagnostic").localizedDescription.contains("Ollama"))
+        XCTAssertFalse(LLMError.ollamaUnavailable("private diagnostic").localizedDescription.contains("private diagnostic"))
         XCTAssertTrue(LLMError.modelNotFound("missing").localizedDescription.contains("ollama pull"))
     }
 
@@ -324,11 +326,22 @@ final class OllamaProviderTests: XCTestCase {
             )
             XCTFail("Expected a connection failure to throw")
         } catch let error as LLMError {
-            guard case .unavailable = error else {
-                return XCTFail("expected .unavailable, got \(error)")
+            guard case .ollamaUnavailable = error else {
+                return XCTFail("expected .ollamaUnavailable, got \(error)")
             }
         } catch {
             XCTFail("unexpected error: \(error)")
+        }
+    }
+
+    func testCancelledRequestRemainsCancellation() async throws {
+        MockURLProtocol.handler = { _ in throw URLError(.cancelled) }
+        do {
+            _ = try await makeProvider().complete(messages: [], tools: [])
+            XCTFail("Expected cancellation")
+        } catch is CancellationError {
+        } catch {
+            XCTFail("Expected cancellation, got \(error)")
         }
     }
 

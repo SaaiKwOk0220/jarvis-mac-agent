@@ -1,7 +1,20 @@
 import SwiftUI
 import JarvisDomain
 
+struct TaskHistoryVisibility {
+    private(set) var isExpanded = false
+    mutating func toggle() { isExpanded.toggle() }
+    func shows(_ status: TaskStatus) -> Bool {
+        if isExpanded { return true }
+        switch status {
+        case .completed, .failed, .cancelled: return false
+        case .draft, .planning, .running, .awaitingApproval, .blocked: return true
+        }
+    }
+}
+
 struct TaskListView: View {
+    @State private var history = TaskHistoryVisibility()
     @ObservedObject var client: ServiceClient
     @Environment(\.openWindow) private var openWindow
 
@@ -35,12 +48,15 @@ struct TaskListView: View {
             Button { openWindow(id: "ax-query") } label: {
                 Label("Inspect accessibility…", systemImage: "accessibility")
             }
+            Button { history.toggle() } label: {
+                Label(history.isExpanded ? "隐藏历史任务" : "查看历史任务", systemImage: history.isExpanded ? "chevron.up" : "clock.arrow.circlepath")
+            }
             if client.tasks.isEmpty {
                 Text(client.serviceError?.localizedDescription ?? "No tasks yet")
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 12)
             } else {
-                ForEach(client.tasks) { task in
+                ForEach(client.tasks.filter { history.shows($0.status) }) { task in
                     Button {
                         client.select(task)
                         openWindow(id: "task-detail")
