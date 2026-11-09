@@ -266,6 +266,7 @@ struct VoiceDraftPrefix {
 
     func finishRecording() {
         guard isRecording else { return }
+        if diagnosticReason == nil { diagnosticReason = "手动结束录音" }
         isRecording = false
         isFinishing = true
         let current = generation
@@ -282,7 +283,7 @@ struct VoiceDraftPrefix {
     }
 
     func stop() {
-        if diagnosticReason == nil && (isRecording || isStarting || isFinishing) { diagnosticReason = "手动停止或完成" }
+        if diagnosticReason == nil && (isRecording || isStarting || isFinishing) { diagnosticReason = "手动停止" }
         generation += 1
         recordingTimeout?.cancel(); recordingTimeout = nil
         automaticFinish = false
