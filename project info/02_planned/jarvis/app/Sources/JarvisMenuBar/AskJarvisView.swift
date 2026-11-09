@@ -82,11 +82,6 @@ final class AgentRunLog: ObservableObject {
     }
 }
 
-enum VoiceInterfaceSettings {
-    static func pause(_ value: Double) -> Double { value.isFinite ? min(8, max(2, value)) : 3.5 }
-    static func maximum(_ value: Double) -> Double { value.isFinite ? min(180, max(30, value)) : 90 }
-}
-
 enum VoiceInterfaceStatus {
     static func label(recording: Bool, running: Bool, speaking: Bool) -> String {
         if recording { return "聆听中" }; if running { return "任务进行中" }; if speaking { return "朗读中" }; return "待命"
@@ -127,8 +122,8 @@ struct AskJarvisView: View {
     @State private var isVisible = false
     @State private var voiceWillAutoSubmit = false
     @State private var followLatest = false
-    @AppStorage("jarvis.voice.pauseSeconds") private var pauseSeconds = 3.5
-    @AppStorage("jarvis.voice.maxRecordingSeconds") private var maxRecordingSeconds = 90.0
+    @AppStorage(VoiceEndpointSettings.pauseKey) private var pauseSeconds = VoiceEndpointSettings.defaultPause
+    @AppStorage(VoiceEndpointSettings.maxRecordingKey) private var maxRecordingSeconds = VoiceEndpointSettings.defaultMaximum
     @AppStorage(VoicePlaybackSettings.voiceKey) private var selectedVoiceID = ""
     @AppStorage(VoicePlaybackSettings.rateKey) private var voiceRate = 0.5
 
@@ -208,13 +203,13 @@ struct AskJarvisView: View {
             DisclosureGroup("语音设置") {
                 HStack {
                     Text("说完后的停顿")
-                    Slider(value: Binding(get: { VoiceInterfaceSettings.pause(pauseSeconds) }, set: { pauseSeconds = VoiceInterfaceSettings.pause($0) }), in: 2...8, step: 0.5).accessibilityLabel("说完后的停顿秒数")
-                    Text(String(format: "%.1f 秒", VoiceInterfaceSettings.pause(pauseSeconds))).monospacedDigit()
+                    Slider(value: Binding(get: { VoiceEndpointSettings.safePause(pauseSeconds) }, set: { pauseSeconds = VoiceEndpointSettings.safePause($0) }), in: VoiceEndpointSettings.pauseRange, step: 0.5).accessibilityLabel("说完后的停顿秒数")
+                    Text(String(format: "%.1f 秒", VoiceEndpointSettings.safePause(pauseSeconds))).monospacedDigit()
                 }
                 HStack {
                     Text("单次录音上限")
-                    Slider(value: Binding(get: { VoiceInterfaceSettings.maximum(maxRecordingSeconds) }, set: { maxRecordingSeconds = VoiceInterfaceSettings.maximum($0) }), in: 30...180, step: 10).accessibilityLabel("单次录音上限秒数")
-                    Text("\(Int(VoiceInterfaceSettings.maximum(maxRecordingSeconds))) 秒").monospacedDigit()
+                    Slider(value: Binding(get: { VoiceEndpointSettings.safeMaximum(maxRecordingSeconds) }, set: { maxRecordingSeconds = VoiceEndpointSettings.safeMaximum($0) }), in: VoiceEndpointSettings.maximumRange, step: 10).accessibilityLabel("单次录音上限秒数")
+                    Text("\(Int(VoiceEndpointSettings.safeMaximum(maxRecordingSeconds))) 秒").monospacedDigit()
                 }
                 Text("设置将在下次录音时生效。 ").font(.caption).foregroundStyle(.secondary)
                 Picker("中文音色", selection: $selectedVoiceID) {

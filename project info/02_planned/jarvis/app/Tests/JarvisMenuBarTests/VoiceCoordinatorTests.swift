@@ -83,6 +83,10 @@ private struct ConversationTestWaiter: ApprovalWaiter {
     }
 
     func testSpeechEndpointSettingsClampInvalidValues() {
+        XCTAssertEqual(VoiceEndpointSettings.pauseRange, 2...8)
+        XCTAssertEqual(VoiceEndpointSettings.maximumRange, 30...180)
+        XCTAssertEqual(VoiceEndpointSettings.defaultPause, 3.5)
+        XCTAssertEqual(VoiceEndpointSettings.defaultMaximum, 90)
         XCTAssertEqual(VoiceEndpointSettings.safePause(.nan), 3.5)
         XCTAssertEqual(VoiceEndpointSettings.safePause(0.1), 2)
         XCTAssertEqual(VoiceEndpointSettings.safePause(99), 8)
@@ -138,16 +142,16 @@ private struct ConversationTestWaiter: ApprovalWaiter {
         var noise = SpeechPauseDetector(pauseDuration: 3.5)
         for _ in 0..<200 { XCTAssertFalse(noise.observe(level: 0.03, duration: 0.1)) }
     }
-    func testVoiceInterfaceClampsCorruptPersistedSettings() {
-        XCTAssertEqual(VoiceInterfaceSettings.pause(.nan), 3.5)
-        XCTAssertEqual(VoiceInterfaceSettings.pause(.infinity), 3.5)
-        XCTAssertEqual(VoiceInterfaceSettings.pause(-1), 2)
-        XCTAssertEqual(VoiceInterfaceSettings.pause(9), 8)
-        XCTAssertEqual(VoiceInterfaceSettings.maximum(.nan), 90)
-        XCTAssertEqual(VoiceInterfaceSettings.maximum(-.infinity), 90)
-        XCTAssertEqual(VoiceInterfaceSettings.maximum(1), 30)
-        XCTAssertEqual(VoiceInterfaceSettings.maximum(999), 180)
-        XCTAssertEqual(VoiceInterfaceSettings.maximum(75), 75)
+    func testVoiceEndpointClampsCorruptPersistedSettings() {
+        XCTAssertEqual(VoiceEndpointSettings.safePause(.nan), 3.5)
+        XCTAssertEqual(VoiceEndpointSettings.safePause(.infinity), 3.5)
+        XCTAssertEqual(VoiceEndpointSettings.safePause(-1), 2)
+        XCTAssertEqual(VoiceEndpointSettings.safePause(9), 8)
+        XCTAssertEqual(VoiceEndpointSettings.safeMaximum(.nan), 90)
+        XCTAssertEqual(VoiceEndpointSettings.safeMaximum(-.infinity), 90)
+        XCTAssertEqual(VoiceEndpointSettings.safeMaximum(1), 30)
+        XCTAssertEqual(VoiceEndpointSettings.safeMaximum(999), 180)
+        XCTAssertEqual(VoiceEndpointSettings.safeMaximum(75), 75)
     }
 
     func testInterfaceStatusDoesNotMislabelRunningTaskAsThinking() {

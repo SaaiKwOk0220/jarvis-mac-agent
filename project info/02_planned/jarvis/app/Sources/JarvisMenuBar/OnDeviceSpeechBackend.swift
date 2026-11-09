@@ -6,13 +6,17 @@ import Foundation
 enum VoiceEndpointSettings {
     static let pauseKey = "jarvis.voice.pauseSeconds"
     static let maxRecordingKey = "jarvis.voice.maxRecordingSeconds"
-    static func safePause(_ value: Double) -> Double { value.isFinite ? min(8, max(2, value)) : 3.5 }
-    static func safeMaximum(_ value: Double) -> Double { value.isFinite ? min(180, max(30, value)) : 90 }
+    static let pauseRange: ClosedRange<Double> = 2...8
+    static let maximumRange: ClosedRange<Double> = 30...180
+    static let defaultPause = 3.5
+    static let defaultMaximum = 90.0
+    static func safePause(_ value: Double) -> Double { value.isFinite ? min(pauseRange.upperBound, max(pauseRange.lowerBound, value)) : defaultPause }
+    static func safeMaximum(_ value: Double) -> Double { value.isFinite ? min(maximumRange.upperBound, max(maximumRange.lowerBound, value)) : defaultMaximum }
     static func pauseSeconds(_ defaults: UserDefaults = .standard) -> Double {
-        safePause((defaults.object(forKey: pauseKey) as? NSNumber)?.doubleValue ?? 3.5)
+        safePause((defaults.object(forKey: pauseKey) as? NSNumber)?.doubleValue ?? defaultPause)
     }
     static func maxRecordingSeconds(_ defaults: UserDefaults = .standard) -> Double {
-        safeMaximum((defaults.object(forKey: maxRecordingKey) as? NSNumber)?.doubleValue ?? 90)
+        safeMaximum((defaults.object(forKey: maxRecordingKey) as? NSNumber)?.doubleValue ?? defaultMaximum)
     }
 }
 
@@ -143,7 +147,7 @@ struct SpeechPauseDetector {
     private var speechDuration = 0.0
     private var silenceDuration = 0.0
     private var fired = false
-    init(pauseDuration: Double = 3.5) { self.pauseDuration = pauseDuration }
+    init(pauseDuration: Double = VoiceEndpointSettings.defaultPause) { self.pauseDuration = pauseDuration }
     mutating func observe(level: Float, duration: Double) -> Bool {
         guard !fired, level.isFinite, duration.isFinite, duration > 0 else { return false }
         if level >= 0.015 {
@@ -162,7 +166,7 @@ final class AudioPauseMonitor: @unchecked Sendable {
     private let lock = NSLock()
     private var detector: SpeechPauseDetector
     private let onSilence: @MainActor @Sendable () -> Void
-    init(pauseDuration: Double = 3.5, onSilence: @escaping @MainActor @Sendable () -> Void) {
+    init(pauseDuration: Double = VoiceEndpointSettings.defaultPause, onSilence: @escaping @MainActor @Sendable () -> Void) {
         detector = SpeechPauseDetector(pauseDuration: pauseDuration)
         self.onSilence = onSilence
     }
