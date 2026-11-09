@@ -334,6 +334,17 @@ final class OllamaProviderTests: XCTestCase {
         }
     }
 
+    func testCancelledRequestRemainsCancellation() async throws {
+        MockURLProtocol.handler = { _ in throw URLError(.cancelled) }
+        do {
+            _ = try await makeProvider().complete(messages: [], tools: [])
+            XCTFail("Expected cancellation")
+        } catch is CancellationError {
+        } catch {
+            XCTFail("Expected cancellation, got \(error)")
+        }
+    }
+
     /// A non-2xx HTTP status (other than the 404 model-missing case) is
     /// reported with both the code and the server body.
     func testCompleteMapsHTTPErrorStatus() async throws {
