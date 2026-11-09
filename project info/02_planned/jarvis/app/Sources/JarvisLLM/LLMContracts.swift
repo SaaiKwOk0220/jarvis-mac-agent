@@ -98,6 +98,8 @@ public struct LLMResponse: Codable, Equatable, Sendable {
 public enum LLMError: Error, Equatable, Sendable {
     /// Network-level failure: connection refused, DNS, timeout, offline.
     case unavailable(String)
+    /// Ollama could not be reached.
+    case ollamaUnavailable(String)
     /// The provider is reachable but does not serve the requested model.
     case modelNotFound(String)
     /// A 2xx response whose body could not be understood.
@@ -109,7 +111,8 @@ public enum LLMError: Error, Equatable, Sendable {
 extension LLMError: LocalizedError {
     public var errorDescription: String? {
         switch self {
-        case .unavailable(let detail): return "模型服务不可用。请检查 Ollama 或所选服务是否运行。\n\(detail)"
+        case .unavailable: return "模型服务不可用，请检查服务配置和网络后重试。"
+        case .ollamaUnavailable: return "无法连接 Ollama。请打开 Ollama 并确认服务正在运行，然后重试。"
         case .modelNotFound: return "未找到模型。默认模型可运行 ollama pull qwen3:4b-instruct 安装。"
         case .invalidResponse: return "模型返回了无法识别的响应。"
         case .httpStatus(let code, _): return "模型服务返回 HTTP \(code)。"
