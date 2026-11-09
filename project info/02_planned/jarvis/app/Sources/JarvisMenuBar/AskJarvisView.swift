@@ -82,6 +82,17 @@ final class AgentRunLog: ObservableObject {
     }
 }
 
+enum VoiceInterfaceSettings {
+    static func pause(_ value: Double) -> Double { value.isFinite ? min(8, max(2, value)) : 3.5 }
+    static func maximum(_ value: Double) -> Double { value.isFinite ? min(180, max(30, value)) : 90 }
+}
+
+enum VoiceInterfaceStatus {
+    static func label(recording: Bool, running: Bool, speaking: Bool) -> String {
+        if recording { return "聆听中" }; if running { return "任务进行中" }; if speaking { return "朗读中" }; return "待命"
+    }
+}
+
 /// "Ask Jarvis" window: type a goal, and the agent loop plans against Ollama
 /// and runs each tool call through `TaskService`.
 ///
@@ -115,24 +126,42 @@ struct AskJarvisView: View {
     @State private var activeSubmittedGoal: String?
     @State private var isVisible = false
     @State private var voiceWillAutoSubmit = false
+    @State private var followLatest = false
+    @AppStorage("jarvis.voice.pauseSeconds") private var pauseSeconds = 3.5
+    @AppStorage("jarvis.voice.maxRecordingSeconds") private var maxRecordingSeconds = 90.0
     @AppStorage(VoicePlaybackSettings.voiceKey) private var selectedVoiceID = ""
     @AppStorage(VoicePlaybackSettings.rateKey) private var voiceRate = 0.5
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Ask Jarvis").font(.title2).bold()
-            Text("Describe a goal. Jarvis plans tool calls and runs them through the same policy gate and approval flow as any other task.")
-                .font(.callout).foregroundStyle(.secondary)
+            HStack(spacing: 14) {
+                Image(systemName: "sparkles")
+                    .font(.title2).foregroundStyle(.cyan)
+                    .frame(width: 46, height: 46)
+                    .background(.cyan.opacity(0.12), in: Circle())
+                    .overlay(Circle().stroke(.cyan.opacity(0.55), lineWidth: 1))
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("JARVIS").font(.title2.weight(.semibold)).tracking(3)
+                    Text("你的本地助手").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Label(VoiceInterfaceStatus.label(recording: voice.isRecording, running: isRunning, speaking: voice.isSpeaking),
+                      systemImage: voice.isRecording ? "waveform" : "circle.fill")
+                    .font(.caption.weight(.medium)).foregroundStyle(.cyan)
+            }
+            .padding(.bottom, 4)
             Text("开启语音对话后，回答朗读结束会再次打开麦克风。可随时点击“结束语音对话”停止。取消自动运行后编辑并手动运行，仍会继续本次语音对话。")
                 .font(.caption).foregroundStyle(.secondary)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("Goal").font(.caption).foregroundStyle(.secondary)
+                Text("你的消息").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 TextEditor(text: Binding(get: { goal }, set: { value in
                     if value != goal { autoSubmit.cancel() }
                     goal = value
                 }))
                     .font(.system(.body, design: .monospaced))
+                    .accessibilityLabel("消息输入")
                     .frame(minHeight: 70)
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)))
                     .disabled(isRunning || voice.isRecording || voice.isStarting || voice.isFinishing)
@@ -176,7 +205,18 @@ struct AskJarvisView: View {
 
             progressLog
 
-            DisclosureGroup("语音音色与语速") {
+            DisclosureGroup("语音设置") {
+                HStack {
+                    Text("说完后的停顿")
+                    Slider(value: Binding(get: { VoiceInterfaceSettings.pause(pauseSeconds) }, set: { pauseSeconds = VoiceInterfaceSettings.pause($0) }), in: 2...8, step: 0.5).accessibilityLabel("说完后的停顿秒数")
+                    Text(String(format: "%.1f 秒", VoiceInterfaceSettings.pause(pauseSeconds))).monospacedDigit()
+                }
+                HStack {
+                    Text("单次录音上限")
+                    Slider(value: Binding(get: { VoiceInterfaceSettings.maximum(maxRecordingSeconds) }, set: { maxRecordingSeconds = VoiceInterfaceSettings.maximum($0) }), in: 30...180, step: 10).accessibilityLabel("单次录音上限秒数")
+                    Text("\(Int(VoiceInterfaceSettings.maximum(maxRecordingSeconds))) 秒").monospacedDigit()
+                }
+                Text("设置将在下次录音时生效。 ").font(.caption).foregroundStyle(.secondary)
                 Picker("中文音色", selection: $selectedVoiceID) {
                     Text("系统默认中文音色").tag("")
                     if !selectedVoiceID.isEmpty && !availableChineseVoices.contains(where: { $0.identifier == selectedVoiceID }) {
@@ -202,14 +242,16 @@ struct AskJarvisView: View {
                     voice.speak(lastAnswer)
                 }.disabled(lastAnswer.isEmpty || voice.isRecording || voice.isStarting || voice.isFinishing)
                 Button("停止朗读") { stopConversation() }.disabled(!voice.isSpeaking)
-                Button("Cancel") { cancel() }
+                Button("取消任务") { cancel() }
                     .disabled(!isRunning)
-                Button(isRunning ? "Running…" : "Run") { start(fromVoice: conversation.manualRunToken != nil) }
+                Button(isRunning ? "运行中…" : "发送") { start(fromVoice: conversation.manualRunToken != nil) }
                     .keyboardShortcut(.defaultAction)
                     .disabled(!canRun)
             }
         }
         .padding(24)
+        .background(Color(red: 0.035, green: 0.06, blue: 0.095))
+        .preferredColorScheme(.dark)
         .onAppear { isVisible = true }
         .onChange(of: voice.errorMessage) { _, message in
             if message != nil { conversation.stop(); autoSubmit.cancel() }
@@ -225,22 +267,30 @@ struct AskJarvisView: View {
 
     @ViewBuilder private var progressLog: some View {
         Divider()
-        Text("Progress").font(.headline)
+        Text("对话与任务").font(.headline)
+        Toggle("自动跟随最新消息", isOn: $followLatest).toggleStyle(.checkbox).font(.caption)
+        ScrollViewReader { proxy in
         ScrollView {
             VStack(alignment: .leading, spacing: 6) {
                 if log.entries.isEmpty {
-                    Text(isRunning ? "Waiting for the model…" : "No run yet.")
+                    Text(isRunning ? "正在思考…" : "说句话，或输入一条消息开始。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 ForEach(log.entries) { entry in
                     HStack(alignment: .top, spacing: 6) {
-                        Text("•").foregroundStyle(color(for: entry.kind))
+                        Image(systemName: entry.kind == .assistant ? "sparkles" : "circle.fill")
+                            .font(.caption2).foregroundStyle(color(for: entry.kind))
+                            .accessibilityHidden(true)
                         Text(entry.text)
-                            .font(.system(.caption, design: .monospaced))
+                            .font(.callout)
                             .foregroundStyle(color(for: entry.kind))
                             .textSelection(.enabled)
                         Spacer(minLength: 0)
                     }
+                    .id(entry.id)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.white.opacity(entry.kind == .assistant ? 0.08 : 0.035), in: RoundedRectangle(cornerRadius: 10))
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -248,6 +298,11 @@ struct AskJarvisView: View {
         }
         .frame(minHeight: 180)
         .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)))
+        .onChange(of: log.entries.count) { _, _ in
+            if followLatest, let last = log.entries.last { proxy.scrollTo(last.id, anchor: .bottom) }
+        }
+        Button("跳至最新消息") { if let last = log.entries.last { proxy.scrollTo(last.id, anchor: .bottom) } }.font(.caption)
+        }
     }
 
     private var canRun: Bool {

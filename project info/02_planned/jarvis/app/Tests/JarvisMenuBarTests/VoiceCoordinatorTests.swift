@@ -138,6 +138,23 @@ private struct ConversationTestWaiter: ApprovalWaiter {
         var noise = SpeechPauseDetector(pauseDuration: 3.5)
         for _ in 0..<200 { XCTAssertFalse(noise.observe(level: 0.03, duration: 0.1)) }
     }
+    func testVoiceInterfaceClampsCorruptPersistedSettings() {
+        XCTAssertEqual(VoiceInterfaceSettings.pause(.nan), 3.5)
+        XCTAssertEqual(VoiceInterfaceSettings.pause(.infinity), 3.5)
+        XCTAssertEqual(VoiceInterfaceSettings.pause(-1), 2)
+        XCTAssertEqual(VoiceInterfaceSettings.pause(9), 8)
+        XCTAssertEqual(VoiceInterfaceSettings.maximum(.nan), 90)
+        XCTAssertEqual(VoiceInterfaceSettings.maximum(-.infinity), 90)
+        XCTAssertEqual(VoiceInterfaceSettings.maximum(1), 30)
+        XCTAssertEqual(VoiceInterfaceSettings.maximum(999), 180)
+        XCTAssertEqual(VoiceInterfaceSettings.maximum(75), 75)
+    }
+
+    func testInterfaceStatusDoesNotMislabelRunningTaskAsThinking() {
+        XCTAssertEqual(VoiceInterfaceStatus.label(recording: false, running: true, speaking: false), "任务进行中")
+        XCTAssertEqual(VoiceInterfaceStatus.label(recording: true, running: false, speaking: false), "聆听中")
+    }
+
     func testDelayedCreateAfterCancellationCancelsCreatedTask() async throws {
         let started = expectation(description: "task creation started")
         let deferred = DeferredTaskCreation(onStart: { started.fulfill() })
