@@ -401,6 +401,18 @@ private struct ConversationTestWaiter: ApprovalWaiter {
         XCTAssertEqual(sent, ["测试"])
     }
 
+    func testTwoSuccessiveVoiceTurnsEachFinishOnSilence() async {
+        let backend = FakeVoiceBackend(); let voice = VoiceCoordinator(backend: backend)
+        var sent: [String] = []
+        for text in ["第一句", "第二句"] {
+            await voice.start(autoSubmit: { sent.append($0) })
+            backend.handler?(text)
+            backend.silenceHandler?()
+            backend.finishHandler?(true)
+        }
+        XCTAssertEqual(sent, ["第一句", "第二句"])
+    }
+
     func testDraftUpdatePrecedesAutoSubmitAndLateTextIsIgnored() async {
         let backend = FakeVoiceBackend(); let voice = VoiceCoordinator(backend: backend)
         var events: [String] = []
