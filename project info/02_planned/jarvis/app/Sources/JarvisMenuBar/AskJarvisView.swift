@@ -131,6 +131,8 @@ struct AskJarvisView: View {
     @State private var showVoiceDiagnostics = false
     @State private var voiceDiagnostic: VoiceDiagnosticSnapshot?
     @State private var voiceDiagnosticReason: String?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var haloExpanded = false
     @AppStorage(VoiceEndpointSettings.pauseKey) private var pauseSeconds = VoiceEndpointSettings.defaultPause
     @AppStorage(VoiceEndpointSettings.maxRecordingKey) private var maxRecordingSeconds = VoiceEndpointSettings.defaultMaximum
     @AppStorage(VoicePlaybackSettings.voiceKey) private var selectedVoiceID = ""
@@ -138,25 +140,38 @@ struct AskJarvisView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 14) {
-                Image(systemName: "sparkles")
-                    .font(.title2).foregroundStyle(.cyan)
-                    .frame(width: 46, height: 46)
-                    .background(.cyan.opacity(0.12), in: Circle())
-                    .overlay(Circle().stroke(.cyan.opacity(0.55), lineWidth: 1))
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("JARVIS").font(.title2.weight(.semibold)).tracking(3)
-                    Text("你的本地助手").font(.caption).foregroundStyle(.secondary)
+            HStack(alignment: .center, spacing: 22) {
+                ZStack {
+                    Circle().stroke(.cyan.opacity(0.15), lineWidth: 1).frame(width: 100, height: 100)
+                    Circle().trim(from: 0.03, to: 0.83).stroke(.cyan.opacity(0.65), style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                        .frame(width: 82, height: 82).rotationEffect(.degrees(haloExpanded ? 180 : 0))
+                    Circle().fill(.cyan.opacity(0.12)).frame(width: 58, height: 58)
+                    Image(systemName: voice.isRecording ? "waveform" : "sparkles")
+                        .font(.title).foregroundStyle(.cyan)
+                }
+                .accessibilityHidden(true)
+                .onAppear {
+                    if !reduceMotion {
+                        withAnimation(.linear(duration: 14).repeatForever(autoreverses: false)) { haloExpanded = true }
+                    }
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("JARVIS").font(.title.weight(.light)).tracking(6)
+                    Text("个人智能中控").font(.subheadline).foregroundStyle(.secondary)
+                    Label(VoiceInterfaceStatus.label(recording: voice.isRecording, running: isRunning, speaking: voice.isSpeaking),
+                          systemImage: voice.isRecording ? "waveform" : "circle.fill")
+                        .font(.caption.weight(.semibold)).foregroundStyle(voice.isRecording ? .red : .cyan)
                 }
                 Spacer()
-                Label(VoiceInterfaceStatus.label(recording: voice.isRecording, running: isRunning, speaking: voice.isSpeaking),
-                      systemImage: voice.isRecording ? "waveform" : "circle.fill")
-                    .font(.caption.weight(.medium)).foregroundStyle(.cyan)
             }
-            .padding(.bottom, 4)
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(16)
+            .background(RoundedRectangle(cornerRadius: 18).fill(.cyan.opacity(0.045)))
+            .overlay(RoundedRectangle(cornerRadius: 18).stroke(.cyan.opacity(0.2)))
             Text("开启语音对话后，回答朗读结束会再次打开麦克风。可随时点击“结束语音对话”停止。取消自动运行后编辑并手动运行，仍会继续本次语音对话。")
                 .font(.caption).foregroundStyle(.secondary)
+
+            progressLog
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("你的消息").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
@@ -220,8 +235,6 @@ struct AskJarvisView: View {
                     }.foregroundStyle(.orange).font(.caption)
                 }
             }
-
-            progressLog
 
             Toggle("显示语音诊断（仅此窗口）", isOn: $showVoiceDiagnostics).font(.caption)
             if showVoiceDiagnostics {
