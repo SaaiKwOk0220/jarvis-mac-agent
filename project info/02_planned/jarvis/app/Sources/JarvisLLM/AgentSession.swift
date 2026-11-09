@@ -52,6 +52,7 @@ public struct AgentSession: Sendable {
     /// `onEvent`; this session emits the same events plus nothing new.
     public func run(
         goal: String,
+        history: [LLMMessage] = [],
         onEvent: (@Sendable (AgentLoopEvent) -> Void)? = nil
     ) async throws -> AgentLoopResult {
         var messages: [LLMMessage] = [
@@ -63,6 +64,11 @@ public struct AgentSession: Sendable {
                 messages.append(LLMMessage(role: .system, content: context))
             }
         }
+        // Prior dialogue is ordinary conversation, never a tool execution or
+        // an authorization. Reject privileged roles and old tool-call payloads.
+        messages.append(contentsOf: history.suffix(10).filter {
+            ($0.role == .user || $0.role == .assistant) && $0.toolCalls == nil && $0.toolCallID == nil && !$0.content.isEmpty
+        })
         messages.append(LLMMessage(role: .user, content: goal))
 
         for _ in 0..<maxIterations {
