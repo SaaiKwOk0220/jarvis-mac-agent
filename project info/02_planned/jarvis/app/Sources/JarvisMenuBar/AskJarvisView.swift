@@ -101,6 +101,7 @@ struct AskJarvisView: View {
     /// needs the real instance rather than the HTTP client so it can hand it
     /// to `TaskServiceToolRunner`.
     let service: (any TaskServiceAPI)?
+    var voiceDraftStore: VoiceDraftStore? = nil
     /// Optional snapshot of the user's memory. When non-nil, the agent loop
     /// reads the current memory context as a second system prompt at the
     /// start of every run; when nil, the loop runs without that context.
@@ -113,6 +114,11 @@ struct AskJarvisView: View {
     @StateObject private var runLifecycle = VoiceRunLifecycle()
     @State private var lastAnswer = ""
     @State private var goal = ""
+    @State private var savedVoiceDrafts: [VoiceDraft] = []
+    @State private var activeVoiceDraftID: String?
+    @State private var restoredVoiceDraftID: String?
+    @State private var containsVoiceInput = false
+    @State private var draftStoreError: String?
     @State private var voiceDraftPrefix = VoiceDraftPrefix(draft: "")
     @State private var isRunning = false
     @State private var runningTaskID: UUID?
@@ -153,6 +159,10 @@ struct AskJarvisView: View {
                 Text("你的消息").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 TextEditor(text: Binding(get: { goal }, set: { value in
                     if value != goal { autoSubmit.cancel() }
+                    var origin = VoiceInputOrigin(containsVoice: containsVoiceInput, restoredID: restoredVoiceDraftID)
+                    origin.applyEdit(value)
+                    containsVoiceInput = origin.containsVoice
+                    restoredVoiceDraftID = origin.restoredID
                     goal = value
                 }))
                     .font(.system(.body, design: .monospaced))
@@ -180,6 +190,16 @@ struct AskJarvisView: View {
                      ? "说话停顿并识别完成后会自动运行；也可手动停止。"
                      : "已有草稿将保留，转写后请手动运行。")
                     .font(.caption).foregroundStyle(.secondary)
+                Text("提交的语音任务以明文保存在本机，成功后清除其记录，恢复的原记录需手动删除；未提交转写关闭窗口会丢失。删除不保证安全擦除。")
+                    .font(.caption)
+                ForEach(savedVoiceDrafts, id: \.id) { draft in
+                    HStack {
+                        Text(draft.text).lineLimit(2).textSelection(.enabled)
+                        Button("恢复") { if goal.isEmpty { goal = draft.text; restoredVoiceDraftID = draft.id } }.disabled(!goal.isEmpty || isRunning)
+                        Button("删除") { deleteVoiceDraft(draft.id); if restoredVoiceDraftID == draft.id { restoredVoiceDraftID = nil } }.disabled(isRunning)
+                    }
+                }
+                if let draftStoreError { Text(draftStoreError).foregroundStyle(.red) }
                 if let error = voice.errorMessage { Text(error).foregroundStyle(.red).font(.caption) }
                 if let pending = autoSubmit.pendingText {
                     VStack(alignment: .leading) {
@@ -251,7 +271,7 @@ struct AskJarvisView: View {
         .padding(24)
         .background(Color(red: 0.035, green: 0.06, blue: 0.095))
         .preferredColorScheme(.dark)
-        .onAppear { isVisible = true }
+        .onAppear { isVisible = true; refreshVoiceDrafts() }
         .onChange(of: voice.errorMessage) { _, message in
             if message != nil { conversation.stop(); autoSubmit.cancel() }
         }
@@ -344,7 +364,7 @@ struct AskJarvisView: View {
             let canAutoSubmit = VoiceDraftPrefix.allowsAutomaticSubmission(draft: goal, serviceAvailable: service != nil)
             voiceWillAutoSubmit = canAutoSubmit
             let update: @MainActor @Sendable (String) -> Void = { text in
-                if let updated = prefix.render(transcript: text) { goal = updated }
+                if let updated = prefix.render(transcript: text) { goal = updated; containsVoiceInput = true }
             }
             let submit: @MainActor @Sendable (String) -> Void = { text in
                 guard conversation.isCurrent(sessionToken), isVisible, !isRunning, service != nil else { return }
@@ -364,6 +384,18 @@ struct AskJarvisView: View {
         autoSubmit.cancel()
         let submittedGoal = goal.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !submittedGoal.isEmpty else { return }
+        if fromVoice || containsVoiceInput || restoredVoiceDraftID != nil {
+            guard let voiceDraftStore else { draftStoreError = "无法保存语音草稿，请检查本地存储。"; return }
+            do {
+                // Save the exact submitted text without deleting the restored original.
+                // Keep the restored original until the user explicitly deletes it.
+                let savedID = try voiceDraftStore.save(submittedGoal)
+                activeVoiceDraftID = savedID
+                restoredVoiceDraftID = nil
+                refreshVoiceDrafts()
+            }
+            catch { draftStoreError = "无法保存语音草稿，请检查本地存储。"; return }
+        }
         voice.stop()
         voice.stopSpeaking()
         lastAnswer = ""
@@ -372,6 +404,7 @@ struct AskJarvisView: View {
         if token == nil { log.reset() }
         log.append(AgentLogEntry(kind: .info, text: "你：\(submittedGoal)"))
         goal = ""
+        containsVoiceInput = false
         let runToken = runLifecycle.begin()
         activeRunToken = runToken
         activeSubmittedGoal = submittedGoal
@@ -380,6 +413,16 @@ struct AskJarvisView: View {
         run = Task {
             await execute(goal: submittedGoal, history: history, token: token, runToken: runToken, service: service)
         }
+    }
+
+    private func refreshVoiceDrafts() {
+        do { savedVoiceDrafts = try voiceDraftStore?.list() ?? [] }
+        catch { draftStoreError = "无法读取本地语音草稿。" }
+    }
+
+    private func deleteVoiceDraft(_ id: String) {
+        do { try voiceDraftStore?.delete(id); refreshVoiceDrafts() }
+        catch { draftStoreError = "无法删除本地语音草稿。" }
     }
 
     private func stopConversation() {
@@ -395,6 +438,7 @@ struct AskJarvisView: View {
         autoSubmit.cancel()
         if isVisible, goal.isEmpty, let submitted = activeSubmittedGoal { goal = submitted }
         runLifecycle.invalidate()
+        activeVoiceDraftID = nil
         if isVisible { log.append(AgentLogEntry(kind: .info, text: "已请求取消任务。")) }
         run?.cancel()
         if let runningTaskID {
@@ -436,7 +480,9 @@ struct AskJarvisView: View {
             }
         }
         let cancelled = Task.isCancelled
+        let completedDraftID = activeRunToken == runToken ? activeVoiceDraftID : nil
         if activeRunToken == runToken {
+            activeVoiceDraftID = nil
             isRunning = false
             runningTaskID = nil
             run = nil
@@ -444,10 +490,11 @@ struct AskJarvisView: View {
             activeSubmittedGoal = nil
         }
         guard let answer = spokenAnswer, !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !cancelled else {
-            if runLifecycle.mayRestore(token: runToken, visible: isVisible, currentDraft: goal) { goal = submitted }
+            if token == nil, runLifecycle.mayRestore(token: runToken, visible: isVisible, currentDraft: goal) { goal = submitted }
             if let token, conversation.isCurrent(token) { conversation.stop() }
             return
         }
+        if let id = completedDraftID { deleteVoiceDraft(id) }
         guard let token, conversation.isCurrent(token), isVisible else { return }
         conversation.record(user: submitted, answer: answer, token: token)
         voice.speak(answer) { completed in

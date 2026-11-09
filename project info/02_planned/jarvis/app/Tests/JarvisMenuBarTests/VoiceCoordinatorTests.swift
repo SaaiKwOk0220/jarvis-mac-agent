@@ -205,6 +205,25 @@ private struct ConversationTestWaiter: ApprovalWaiter {
         XCTAssertEqual(cancelled, [id])
         XCTAssertEqual(currentDraft, "", "A delayed old cancellation restored an old goal into the new session")
     }
+    func testClearingVoiceDraftResetsOriginBeforeTypingAgain() {
+        var origin = VoiceInputOrigin(containsVoice: true, restoredID: "old")
+        origin.applyEdit("")
+        origin.applyEdit("纯文字")
+        XCTAssertFalse(origin.containsVoice)
+        XCTAssertNil(origin.restoredID)
+    }
+
+    func testFailedVoiceDraftsRemainRecoverableWithoutBlockingNewTurn() {
+        var recovery = VoiceFailedDrafts()
+        recovery.save("第一句")
+        recovery.save("第二句")
+        XCTAssertEqual(recovery.items, ["第一句", "第二句"])
+        XCTAssertNil(recovery.takeIfDraftEmpty("正在编辑"))
+        XCTAssertEqual(recovery.items.count, 2)
+        XCTAssertEqual(recovery.takeIfDraftEmpty(""), "第一句")
+        XCTAssertEqual(recovery.items, ["第二句"])
+    }
+
     func testDelayedOldRunCannotRestoreIntoNewRunOrClosedWindow() {
         let lifecycle = VoiceRunLifecycle()
         let old = lifecycle.begin()
@@ -388,6 +407,18 @@ private struct ConversationTestWaiter: ApprovalWaiter {
         backend.finishHandler?(true)
         backend.finishHandler?(true)
         XCTAssertEqual(sent, ["测试"])
+    }
+
+    func testTwoSuccessiveVoiceTurnsEachFinishOnSilence() async {
+        let backend = FakeVoiceBackend(); let voice = VoiceCoordinator(backend: backend)
+        var sent: [String] = []
+        for text in ["第一句", "第二句"] {
+            await voice.start(autoSubmit: { sent.append($0) })
+            backend.handler?(text)
+            backend.silenceHandler?()
+            backend.finishHandler?(true)
+        }
+        XCTAssertEqual(sent, ["第一句", "第二句"])
     }
 
     func testDraftUpdatePrecedesAutoSubmitAndLateTextIsIgnored() async {

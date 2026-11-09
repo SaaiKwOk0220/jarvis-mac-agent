@@ -27,6 +27,16 @@ enum CancellableTaskCreation {
     }
 }
 
+/// Holds unsuccessful voice turns separately from the next editable message.
+struct VoiceFailedDrafts {
+    private(set) var items: [String] = []
+    mutating func save(_ text: String) { if !text.isEmpty { items.append(text) } }
+    mutating func takeIfDraftEmpty(_ draft: String) -> String? {
+        guard draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !items.isEmpty else { return nil }
+        return items.removeFirst()
+    }
+}
+
 /// Tracks a user-started conversation; stale callbacks cannot restart it.
 @MainActor final class VoiceConversationSession: ObservableObject {
     @Published private(set) var isActive = false
@@ -270,5 +280,17 @@ struct VoiceDraftPrefix {
         backend.stop()
         isRecording = false
         isFinishing = false
+    }
+}
+
+/// Tracks provenance when the user clears and replaces an editable message.
+struct VoiceInputOrigin {
+    var containsVoice: Bool
+    var restoredID: String?
+    mutating func applyEdit(_ value: String) {
+        if value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            containsVoice = false
+            restoredID = nil
+        }
     }
 }
