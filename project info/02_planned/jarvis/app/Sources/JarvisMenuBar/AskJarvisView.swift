@@ -101,6 +101,7 @@ struct AskJarvisView: View {
     /// needs the real instance rather than the HTTP client so it can hand it
     /// to `TaskServiceToolRunner`.
     let service: (any TaskServiceAPI)?
+    var voiceDraftStore: VoiceDraftStore? = nil
     /// Optional snapshot of the user's memory. When non-nil, the agent loop
     /// reads the current memory context as a second system prompt at the
     /// start of every run; when nil, the loop runs without that context.
@@ -113,7 +114,9 @@ struct AskJarvisView: View {
     @StateObject private var runLifecycle = VoiceRunLifecycle()
     @State private var lastAnswer = ""
     @State private var goal = ""
-    @State private var failedVoiceDrafts = VoiceFailedDrafts()
+    @State private var savedVoiceDrafts: [VoiceDraft] = []
+    @State private var activeVoiceDraftID: String?
+    @State private var draftStoreError: String?
     @State private var voiceDraftPrefix = VoiceDraftPrefix(draft: "")
     @State private var isRunning = false
     @State private var runningTaskID: UUID?
@@ -181,11 +184,13 @@ struct AskJarvisView: View {
                      ? "说话停顿并识别完成后会自动运行；也可手动停止。"
                      : "已有草稿将保留，转写后请手动运行。")
                     .font(.caption).foregroundStyle(.secondary)
-                if !failedVoiceDrafts.items.isEmpty {
-                    Button("恢复未完成的语音（\(failedVoiceDrafts.items.count)）") {
-                        if let saved = failedVoiceDrafts.takeIfDraftEmpty(goal) { goal = saved }
-                    }.disabled(!goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isRunning || voice.isRecording)
+                ForEach(savedVoiceDrafts, id: \.id) { draft in
+                    HStack {
+                        Button("恢复未完成的语音") { if goal.isEmpty { goal = draft.text } }.disabled(!goal.isEmpty || isRunning)
+                        Button("删除") { deleteVoiceDraft(draft.id) }
+                    }
                 }
+                if let draftStoreError { Text(draftStoreError).foregroundStyle(.red) }
                 if let error = voice.errorMessage { Text(error).foregroundStyle(.red).font(.caption) }
                 if let pending = autoSubmit.pendingText {
                     VStack(alignment: .leading) {
@@ -257,7 +262,7 @@ struct AskJarvisView: View {
         .padding(24)
         .background(Color(red: 0.035, green: 0.06, blue: 0.095))
         .preferredColorScheme(.dark)
-        .onAppear { isVisible = true }
+        .onAppear { isVisible = true; refreshVoiceDrafts() }
         .onChange(of: voice.errorMessage) { _, message in
             if message != nil { conversation.stop(); autoSubmit.cancel() }
         }
@@ -370,6 +375,11 @@ struct AskJarvisView: View {
         autoSubmit.cancel()
         let submittedGoal = goal.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !submittedGoal.isEmpty else { return }
+        if fromVoice {
+            guard let voiceDraftStore else { draftStoreError = "无法保存语音草稿，请检查本地存储。"; return }
+            do { activeVoiceDraftID = try voiceDraftStore.save(submittedGoal); refreshVoiceDrafts() }
+            catch { draftStoreError = "无法保存语音草稿，请检查本地存储。"; return }
+        }
         voice.stop()
         voice.stopSpeaking()
         lastAnswer = ""
@@ -386,6 +396,16 @@ struct AskJarvisView: View {
         run = Task {
             await execute(goal: submittedGoal, history: history, token: token, runToken: runToken, service: service)
         }
+    }
+
+    private func refreshVoiceDrafts() {
+        do { savedVoiceDrafts = try voiceDraftStore?.list() ?? [] }
+        catch { draftStoreError = "无法读取本地语音草稿。" }
+    }
+
+    private func deleteVoiceDraft(_ id: String) {
+        do { try voiceDraftStore?.delete(id); refreshVoiceDrafts() }
+        catch { draftStoreError = "无法删除本地语音草稿。" }
     }
 
     private func stopConversation() {
@@ -450,13 +470,12 @@ struct AskJarvisView: View {
             activeSubmittedGoal = nil
         }
         guard let answer = spokenAnswer, !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !cancelled else {
-            if runLifecycle.isCurrent(runToken), isVisible, token != nil {
-                failedVoiceDrafts.save(submitted)
-            } else if runLifecycle.mayRestore(token: runToken, visible: isVisible, currentDraft: goal) { goal = submitted }
+            if token == nil, runLifecycle.mayRestore(token: runToken, visible: isVisible, currentDraft: goal) { goal = submitted }
             if let token, conversation.isCurrent(token) { conversation.stop() }
             return
         }
         guard let token, conversation.isCurrent(token), isVisible else { return }
+        if let id = activeVoiceDraftID { deleteVoiceDraft(id); activeVoiceDraftID = nil }
         conversation.record(user: submitted, answer: answer, token: token)
         voice.speak(answer) { completed in
             conversation.playbackFinished(completed: completed, token: token, visible: isVisible,

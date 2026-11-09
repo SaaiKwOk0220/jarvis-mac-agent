@@ -72,6 +72,7 @@ struct JarvisMenuBarApp: App {
             AskJarvisView(
                 client: client,
                 service: runtime.taskService,
+                voiceDraftStore: runtime.voiceDraftStore,
                 memoryContextProvider: runtime.memoryContextProvider
             )
             .frame(minWidth: 520, minHeight: 460)
@@ -100,6 +101,7 @@ private final class Runtime {
     /// to `TaskServiceToolRunner`; both paths end up at this one service, so
     /// the agent loop is bound by the same policy gate as every other task.
     private(set) var taskService: (any TaskServiceAPI)?
+    private(set) var voiceDraftStore: VoiceDraftStore?
 
     /// The user's memory store, or `nil` when initialisation failed. The
     /// "Memory" window shows an unavailable message in that case, and the
@@ -113,6 +115,7 @@ private final class Runtime {
             try FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true)
             let database = try Database(path: appSupport.appendingPathComponent("jarvis.sqlite").path)
             try database.migrate()
+            self.voiceDraftStore = try VoiceDraftStore(database: database)
             self.memory = try SQLiteMemoryStore(database: database)
             let service = try TaskService(taskRepository: SQLiteTaskRepository(database: database),
                 auditRepository: SQLiteAuditRepository(database: database), policy: Policy(),
