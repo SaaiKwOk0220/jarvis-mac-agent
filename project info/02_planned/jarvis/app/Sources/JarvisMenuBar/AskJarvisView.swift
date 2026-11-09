@@ -139,6 +139,7 @@ struct AskJarvisView: View {
     @AppStorage(VoicePlaybackSettings.rateKey) private var voiceRate = 0.5
 
     var body: some View {
+        ScrollView {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .center, spacing: 22) {
                 ZStack {
@@ -289,6 +290,7 @@ struct AskJarvisView: View {
             }
         }
         .padding(24)
+        }
         .background(Color(red: 0.035, green: 0.06, blue: 0.095))
         .preferredColorScheme(.dark)
         .onAppear { isVisible = true; refreshVoiceDrafts() }
