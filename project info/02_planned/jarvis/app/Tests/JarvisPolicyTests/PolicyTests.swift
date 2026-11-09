@@ -53,6 +53,15 @@ final class PolicyTests: XCTestCase {
         XCTAssertEqual(Policy().evaluate(request, config: shellConfig), .deny(reason: "only pwd is currently supported"))
     }
 
+    func testBrowserOpenRequiresApprovalAndRejectsQuery() {
+        let valid = ToolRequest(taskID: taskID, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/docs", payload: "Open in browser")
+        XCTAssertEqual(Policy().evaluate(valid, config: config), .requireApproval(reason: "opens the initial URL; the browser may redirect, run scripts, and send network requests"))
+        let invalid = ToolRequest(taskID: taskID, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/?token=abc", payload: "Open in browser")
+        XCTAssertEqual(Policy().evaluate(invalid, config: config), .deny(reason: "invalid browser destination"))
+        let wrongEffect = ToolRequest(taskID: taskID, name: "browser_open", sideEffect: .read, target: "https://example.com/docs", payload: "Open in browser")
+        XCTAssertEqual(Policy().evaluate(wrongEffect, config: config), .deny(reason: "invalid browser destination"))
+    }
+
     func testLocalWriteAlwaysRequiresApproval() {
         let request = ToolRequest(taskID: taskID, name: "write_file", sideEffect: .localWrite,
                                   target: "/tmp/jarvis-project/out.txt", payload: "hello")

@@ -6,6 +6,79 @@ import JarvisPolicy
 @testable import JarvisService
 
 final class TaskServiceTests: XCTestCase {
+    func testBrowserOpenRequiresApprovalAndRedactsAuditPath() async throws {
+        let recorder = BrowserRecorder()
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in await recorder.record(url); return true }))
+        let task = try await fixture.service.createTask(title: "Open page")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private-path", payload: "Open in browser")
+        let decision = try await fixture.service.submit(request: request)
+        XCTAssertEqual(decision, .requireApproval(reason: "opens the initial URL; the browser may redirect, run scripts, and send network requests"))
+        let before = await recorder.count
+        XCTAssertEqual(before, 0)
+        let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        XCTAssertEqual(pending.first?.target, request.target)
+        let events = try fixture.audit.events(for: task.id)
+        XCTAssertTrue(events.allSatisfy { !$0.target.contains("private-path") && !$0.result.contains("private-path") })
+        try await fixture.service.approve(requestID: request.id, digest: request.payloadDigest)
+        try await fixture.waitForRequest(id: request.id, status: .completed)
+        let after = await recorder.count
+        XCTAssertEqual(after, 1)
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approve(requestID: request.id, digest: request.payloadDigest))
+        let afterRepeat = await recorder.count
+        XCTAssertEqual(afterRepeat, 1)
+        let completedEvents = try fixture.audit.events(for: task.id)
+        XCTAssertTrue(completedEvents.allSatisfy { !$0.target.contains("private-path") && !$0.result.contains("private-path") })
+    }
+
+    func testBrowserRejectAndCancellationNeverOpen() async throws {
+        for cancel in [false, true] {
+            let recorder = BrowserRecorder()
+            let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in await recorder.record(url); return true }))
+            let task = try await fixture.service.createTask(title: "Open")
+            let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/x", payload: "Open in browser")
+            _ = try await fixture.service.submit(request: request)
+            if cancel { try await fixture.service.cancel(taskID: task.id) }
+            else { try await fixture.service.reject(requestID: request.id) }
+            await XCTAssertThrowsErrorAsync(try await fixture.service.approve(requestID: request.id, digest: request.payloadDigest))
+            let count = await recorder.count
+            XCTAssertEqual(count, 0)
+        }
+    }
+
+    func testPendingBrowserOpenIsNotAutomaticallyReplayedAfterServiceRestart() async throws {
+        let recorder = BrowserRecorder()
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in await recorder.record(url); return true }))
+        let task = try await fixture.service.createTask(title: "Open")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/path", payload: "Open in browser")
+        _ = try await fixture.service.submit(request: request)
+        let restarted = try fixture.makeService()
+        try await Task.sleep(for: .milliseconds(100))
+        let pending = try await restarted.listPendingApprovalRequests(taskID: task.id)
+        XCTAssertEqual(pending.count, 1)
+        let count = await recorder.count
+        XCTAssertEqual(count, 0)
+    }
+
+    func testBrowserExecutorRevalidatesMalformedRequest() async throws {
+        let recorder = BrowserRecorder()
+        let executor = BrowserOpenExecutor(opener: { url in await recorder.record(url); return true })
+        let request = ToolRequest(taskID: UUID(), name: "browser_open", sideEffect: .externalSend, target: "https://example.com/?secret=x", payload: "Open in browser")
+        await XCTAssertThrowsErrorAsync(try await executor.execute(request))
+        let count = await recorder.count
+        XCTAssertEqual(count, 0)
+    }
+
+    func testBrowserOpenWithoutExecutorCannotFallBackToNoOp() async throws {
+        let fixture = try Fixture()
+        let task = try await fixture.service.createTask(title: "Open")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/path", payload: "Open in browser")
+        _ = try await fixture.service.submit(request: request)
+        try await fixture.service.approve(requestID: request.id, digest: request.payloadDigest)
+        try await fixture.waitForRequest(id: request.id, status: .failed)
+        XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .failed)
+        XCTAssertFalse(try fixture.audit.events(for: task.id).contains { $0.summary == "tool result" })
+    }
+
     func testLegalTransitionsPersistTheNewStatus() async throws {
         let fixture = try Fixture()
         let task = try await fixture.service.createTask(title: "Build release")
@@ -917,7 +990,7 @@ private final class Fixture: @unchecked Sendable {
     let approvals: SQLiteApprovalRepository
     let service: TaskService
 
-    init(executor: any ToolExecutor = NoOpToolExecutor(), terminal: TerminalToolExecutor? = nil, webFetch: WebFetchToolExecutor? = nil, screenshot: ScreenshotToolExecutor? = nil, accessibility: AccessibilityQueryToolExecutor? = nil) throws {
+    init(executor: any ToolExecutor = NoOpToolExecutor(), terminal: TerminalToolExecutor? = nil, webFetch: WebFetchToolExecutor? = nil, screenshot: ScreenshotToolExecutor? = nil, accessibility: AccessibilityQueryToolExecutor? = nil, browserOpen: BrowserOpenExecutor? = nil) throws {
         database = try Database(path: ":memory:")
         try database.migrate()
         tasks = SQLiteTaskRepository(database: database)
@@ -935,7 +1008,7 @@ private final class Fixture: @unchecked Sendable {
             taskRepository: tasks,
             auditRepository: audit,
             policy: Policy(),
-            policyConfig: policyConfig, executor: executor, terminal: terminal, webFetch: webFetch, screenshot: screenshot, accessibility: accessibility,
+            policyConfig: policyConfig, executor: executor, terminal: terminal, webFetch: webFetch, screenshot: screenshot, accessibility: accessibility, browserOpen: browserOpen,
             requestRepository: requests, approvalRepository: approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: database)
         )
     }
@@ -1042,4 +1115,9 @@ private func XCTAssertThrowsErrorAsync<T>(
     } catch {
         errorHandler(error)
     }
+}
+
+private actor BrowserRecorder {
+    private(set) var count = 0
+    func record(_ url: URL) { count += 1 }
 }
