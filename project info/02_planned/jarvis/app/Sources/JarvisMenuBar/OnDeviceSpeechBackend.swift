@@ -277,6 +277,15 @@ private final class SpeechCompletionStore: @unchecked Sendable {
 }
 
 enum VoicePlaybackSettings {
+    static let previewText = "你好，我是 Jarvis，很高兴为你服务。"
+    static func qualityLabel(_ quality: AVSpeechSynthesisVoiceQuality) -> String {
+        switch quality {
+        case .default: return "默认"
+        case .enhanced: return "增强"
+        case .premium: return "高品质"
+        @unknown default: return "未知音质"
+        }
+    }
     static let voiceKey = "jarvis.voice.identifier"
     static let rateKey = "jarvis.voice.rate"
     static func availableIdentifier(_ requested: String, in available: [String]) -> String? {

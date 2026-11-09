@@ -234,6 +234,11 @@ struct VoiceDraftPrefix {
         }
     }
 
+    func previewVoice(conversationActive: Bool, isRunning: Bool) {
+        guard !conversationActive && !isRunning && !isSpeaking else { return }
+        speak(VoicePlaybackSettings.previewText)
+    }
+
     func stopSpeaking() { speakerGeneration += 1; speaker?.stop(); isSpeaking = false }
 
     func confirmTranscript() { needsConfirmation = false }

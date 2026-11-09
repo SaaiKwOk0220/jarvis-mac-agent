@@ -73,6 +73,27 @@ private struct ConversationTestWaiter: ApprovalWaiter {
 }
 
 @MainActor final class VoiceCoordinatorTests: XCTestCase {
+    func testVoiceQualityLabelsAndPreviewDoesNotOpenMicrophone() async {
+        XCTAssertEqual(VoicePlaybackSettings.qualityLabel(.default), "默认")
+        XCTAssertEqual(VoicePlaybackSettings.qualityLabel(.enhanced), "增强")
+        XCTAssertEqual(VoicePlaybackSettings.qualityLabel(.premium), "高品质")
+        let backend = FakeVoiceBackend(); let speaker = FakeSpeaker()
+        let voice = VoiceCoordinator(backend: backend, speaker: speaker)
+        voice.previewVoice(conversationActive: false, isRunning: false)
+        XCTAssertEqual(speaker.spoken, [VoicePlaybackSettings.previewText])
+        XCTAssertTrue(voice.isSpeaking)
+        XCTAssertFalse(backend.microphoneRequested)
+        XCTAssertFalse(backend.started)
+        voice.stopSpeaking()
+        XCTAssertFalse(voice.isSpeaking)
+        voice.previewVoice(conversationActive: true, isRunning: false)
+        voice.previewVoice(conversationActive: false, isRunning: true)
+        XCTAssertEqual(speaker.spoken.count, 1)
+        await voice.start(onTranscript: { _ in })
+        voice.previewVoice(conversationActive: false, isRunning: false)
+        XCTAssertEqual(speaker.spoken.count, 1)
+    }
+
     func testLongSentencePauseDoesNotFinishAtOneAndHalfSeconds() {
         var detector = SpeechPauseDetector(pauseDuration: 3.5)
         XCTAssertFalse(detector.observe(level: 0.08, duration: 0.4))

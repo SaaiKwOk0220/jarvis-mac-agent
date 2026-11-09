@@ -218,7 +218,7 @@ struct AskJarvisView: View {
                         Text("原音色不可用，将使用默认音色").tag(selectedVoiceID)
                     }
                     ForEach(availableChineseVoices, id: \.identifier) { item in
-                        Text("\(item.name)（\(item.language)）").tag(item.identifier)
+                        Text("\(item.name)（\(item.language) · \(VoicePlaybackSettings.qualityLabel(item.quality))）").tag(item.identifier)
                     }
                 }
                 HStack {
@@ -226,7 +226,11 @@ struct AskJarvisView: View {
                     Slider(value: $voiceRate, in: 0.35...0.6, step: 0.01)
                     Text(String(format: "%.2f", voiceRate)).monospacedDigit()
                 }
-                Text("仅显示当前系统可用音色；不会下载音色或更改系统默认设置。")
+                Button("试听音色") {
+                    voice.previewVoice(conversationActive: conversation.isActive, isRunning: isRunning)
+                }
+                .disabled(conversation.isActive || isRunning || voice.isSpeaking || voice.isRecording || voice.isStarting || voice.isFinishing)
+                Text("仅显示当前系统可用音色；不会下载音色或更改系统默认设置。音质与自然程度取决于系统提供的声音。")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
