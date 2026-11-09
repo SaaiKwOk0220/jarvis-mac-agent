@@ -55,7 +55,7 @@ final class PolicyTests: XCTestCase {
 
     func testBrowserOpenRequiresApprovalAndRejectsQuery() {
         let valid = ToolRequest(taskID: taskID, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/", payload: "Open in browser")
-        XCTAssertEqual(Policy().evaluate(valid, config: config), .requireApproval(reason: "opens the initial origin only; afterward the browser may navigate anywhere, redirect, run scripts, and send network requests"))
+        XCTAssertEqual(Policy().evaluate(valid, config: config), .requireApproval(reason: "opens the initial origin only; afterward the browser may navigate anywhere, redirect, run scripts, and send network requests; the domain and your original task text may be stored locally"))
         let invalid = ToolRequest(taskID: taskID, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/?token=abc", payload: "Open in browser")
         XCTAssertEqual(Policy().evaluate(invalid, config: config), .deny(reason: "invalid browser destination"))
         let wrongEffect = ToolRequest(taskID: taskID, name: "browser_open", sideEffect: .read, target: "https://example.com/", payload: "Open in browser")

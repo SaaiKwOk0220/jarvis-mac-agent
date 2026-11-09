@@ -46,7 +46,7 @@ public struct Policy: PolicyEvaluator, Sendable {
                   BrowserOpenURL.validated(request.target) != nil else {
                 return .deny(reason: "invalid browser destination")
             }
-            return .requireApproval(reason: "opens the initial origin only; afterward the browser may navigate anywhere, redirect, run scripts, and send network requests")
+            return .requireApproval(reason: "opens the initial origin only; afterward the browser may navigate anywhere, redirect, run scripts, and send network requests; the domain and your original task text may be stored locally")
         }
         switch request.sideEffect {
         case .money:

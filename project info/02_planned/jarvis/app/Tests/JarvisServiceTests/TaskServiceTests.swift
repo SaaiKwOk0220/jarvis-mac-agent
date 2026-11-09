@@ -12,7 +12,7 @@ final class TaskServiceTests: XCTestCase {
         let task = try await fixture.service.createTask(title: "Open page")
         let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/", payload: "Open in browser")
         let decision = try await fixture.service.submit(request: request)
-        XCTAssertEqual(decision, .requireApproval(reason: "opens the initial origin only; afterward the browser may navigate anywhere, redirect, run scripts, and send network requests"))
+        XCTAssertEqual(decision, .requireApproval(reason: "opens the initial origin only; afterward the browser may navigate anywhere, redirect, run scripts, and send network requests; the domain and your original task text may be stored locally"))
         let before = await recorder.count
         XCTAssertEqual(before, 0)
         let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
@@ -92,6 +92,35 @@ final class TaskServiceTests: XCTestCase {
         let result = await task.value
         XCTAssertFalse(result)
         XCTAssertFalse(didOpen)
+    }
+
+    func testRejectedSensitiveURLDoesNotEnterRequestApprovalOrAuditStorage() async throws {
+        let fixture = try Fixture()
+        let task = try await fixture.service.createTask(title: "Open page")
+        let secret = "sensitive-path-token"
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/\(secret)?token=\(secret)", payload: "Open in browser")
+        let decision = try await fixture.service.submit(request: request)
+        XCTAssertEqual(decision, .deny(reason: "invalid browser destination"))
+        XCTAssertNil(try fixture.requests.fetch(id: request.id))
+        let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        XCTAssertTrue(pending.isEmpty)
+        XCTAssertTrue(try fixture.approvals.list().isEmpty)
+        let events = try fixture.audit.events(for: task.id)
+        XCTAssertFalse(events.isEmpty)
+        XCTAssertTrue(events.allSatisfy { !$0.target.contains(secret) && !$0.result.contains(secret) && !$0.summary.contains(secret) })
+    }
+
+    func testCancellationAfterBrowserOpenCannotUndoOpen() async throws {
+        let recorder = BrowserRecorder()
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in await recorder.record(url); return true }))
+        let task = try await fixture.service.createTask(title: "Open")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/", payload: "Open in browser")
+        _ = try await fixture.service.submit(request: request)
+        try await fixture.service.approve(requestID: request.id, digest: request.payloadDigest)
+        try await fixture.waitForRequest(id: request.id, status: .completed)
+        try await fixture.service.cancel(taskID: task.id)
+        let count = await recorder.count
+        XCTAssertEqual(count, 1)
     }
 
     func testLegalTransitionsPersistTheNewStatus() async throws {
