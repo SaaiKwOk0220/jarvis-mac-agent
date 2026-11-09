@@ -128,6 +128,9 @@ struct AskJarvisView: View {
     @State private var isVisible = false
     @State private var voiceWillAutoSubmit = false
     @State private var followLatest = false
+    @State private var showVoiceDiagnostics = false
+    @State private var voiceDiagnostic: VoiceDiagnosticSnapshot?
+    @State private var voiceDiagnosticReason: String?
     @AppStorage(VoiceEndpointSettings.pauseKey) private var pauseSeconds = VoiceEndpointSettings.defaultPause
     @AppStorage(VoiceEndpointSettings.maxRecordingKey) private var maxRecordingSeconds = VoiceEndpointSettings.defaultMaximum
     @AppStorage(VoicePlaybackSettings.voiceKey) private var selectedVoiceID = ""
@@ -220,6 +223,10 @@ struct AskJarvisView: View {
 
             progressLog
 
+            Toggle("显示语音诊断（仅此窗口）", isOn: $showVoiceDiagnostics).font(.caption)
+            if showVoiceDiagnostics {
+                Text("格式：\(voiceDiagnostic?.formatSupported.map { $0 ? "支持" : "不支持" } ?? "未知") · 超过阈值：\(voiceDiagnostic?.aboveThreshold.map { $0 ? "是" : "否" } ?? "未知") · 静音：\(voiceDiagnostic?.silenceSeconds ?? 0, specifier: "%.1f") 秒 · 结束：\(voiceDiagnosticReason ?? "尚未结束")").font(.caption)
+            }
             DisclosureGroup("语音设置") {
                 HStack {
                     Text("说完后的停顿")
@@ -275,7 +282,16 @@ struct AskJarvisView: View {
         .onChange(of: voice.errorMessage) { _, message in
             if message != nil { conversation.stop(); autoSubmit.cancel() }
         }
-        .onDisappear { isVisible = false; runLifecycle.invalidate(); stopConversation() }
+        .task(id: showVoiceDiagnostics) {
+            voice.setDiagnosticsEnabled(showVoiceDiagnostics)
+            guard showVoiceDiagnostics else { voiceDiagnostic = nil; voiceDiagnosticReason = nil; return }
+            while !Task.isCancelled {
+                voiceDiagnostic = voice.diagnosticSnapshot()
+                voiceDiagnosticReason = voice.diagnosticReason
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+        .onDisappear { isVisible = false; runLifecycle.invalidate(); stopConversation(); voice.clearDiagnostics(); voiceDiagnostic = nil; voiceDiagnosticReason = nil; showVoiceDiagnostics = false }
     }
 
     private var availableChineseVoices: [AVSpeechSynthesisVoice] {

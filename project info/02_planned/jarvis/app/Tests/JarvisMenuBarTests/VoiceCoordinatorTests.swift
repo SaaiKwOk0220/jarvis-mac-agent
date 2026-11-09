@@ -853,3 +853,36 @@ private struct ConversationTestWaiter: ApprovalWaiter {
         XCTAssertFalse(voice.isRecording)
     }
 }
+
+extension VoiceCoordinatorTests {
+    func testDiagnosticsAreIsolatedPerMonitorAndCleared() {
+        let first = AudioPauseMonitor(onSilence: {})
+        let second = AudioPauseMonitor(onSilence: {})
+        first.setDiagnosticsEnabled(true)
+        second.setDiagnosticsEnabled(true)
+        first.recordDiagnostic(formatSupported: true, aboveThreshold: true, duration: 0.5)
+        first.recordDiagnostic(formatSupported: true, aboveThreshold: false, duration: 0.25)
+        XCTAssertEqual(first.diagnosticSnapshot().silenceSeconds, 0.25, accuracy: 0.001)
+        XCTAssertEqual(second.diagnosticSnapshot().silenceSeconds, 0, accuracy: 0.001)
+        first.clearDiagnostics()
+        XCTAssertNil(first.diagnosticSnapshot().formatSupported)
+    }
+}
+
+extension VoiceCoordinatorTests {
+    func testConcurrentDiagnosticSnapshotsRemainSessionLocal() {
+        let first = AudioPauseMonitor(onSilence: {})
+        let second = AudioPauseMonitor(onSilence: {})
+        first.setDiagnosticsEnabled(true)
+        second.setDiagnosticsEnabled(true)
+        DispatchQueue.concurrentPerform(iterations: 1000) { index in
+            let monitor = index.isMultiple(of: 2) ? first : second
+            monitor.recordDiagnostic(formatSupported: true, aboveThreshold: index.isMultiple(of: 2), duration: 0.01)
+            _ = monitor.diagnosticSnapshot()
+        }
+        XCTAssertEqual(first.diagnosticSnapshot().aboveThreshold, true)
+        XCTAssertEqual(second.diagnosticSnapshot().aboveThreshold, false)
+        XCTAssertEqual(first.diagnosticSnapshot().silenceSeconds, 0, accuracy: 0.001)
+        XCTAssertEqual(second.diagnosticSnapshot().silenceSeconds, 5, accuracy: 0.001)
+    }
+}

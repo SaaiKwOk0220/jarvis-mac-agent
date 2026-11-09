@@ -161,10 +161,31 @@ struct SpeechPauseDetector {
     }
 }
 
+struct VoiceDiagnosticSnapshot: Equatable {
+    var formatSupported: Bool?
+    var aboveThreshold: Bool?
+    var silenceSeconds: Double = 0
+}
+
 /// Consumes buffer samples synchronously on the tap; it never retains a buffer.
 final class AudioPauseMonitor: @unchecked Sendable {
     private let lock = NSLock()
     private var detector: SpeechPauseDetector
+    private var diagnostic = VoiceDiagnosticSnapshot()
+    private var diagnosticsEnabled = false
+    func setDiagnosticsEnabled(_ enabled: Bool) { lock.lock(); defer { lock.unlock() }; diagnosticsEnabled = enabled; if !enabled { diagnostic = VoiceDiagnosticSnapshot() } }
+    func diagnosticSnapshot() -> VoiceDiagnosticSnapshot { lock.lock(); defer { lock.unlock() }; return diagnostic }
+    func clearDiagnostics() { lock.lock(); defer { lock.unlock() }; diagnostic = VoiceDiagnosticSnapshot() }
+    func recordDiagnostic(formatSupported: Bool, aboveThreshold: Bool, duration: Double) {
+        lock.lock(); defer { lock.unlock() }
+        updateDiagnostic(formatSupported: formatSupported, aboveThreshold: aboveThreshold, duration: duration)
+    }
+    private func updateDiagnostic(formatSupported: Bool, aboveThreshold: Bool, duration: Double) {
+        guard diagnosticsEnabled else { return }
+        diagnostic.formatSupported = formatSupported
+        diagnostic.aboveThreshold = formatSupported ? aboveThreshold : nil
+        diagnostic.silenceSeconds = formatSupported && !aboveThreshold && duration.isFinite && duration > 0 ? diagnostic.silenceSeconds + duration : 0
+    }
     private let onSilence: @MainActor @Sendable () -> Void
     init(pauseDuration: Double = VoiceEndpointSettings.defaultPause, onSilence: @escaping @MainActor @Sendable () -> Void) {
         detector = SpeechPauseDetector(pauseDuration: pauseDuration)
@@ -177,7 +198,7 @@ final class AudioPauseMonitor: @unchecked Sendable {
         guard buffer.format.commonFormat == .pcmFormatFloat32,
               channelCount > 0, channelCount <= 8,
               let channels = buffer.floatChannelData, buffer.frameLength > 0,
-              buffer.format.sampleRate.isFinite, buffer.format.sampleRate > 0, buffer.stride > 0 else { return }
+              buffer.format.sampleRate.isFinite, buffer.format.sampleRate > 0, buffer.stride > 0 else { updateDiagnostic(formatSupported: false, aboveThreshold: false, duration: 0); return }
         let count = Int(buffer.frameLength)
         // Decimate for a bounded tap cost (at most 256 samples/channel for
         // the configured 1024-frame tap). Sampling can miss or overestimate
@@ -195,7 +216,9 @@ final class AudioPauseMonitor: @unchecked Sendable {
             guard level.isFinite else { return }
             maxLevel = max(maxLevel, level)
         }
-        if detector.observe(level: maxLevel, duration: Double(count) / buffer.format.sampleRate) {
+        let duration = Double(count) / buffer.format.sampleRate
+        updateDiagnostic(formatSupported: true, aboveThreshold: maxLevel >= 0.015, duration: duration)
+        if detector.observe(level: maxLevel, duration: duration) {
             DispatchQueue.main.async { [onSilence] in onSilence() }
         }
     }
@@ -208,6 +231,11 @@ final class AudioPauseMonitor: @unchecked Sendable {
     private var audioGate: AudioRequestGate?
     private var recognitionTask: SFSpeechRecognitionTask?
     private var hasTap = false
+    private var monitor: AudioPauseMonitor?
+    private var diagnosticsEnabled = false
+    func setDiagnosticsEnabled(_ enabled: Bool) { diagnosticsEnabled = enabled; monitor?.setDiagnosticsEnabled(enabled) }
+    func diagnosticSnapshot() -> VoiceDiagnosticSnapshot? { monitor?.diagnosticSnapshot() }
+    func clearDiagnostics() { setDiagnosticsEnabled(false); monitor?.clearDiagnostics(); monitor = nil }
 
     var isOnDeviceSupported: Bool { recognizer?.isAvailable == true && recognizer?.supportsOnDeviceRecognition == true }
 
@@ -240,7 +268,10 @@ final class AudioPauseMonitor: @unchecked Sendable {
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else { throw SpeechError.unavailable }
-        input.installTap(onBus: 0, bufferSize: 1024, format: format, block: SpeechCallbackBridge.tap(gate: gate, monitor: AudioPauseMonitor(pauseDuration: VoiceEndpointSettings.pauseSeconds(), onSilence: onSilence)))
+        let monitor = AudioPauseMonitor(pauseDuration: VoiceEndpointSettings.pauseSeconds(), onSilence: onSilence)
+        self.monitor = monitor
+        monitor.setDiagnosticsEnabled(diagnosticsEnabled)
+        input.installTap(onBus: 0, bufferSize: 1024, format: format, block: SpeechCallbackBridge.tap(gate: gate, monitor: monitor))
         hasTap = true
         recognitionTask = recognizer.recognitionTask(with: request, resultHandler: SpeechCallbackBridge.recognition(onText: onText, onFailure: onFailure, onFinish: onFinish))
         engine.prepare()
