@@ -54,11 +54,11 @@ final class PolicyTests: XCTestCase {
     }
 
     func testBrowserOpenRequiresApprovalAndRejectsQuery() {
-        let valid = ToolRequest(taskID: taskID, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/docs", payload: "Open in browser")
-        XCTAssertEqual(Policy().evaluate(valid, config: config), .requireApproval(reason: "opens the initial URL; the browser may redirect, run scripts, and send network requests"))
+        let valid = ToolRequest(taskID: taskID, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/", payload: "Open in browser")
+        XCTAssertEqual(Policy().evaluate(valid, config: config), .requireApproval(reason: "opens the initial origin only; afterward the browser may navigate anywhere, redirect, run scripts, and send network requests"))
         let invalid = ToolRequest(taskID: taskID, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/?token=abc", payload: "Open in browser")
         XCTAssertEqual(Policy().evaluate(invalid, config: config), .deny(reason: "invalid browser destination"))
-        let wrongEffect = ToolRequest(taskID: taskID, name: "browser_open", sideEffect: .read, target: "https://example.com/docs", payload: "Open in browser")
+        let wrongEffect = ToolRequest(taskID: taskID, name: "browser_open", sideEffect: .read, target: "https://example.com/", payload: "Open in browser")
         XCTAssertEqual(Policy().evaluate(wrongEffect, config: config), .deny(reason: "invalid browser destination"))
     }
 

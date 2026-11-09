@@ -66,8 +66,8 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
         [
             LLMTool(
                 name: "browser_open",
-                description: "Open a user-requested HTTPS page in the default browser after approval. Approval covers opening the initial URL only; the browser may redirect, run scripts, or send network requests afterward. Does not read page contents. Query strings, fragments, and credentials are unsupported.",
-                parameters: ["url": LLMToolParameter(type: "string", description: "HTTPS URL without query, fragment, or credentials.")]
+                description: "Open a user-requested HTTPS page in the default browser after approval. Approval covers opening the initial URL only; the browser may redirect, run scripts, or send network requests afterward. Does not read page contents. Only an origin is supported; paths, query strings, fragments, and credentials are rejected.",
+                parameters: ["url": LLMToolParameter(type: "string", description: "HTTPS origin only, without a path, query, fragment, or credentials.")]
             ),
             LLMTool(
                 name: "shell",

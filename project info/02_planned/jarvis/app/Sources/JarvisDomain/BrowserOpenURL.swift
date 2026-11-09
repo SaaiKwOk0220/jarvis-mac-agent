@@ -6,6 +6,7 @@ public enum BrowserOpenURL {
         guard !value.isEmpty, value.unicodeScalars.allSatisfy({ $0.isASCII && !$0.properties.isWhitespace && !CharacterSet.controlCharacters.contains($0) }),
               let parts = URLComponents(string: value), parts.scheme == "https",
               parts.user == nil, parts.password == nil, parts.query == nil, parts.fragment == nil,
+              parts.percentEncodedPath.isEmpty || parts.percentEncodedPath == "/",
               let host = parts.host, !host.isEmpty, host.contains("."),
               !host.lowercased().hasSuffix(".local"), !host.lowercased().hasSuffix(".localhost"),
               host.lowercased() != "localhost", !host.hasSuffix("."),

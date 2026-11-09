@@ -10,9 +10,9 @@ final class TaskServiceTests: XCTestCase {
         let recorder = BrowserRecorder()
         let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in await recorder.record(url); return true }))
         let task = try await fixture.service.createTask(title: "Open page")
-        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private-path", payload: "Open in browser")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/", payload: "Open in browser")
         let decision = try await fixture.service.submit(request: request)
-        XCTAssertEqual(decision, .requireApproval(reason: "opens the initial URL; the browser may redirect, run scripts, and send network requests"))
+        XCTAssertEqual(decision, .requireApproval(reason: "opens the initial origin only; afterward the browser may navigate anywhere, redirect, run scripts, and send network requests"))
         let before = await recorder.count
         XCTAssertEqual(before, 0)
         let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
@@ -35,7 +35,7 @@ final class TaskServiceTests: XCTestCase {
             let recorder = BrowserRecorder()
             let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in await recorder.record(url); return true }))
             let task = try await fixture.service.createTask(title: "Open")
-            let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/x", payload: "Open in browser")
+            let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/", payload: "Open in browser")
             _ = try await fixture.service.submit(request: request)
             if cancel { try await fixture.service.cancel(taskID: task.id) }
             else { try await fixture.service.reject(requestID: request.id) }
@@ -49,7 +49,7 @@ final class TaskServiceTests: XCTestCase {
         let recorder = BrowserRecorder()
         let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in await recorder.record(url); return true }))
         let task = try await fixture.service.createTask(title: "Open")
-        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/path", payload: "Open in browser")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/", payload: "Open in browser")
         _ = try await fixture.service.submit(request: request)
         let restarted = try fixture.makeService()
         try await Task.sleep(for: .milliseconds(100))
@@ -71,12 +71,27 @@ final class TaskServiceTests: XCTestCase {
     func testBrowserOpenWithoutExecutorCannotFallBackToNoOp() async throws {
         let fixture = try Fixture()
         let task = try await fixture.service.createTask(title: "Open")
-        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/path", payload: "Open in browser")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/", payload: "Open in browser")
         _ = try await fixture.service.submit(request: request)
         try await fixture.service.approve(requestID: request.id, digest: request.payloadDigest)
         try await fixture.waitForRequest(id: request.id, status: .failed)
         XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .failed)
         XCTAssertFalse(try fixture.audit.events(for: task.id).contains { $0.summary == "tool result" })
+    }
+
+    @MainActor
+    func testCancelledQueuedMainActorOpenDoesNotCallSystemOpener() async {
+        var didOpen = false
+        let task = Task { @MainActor in
+            BrowserOpenExecutor.openOnMainActorIfNotCancelled(URL(string: "https://example.com/")!) { _ in
+                didOpen = true
+                return true
+            }
+        }
+        task.cancel()
+        let result = await task.value
+        XCTAssertFalse(result)
+        XCTAssertFalse(didOpen)
     }
 
     func testLegalTransitionsPersistTheNewStatus() async throws {

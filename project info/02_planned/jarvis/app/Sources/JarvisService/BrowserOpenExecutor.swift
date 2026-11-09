@@ -8,9 +8,21 @@ public enum BrowserOpenError: Error { case invalidRequest, openFailed, unavailab
 public struct BrowserOpenExecutor: ToolExecutor, Sendable {
     private let opener: @Sendable (URL) async -> Bool
 
-    public init(opener: @escaping @Sendable (URL) async -> Bool = { url in
-        await MainActor.run { NSWorkspace.shared.open(url) }
-    }) { self.opener = opener }
+    public init() {
+        self.opener = { url in
+            await MainActor.run {
+                BrowserOpenExecutor.openOnMainActorIfNotCancelled(url) { NSWorkspace.shared.open($0) }
+            }
+        }
+    }
+
+    public init(opener: @escaping @Sendable (URL) async -> Bool) { self.opener = opener }
+
+    @MainActor
+    static func openOnMainActorIfNotCancelled(_ url: URL, opener: (URL) -> Bool) -> Bool {
+        guard !Task.isCancelled else { return false }
+        return opener(url)
+    }
 
     public func execute(_ request: ToolRequest) async throws -> ToolResult {
         guard request.name == "browser_open", request.sideEffect == .externalSend,
