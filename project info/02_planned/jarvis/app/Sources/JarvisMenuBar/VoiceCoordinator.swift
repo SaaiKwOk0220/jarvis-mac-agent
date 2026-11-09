@@ -282,3 +282,15 @@ struct VoiceDraftPrefix {
         isFinishing = false
     }
 }
+
+/// Tracks provenance when the user clears and replaces an editable message.
+struct VoiceInputOrigin {
+    var containsVoice: Bool
+    var restoredID: String?
+    mutating func applyEdit(_ value: String) {
+        if value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            containsVoice = false
+            restoredID = nil
+        }
+    }
+}
