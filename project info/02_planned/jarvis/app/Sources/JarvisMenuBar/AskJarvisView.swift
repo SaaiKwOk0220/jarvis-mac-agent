@@ -187,7 +187,7 @@ struct AskJarvisView: View {
                 ForEach(savedVoiceDrafts, id: \.id) { draft in
                     HStack {
                         Button("恢复未完成的语音") { if goal.isEmpty { goal = draft.text } }.disabled(!goal.isEmpty || isRunning)
-                        Button("删除") { deleteVoiceDraft(draft.id) }
+                        Button("删除") { deleteVoiceDraft(draft.id) }.disabled(isRunning)
                     }
                 }
                 if let draftStoreError { Text(draftStoreError).foregroundStyle(.red) }
