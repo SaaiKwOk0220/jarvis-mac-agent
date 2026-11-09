@@ -205,6 +205,17 @@ private struct ConversationTestWaiter: ApprovalWaiter {
         XCTAssertEqual(cancelled, [id])
         XCTAssertEqual(currentDraft, "", "A delayed old cancellation restored an old goal into the new session")
     }
+    func testFailedVoiceDraftsRemainRecoverableWithoutBlockingNewTurn() {
+        var recovery = VoiceFailedDrafts()
+        recovery.save("第一句")
+        recovery.save("第二句")
+        XCTAssertEqual(recovery.items, ["第一句", "第二句"])
+        XCTAssertNil(recovery.takeIfDraftEmpty("正在编辑"))
+        XCTAssertEqual(recovery.items.count, 2)
+        XCTAssertEqual(recovery.takeIfDraftEmpty(""), "第一句")
+        XCTAssertEqual(recovery.items, ["第二句"])
+    }
+
     func testDelayedOldRunCannotRestoreIntoNewRunOrClosedWindow() {
         let lifecycle = VoiceRunLifecycle()
         let old = lifecycle.begin()

@@ -113,6 +113,7 @@ struct AskJarvisView: View {
     @StateObject private var runLifecycle = VoiceRunLifecycle()
     @State private var lastAnswer = ""
     @State private var goal = ""
+    @State private var failedVoiceDrafts = VoiceFailedDrafts()
     @State private var voiceDraftPrefix = VoiceDraftPrefix(draft: "")
     @State private var isRunning = false
     @State private var runningTaskID: UUID?
@@ -180,6 +181,11 @@ struct AskJarvisView: View {
                      ? "说话停顿并识别完成后会自动运行；也可手动停止。"
                      : "已有草稿将保留，转写后请手动运行。")
                     .font(.caption).foregroundStyle(.secondary)
+                if !failedVoiceDrafts.items.isEmpty {
+                    Button("恢复未完成的语音（\(failedVoiceDrafts.items.count)）") {
+                        if let saved = failedVoiceDrafts.takeIfDraftEmpty(goal) { goal = saved }
+                    }.disabled(!goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isRunning || voice.isRecording)
+                }
                 if let error = voice.errorMessage { Text(error).foregroundStyle(.red).font(.caption) }
                 if let pending = autoSubmit.pendingText {
                     VStack(alignment: .leading) {
@@ -444,7 +450,9 @@ struct AskJarvisView: View {
             activeSubmittedGoal = nil
         }
         guard let answer = spokenAnswer, !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !cancelled else {
-            if runLifecycle.mayRestore(token: runToken, visible: isVisible, currentDraft: goal) { goal = submitted }
+            if runLifecycle.isCurrent(runToken), isVisible, token != nil {
+                failedVoiceDrafts.save(submitted)
+            } else if runLifecycle.mayRestore(token: runToken, visible: isVisible, currentDraft: goal) { goal = submitted }
             if let token, conversation.isCurrent(token) { conversation.stop() }
             return
         }
