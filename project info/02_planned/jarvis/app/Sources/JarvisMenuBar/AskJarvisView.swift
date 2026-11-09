@@ -159,6 +159,10 @@ struct AskJarvisView: View {
                 Text("你的消息").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 TextEditor(text: Binding(get: { goal }, set: { value in
                     if value != goal { autoSubmit.cancel() }
+                    var origin = VoiceInputOrigin(containsVoice: containsVoiceInput, restoredID: restoredVoiceDraftID)
+                    origin.applyEdit(value)
+                    containsVoiceInput = origin.containsVoice
+                    restoredVoiceDraftID = origin.restoredID
                     goal = value
                 }))
                     .font(.system(.body, design: .monospaced))
@@ -186,7 +190,7 @@ struct AskJarvisView: View {
                      ? "说话停顿并识别完成后会自动运行；也可手动停止。"
                      : "已有草稿将保留，转写后请手动运行。")
                     .font(.caption).foregroundStyle(.secondary)
-                Text("语音任务会以明文保存在本机，新任务成功后清除其记录，恢复的原记录需手动删除；删除不保证安全擦除。")
+                Text("提交的语音任务以明文保存在本机，成功后清除其记录，恢复的原记录需手动删除；未提交转写关闭窗口会丢失。删除不保证安全擦除。")
                     .font(.caption)
                 ForEach(savedVoiceDrafts, id: \.id) { draft in
                     HStack {
@@ -268,12 +272,6 @@ struct AskJarvisView: View {
         .background(Color(red: 0.035, green: 0.06, blue: 0.095))
         .preferredColorScheme(.dark)
         .onAppear { isVisible = true; refreshVoiceDrafts() }
-        .onChange(of: goal) { _, value in
-            if value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                containsVoiceInput = false
-                restoredVoiceDraftID = nil
-            }
-        }
         .onChange(of: voice.errorMessage) { _, message in
             if message != nil { conversation.stop(); autoSubmit.cancel() }
         }
@@ -389,7 +387,7 @@ struct AskJarvisView: View {
         if fromVoice || containsVoiceInput || restoredVoiceDraftID != nil {
             guard let voiceDraftStore else { draftStoreError = "无法保存语音草稿，请检查本地存储。"; return }
             do {
-                // Save the exact submitted text first, then remove any restored predecessor.
+                // Save the exact submitted text without deleting the restored original.
                 // Keep the restored original until the user explicitly deletes it.
                 let savedID = try voiceDraftStore.save(submittedGoal)
                 activeVoiceDraftID = savedID
