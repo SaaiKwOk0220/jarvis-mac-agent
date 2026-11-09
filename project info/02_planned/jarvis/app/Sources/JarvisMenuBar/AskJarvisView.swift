@@ -117,6 +117,7 @@ struct AskJarvisView: View {
     @State private var savedVoiceDrafts: [VoiceDraft] = []
     @State private var activeVoiceDraftID: String?
     @State private var restoredVoiceDraftID: String?
+    @State private var containsVoiceInput = false
     @State private var draftStoreError: String?
     @State private var voiceDraftPrefix = VoiceDraftPrefix(draft: "")
     @State private var isRunning = false
@@ -359,7 +360,7 @@ struct AskJarvisView: View {
             let canAutoSubmit = VoiceDraftPrefix.allowsAutomaticSubmission(draft: goal, serviceAvailable: service != nil)
             voiceWillAutoSubmit = canAutoSubmit
             let update: @MainActor @Sendable (String) -> Void = { text in
-                if let updated = prefix.render(transcript: text) { goal = updated }
+                if let updated = prefix.render(transcript: text) { goal = updated; containsVoiceInput = true }
             }
             let submit: @MainActor @Sendable (String) -> Void = { text in
                 guard conversation.isCurrent(sessionToken), isVisible, !isRunning, service != nil else { return }
@@ -379,12 +380,15 @@ struct AskJarvisView: View {
         autoSubmit.cancel()
         let submittedGoal = goal.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !submittedGoal.isEmpty else { return }
-        if fromVoice || restoredVoiceDraftID != nil {
+        if fromVoice || containsVoiceInput || restoredVoiceDraftID != nil {
             guard let voiceDraftStore else { draftStoreError = "无法保存语音草稿，请检查本地存储。"; return }
             do {
                 // Save the exact submitted text first, then remove any restored predecessor.
-                activeVoiceDraftID = try voiceDraftStore.save(submittedGoal)
-                if let old = restoredVoiceDraftID { try voiceDraftStore.delete(old); restoredVoiceDraftID = nil }
+                let savedID: String
+                if let old = restoredVoiceDraftID { savedID = try voiceDraftStore.replace(old, with: submittedGoal) }
+                else { savedID = try voiceDraftStore.save(submittedGoal) }
+                activeVoiceDraftID = savedID
+                restoredVoiceDraftID = nil
                 refreshVoiceDrafts()
             }
             catch { draftStoreError = "无法保存语音草稿，请检查本地存储。"; return }
@@ -397,6 +401,7 @@ struct AskJarvisView: View {
         if token == nil { log.reset() }
         log.append(AgentLogEntry(kind: .info, text: "你：\(submittedGoal)"))
         goal = ""
+        containsVoiceInput = false
         let runToken = runLifecycle.begin()
         activeRunToken = runToken
         activeSubmittedGoal = submittedGoal

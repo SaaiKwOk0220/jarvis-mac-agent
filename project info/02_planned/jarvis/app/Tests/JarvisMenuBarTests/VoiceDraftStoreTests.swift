@@ -45,4 +45,14 @@ final class VoiceDraftStoreTests: XCTestCase {
         XCTAssertThrowsError(try store.save("未保存"))
         XCTAssertTrue(try store.list().isEmpty)
     }
+    func testReplacingDraftRollsBackWhenOldDeleteFails() throws {
+        let database = try JarvisPersistence.Database(path: ":memory:")
+        let store = try VoiceDraftStore(database: database)
+        let id = try store.save("旧内容")
+        try database.write { db in
+            try db.execute(sql: "CREATE TRIGGER reject_delete BEFORE DELETE ON voice_drafts BEGIN SELECT RAISE(ABORT, 'blocked'); END")
+        }
+        XCTAssertThrowsError(try store.replace(id, with: "新内容"))
+        XCTAssertEqual(try store.list().map(\.text), ["旧内容"])
+    }
 }
