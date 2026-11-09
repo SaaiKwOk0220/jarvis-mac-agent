@@ -185,10 +185,8 @@ struct AskJarvisView: View {
                      ? "说话停顿并识别完成后会自动运行；也可手动停止。"
                      : "已有草稿将保留，转写后请手动运行。")
                     .font(.caption).foregroundStyle(.secondary)
-                if !savedVoiceDrafts.isEmpty {
-                    Text("未完成的语音以明文保存在本机，直到任务成功或手动删除；删除不保证安全擦除。")
-                        .font(.caption)
-                }
+                Text("语音任务会以明文保存在本机，直到任务成功或手动删除；删除不保证安全擦除。")
+                    .font(.caption)
                 ForEach(savedVoiceDrafts, id: \.id) { draft in
                     HStack {
                         Text(draft.text).lineLimit(2).textSelection(.enabled)
@@ -432,6 +430,7 @@ struct AskJarvisView: View {
         autoSubmit.cancel()
         if isVisible, goal.isEmpty, let submitted = activeSubmittedGoal { goal = submitted }
         runLifecycle.invalidate()
+        activeVoiceDraftID = nil
         if isVisible { log.append(AgentLogEntry(kind: .info, text: "已请求取消任务。")) }
         run?.cancel()
         if let runningTaskID {
@@ -473,7 +472,9 @@ struct AskJarvisView: View {
             }
         }
         let cancelled = Task.isCancelled
+        let completedDraftID = activeRunToken == runToken ? activeVoiceDraftID : nil
         if activeRunToken == runToken {
+            activeVoiceDraftID = nil
             isRunning = false
             runningTaskID = nil
             run = nil
@@ -485,7 +486,7 @@ struct AskJarvisView: View {
             if let token, conversation.isCurrent(token) { conversation.stop() }
             return
         }
-        if let id = activeVoiceDraftID { deleteVoiceDraft(id); activeVoiceDraftID = nil }
+        if let id = completedDraftID { deleteVoiceDraft(id) }
         guard let token, conversation.isCurrent(token), isVisible else { return }
         conversation.record(user: submitted, answer: answer, token: token)
         voice.speak(answer) { completed in
