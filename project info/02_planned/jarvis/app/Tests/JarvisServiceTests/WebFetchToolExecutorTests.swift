@@ -272,3 +272,19 @@ extension WebFetchToolExecutorTests {
         session.invalidateAndCancel()
     }
 }
+
+extension WebFetchToolExecutorTests {
+    func testFetchSessionDisablesCookiesCredentialsAndCache() {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpShouldSetCookies = true
+        configuration.httpCookieStorage = HTTPCookieStorage.shared
+        configuration.urlCredentialStorage = URLCredentialStorage.shared
+        configuration.urlCache = URLCache.shared
+        let isolated = FetchTransfer.isolatedConfiguration(from: configuration)
+        XCTAssertFalse(isolated.httpShouldSetCookies)
+        XCTAssertNil(isolated.httpCookieStorage)
+        XCTAssertNil(isolated.urlCredentialStorage)
+        XCTAssertNil(isolated.urlCache)
+        XCTAssertEqual(isolated.requestCachePolicy, .reloadIgnoringLocalCacheData)
+    }
+}

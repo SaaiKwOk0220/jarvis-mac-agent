@@ -12,7 +12,9 @@ public enum WebFetchToolExecutorError: Error, Equatable, Sendable {
 
 /// `ToolExecutor` that performs an HTTPS `GET` via `URLSession` and returns
 /// the HTTP status plus a bounded body. Redirects may not leave the initial
-/// HTTPS origin. The transfer is cancelled when `maxResponseBytes` is reached.
+/// HTTPS origin. The task is cancelled once retained body data reaches
+/// `maxResponseBytes`; network buffering may already have read additional bytes.
+/// DNS resolution and private-network access are not restricted by this executor.
 /// Incomplete trailing UTF-8 bytes are discarded.
 /// `TaskService.bounded(_:)` further caps the resulting summary at 512 chars
 /// when it lands in the audit log, so the executor's cap should comfortably
@@ -97,13 +99,23 @@ final class FetchTransfer: NSObject, URLSessionDataDelegate, @unchecked Sendable
     private var redirectRejected = false
     init(original: URL, limit: Int) { self.original = original; self.buffer = FetchBoundedBuffer(limit: limit) }
 
+    static func isolatedConfiguration(from source: URLSessionConfiguration) -> URLSessionConfiguration {
+        let config = (source.copy() as? URLSessionConfiguration) ?? .ephemeral
+        config.httpShouldSetCookies = false
+        config.httpCookieStorage = nil
+        config.urlCredentialStorage = nil
+        config.urlCache = nil
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return config
+    }
+
     func run(request: URLRequest, configuration: URLSessionConfiguration) async throws -> (Data, HTTPURLResponse) {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 lock.lock()
                 if cancelled { lock.unlock(); continuation.resume(throwing: CancellationError()); return }
                 self.continuation = continuation
-                let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+                let session = URLSession(configuration: Self.isolatedConfiguration(from: configuration), delegate: self, delegateQueue: nil)
                 self.session = session
                 let task = session.dataTask(with: request)
                 self.task = task
