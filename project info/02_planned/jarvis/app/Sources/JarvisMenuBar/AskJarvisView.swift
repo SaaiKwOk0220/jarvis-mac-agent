@@ -141,7 +141,7 @@ struct AskJarvisView: View {
     var body: some View {
         ScrollView {
         VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .center, spacing: 28) {
+            VStack(alignment: .center, spacing: 12) {
                 ZStack {
                     Circle().stroke(.cyan.opacity(0.13), lineWidth: 1).frame(width: 142, height: 142)
                     Circle().trim(from: 0.04, to: 0.78)
@@ -161,7 +161,7 @@ struct AskJarvisView: View {
                         withAnimation(.linear(duration: 20).repeatForever(autoreverses: false)) { haloExpanded = true }
                     }
                 }
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .center, spacing: 8) {
                     Text("JARVIS").font(.system(size: 34, weight: .ultraLight, design: .rounded)).tracking(7)
                     Text("你的个人智能助手").font(.callout).foregroundStyle(.secondary)
                     Label(VoiceInterfaceStatus.label(recording: voice.isRecording, running: isRunning, speaking: voice.isSpeaking),
@@ -169,12 +169,14 @@ struct AskJarvisView: View {
                         .font(.callout.weight(.medium)).foregroundStyle(voice.isRecording ? .red : .cyan)
                     Text(statusText).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
-                Spacer(minLength: 0)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .center)
             .padding(.horizontal, 24).padding(.vertical, 14)
             .background(LinearGradient(colors: [Color.cyan.opacity(0.09), Color.cyan.opacity(0.015)], startPoint: .leading, endPoint: .trailing), in: RoundedRectangle(cornerRadius: 16))
             .overlay(RoundedRectangle(cornerRadius: 16).stroke(.cyan.opacity(0.22)))
+
+            Text("开启语音对话后，回答朗读结束会自动重新开启麦克风。可随时点击“结束语音对话”停止。")
+                .font(.caption).foregroundStyle(.secondary)
 
             progressLog
 
@@ -244,9 +246,11 @@ struct AskJarvisView: View {
                 }
             }
 
+            DisclosureGroup("诊断与技术信息") {
             Toggle("显示语音诊断（仅此窗口）", isOn: $showVoiceDiagnostics).font(.caption)
             if showVoiceDiagnostics {
                 Text("格式：\(voiceDiagnostic?.formatSupported.map { $0 ? "支持" : "不支持" } ?? "未知") · 超过阈值：\(voiceDiagnostic?.aboveThreshold.map { $0 ? "是" : "否" } ?? "未知") · 静音：\(voiceDiagnostic?.silenceSeconds ?? 0, specifier: "%.1f") 秒 · 结束：\(voiceDiagnosticReason ?? "尚未结束")").font(.caption)
+            }
             }
             DisclosureGroup("语音设置") {
                 HStack {
@@ -333,12 +337,12 @@ struct AskJarvisView: View {
                     Text(isRunning ? "任务进行中…" : "说句话，或输入一条消息开始。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                ForEach(log.entries) { entry in
+                ForEach(log.entries.filter { $0.kind == .assistant || $0.kind == .approval || $0.kind == .error || ($0.kind == .info && $0.text.hasPrefix("你：")) }) { entry in
                     HStack(alignment: .top, spacing: 6) {
                         Image(systemName: entry.kind == .assistant ? "sparkles" : "circle.fill")
                             .font(.caption2).foregroundStyle(color(for: entry.kind))
                             .accessibilityHidden(true)
-                        Text(entry.text)
+                        Text(entry.text.hasPrefix("Assistant: ") ? String(entry.text.dropFirst(11)) : entry.text)
                             .font(.callout)
                             .foregroundStyle(color(for: entry.kind))
                             .textSelection(.enabled)
@@ -356,9 +360,14 @@ struct AskJarvisView: View {
         .frame(minHeight: 180)
         .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)))
         .onChange(of: log.entries.count) { _, _ in
-            if followLatest, let last = log.entries.last { proxy.scrollTo(last.id, anchor: .bottom) }
+            if followLatest, let last = log.entries.last(where: { $0.kind == .assistant || $0.kind == .approval || $0.kind == .error || ($0.kind == .info && $0.text.hasPrefix("你：")) }) { proxy.scrollTo(last.id, anchor: .bottom) }
         }
-        Button("跳至最新消息") { if let last = log.entries.last { proxy.scrollTo(last.id, anchor: .bottom) } }.font(.caption)
+        Button("跳至最新消息") { if let last = log.entries.last(where: { $0.kind == .assistant || $0.kind == .approval || $0.kind == .error || ($0.kind == .info && $0.text.hasPrefix("你：")) }) { proxy.scrollTo(last.id, anchor: .bottom) } }.font(.caption)
+        DisclosureGroup("任务详情") {
+            ForEach(log.entries) { entry in
+                Text(entry.text).font(.caption).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }.font(.caption)
         }
     }
 
