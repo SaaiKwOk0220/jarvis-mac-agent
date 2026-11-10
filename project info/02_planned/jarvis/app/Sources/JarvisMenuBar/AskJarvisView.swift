@@ -220,6 +220,18 @@ struct AskJarvisView: View {
             Text("开启语音对话后，回答朗读结束会自动重新开启麦克风。可随时点击“结束语音对话”停止。")
                 .font(.caption).foregroundStyle(.secondary)
 
+            DisclosureGroup("能做什么与权限") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("语音对话需要麦克风和语音识别权限。开启连续对话后，朗读结束会重新聆听；可随时结束对话。")
+                    Text("截图需要屏幕录制权限；读取应用界面需要辅助功能权限，目前仅支持 Finder、Safari 和终端。")
+                    Text("网页读取仅限允许的网站；当前没有配置允许的网站。需要审批的操作会暂停并等待你的决定。")
+                    Text("本地命令目前仅支持 pwd，并须经你批准。")
+                }
+                .font(.caption).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 6)
+            }
+            .font(.caption.weight(.medium))
             progressLog
         }
     }
