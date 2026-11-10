@@ -101,6 +101,7 @@ final class FetchTransfer: NSObject, URLSessionDataDelegate, @unchecked Sendable
 
     static func isolatedConfiguration(from source: URLSessionConfiguration) -> URLSessionConfiguration {
         let config = (source.copy() as? URLSessionConfiguration) ?? .ephemeral
+        config.httpAdditionalHeaders = nil
         config.httpShouldSetCookies = false
         config.httpCookieStorage = nil
         config.urlCredentialStorage = nil

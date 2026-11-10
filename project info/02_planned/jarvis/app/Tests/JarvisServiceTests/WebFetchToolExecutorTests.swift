@@ -288,3 +288,22 @@ extension WebFetchToolExecutorTests {
         XCTAssertEqual(isolated.requestCachePolicy, .reloadIgnoringLocalCacheData)
     }
 }
+
+extension WebFetchToolExecutorTests {
+    func testFetchDoesNotSendSessionAdditionalHeaders() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        configuration.httpAdditionalHeaders = ["Authorization": "Bearer private", "Cookie": "session=private", "X-Secret": "private"]
+        let seen = LockedBox<URLRequest?>(initial: nil)
+        MockURLProtocol.handler = { request in
+            seen.set(request)
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data("ok".utf8))
+        }
+        let executor = WebFetchToolExecutor(session: URLSession(configuration: configuration))
+        let request = ToolRequest(taskID: UUID(), name: "fetch", sideEffect: .read, target: "https://example.com", payload: "")
+        _ = try await executor.execute(request)
+        XCTAssertNil(seen.get()?.value(forHTTPHeaderField: "Authorization"))
+        XCTAssertNil(seen.get()?.value(forHTTPHeaderField: "Cookie"))
+        XCTAssertNil(seen.get()?.value(forHTTPHeaderField: "X-Secret"))
+    }
+}
