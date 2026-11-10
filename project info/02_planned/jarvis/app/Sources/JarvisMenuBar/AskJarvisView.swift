@@ -245,7 +245,7 @@ struct AskJarvisView: View {
                     .frame(height: 56)
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)))
                     .disabled(isRunning || voice.isRecording || voice.isStarting || voice.isFinishing)
-                Text("语音任务提交后会以明文保存在本机；完成后清除记录。")
+                Text("语音任务以明文保存在本机；成功后清除本次记录。失败或恢复的原记录可能保留，需手动删除。")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Button(voice.isRecording ? "停止录音" : (voice.isFinishing ? "取消转写" : "开始说话 ⌘⇧V")) {
