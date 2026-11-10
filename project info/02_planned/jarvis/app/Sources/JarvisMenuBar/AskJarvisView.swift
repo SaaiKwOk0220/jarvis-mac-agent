@@ -141,36 +141,40 @@ struct AskJarvisView: View {
     var body: some View {
         ScrollView {
         VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .center, spacing: 22) {
+            HStack(alignment: .center, spacing: 28) {
                 ZStack {
-                    Circle().stroke(.cyan.opacity(0.15), lineWidth: 1).frame(width: 100, height: 100)
-                    Circle().trim(from: 0.03, to: 0.83).stroke(.cyan.opacity(0.65), style: StrokeStyle(lineWidth: 2, lineCap: .round))
-                        .frame(width: 82, height: 82).rotationEffect(.degrees(haloExpanded ? 180 : 0))
-                    Circle().fill(.cyan.opacity(0.12)).frame(width: 58, height: 58)
-                    Image(systemName: voice.isRecording ? "waveform" : "sparkles")
-                        .font(.title).foregroundStyle(.cyan)
+                    Circle().stroke(.cyan.opacity(0.13), lineWidth: 1).frame(width: 142, height: 142)
+                    Circle().trim(from: 0.04, to: 0.78)
+                        .stroke(.cyan.opacity(0.5), style: StrokeStyle(lineWidth: 1, lineCap: .round))
+                        .frame(width: 126, height: 126).rotationEffect(.degrees(haloExpanded ? 180 : 0))
+                    Circle().trim(from: 0.1, to: 0.92)
+                        .stroke(.cyan.opacity(0.8), style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                        .frame(width: 98, height: 98).rotationEffect(.degrees(haloExpanded ? -180 : 0))
+                    Circle().fill(RadialGradient(colors: [.cyan.opacity(0.35), .cyan.opacity(0.03)], center: .center, startRadius: 2, endRadius: 44))
+                        .frame(width: 82, height: 82)
+                    Image(systemName: voice.isRecording ? "waveform" : (voice.isSpeaking ? "speaker.wave.2.fill" : "sparkles"))
+                        .font(.system(size: 26, weight: .light)).foregroundStyle(.cyan)
                 }
                 .accessibilityHidden(true)
                 .onAppear {
                     if !reduceMotion {
-                        withAnimation(.linear(duration: 14).repeatForever(autoreverses: false)) { haloExpanded = true }
+                        withAnimation(.linear(duration: 20).repeatForever(autoreverses: false)) { haloExpanded = true }
                     }
                 }
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("JARVIS").font(.title.weight(.light)).tracking(6)
-                    Text("个人智能中控").font(.subheadline).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("JARVIS").font(.system(size: 34, weight: .ultraLight, design: .rounded)).tracking(7)
+                    Text("你的个人智能助手").font(.callout).foregroundStyle(.secondary)
                     Label(VoiceInterfaceStatus.label(recording: voice.isRecording, running: isRunning, speaking: voice.isSpeaking),
                           systemImage: voice.isRecording ? "waveform" : "circle.fill")
-                        .font(.caption.weight(.semibold)).foregroundStyle(voice.isRecording ? .red : .cyan)
+                        .font(.callout.weight(.medium)).foregroundStyle(voice.isRecording ? .red : .cyan)
+                    Text(statusText).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
-                Spacer()
+                Spacer(minLength: 0)
             }
-            .frame(maxWidth: .infinity, alignment: .center)
-            .padding(16)
-            .background(RoundedRectangle(cornerRadius: 18).fill(.cyan.opacity(0.045)))
-            .overlay(RoundedRectangle(cornerRadius: 18).stroke(.cyan.opacity(0.2)))
-            Text("开启语音对话后，回答朗读结束会再次打开麦克风。可随时点击“结束语音对话”停止。取消自动运行后编辑并手动运行，仍会继续本次语音对话。")
-                .font(.caption).foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 24).padding(.vertical, 14)
+            .background(LinearGradient(colors: [Color.cyan.opacity(0.09), Color.cyan.opacity(0.015)], startPoint: .leading, endPoint: .trailing), in: RoundedRectangle(cornerRadius: 16))
+            .overlay(RoundedRectangle(cornerRadius: 16).stroke(.cyan.opacity(0.22)))
 
             progressLog
 
@@ -184,7 +188,10 @@ struct AskJarvisView: View {
                     restoredVoiceDraftID = origin.restoredID
                     goal = value
                 }))
-                    .font(.system(.body, design: .monospaced))
+                    .font(.body)
+                    .scrollContentBackground(.hidden)
+                    .padding(8)
+                    .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
                     .accessibilityLabel("消息输入")
                     .frame(minHeight: 70)
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)))
@@ -291,7 +298,7 @@ struct AskJarvisView: View {
         }
         .padding(24)
         }
-        .background(Color(red: 0.035, green: 0.06, blue: 0.095))
+        .background(LinearGradient(colors: [Color(red: 0.025, green: 0.055, blue: 0.09), Color(red: 0.015, green: 0.025, blue: 0.045)], startPoint: .topLeading, endPoint: .bottomTrailing))
         .preferredColorScheme(.dark)
         .onAppear { isVisible = true; refreshVoiceDrafts() }
         .onChange(of: voice.errorMessage) { _, message in
@@ -317,13 +324,13 @@ struct AskJarvisView: View {
 
     @ViewBuilder private var progressLog: some View {
         Divider()
-        Text("对话与任务").font(.headline)
+        Text("对话").font(.title3.weight(.medium))
         Toggle("自动跟随最新消息", isOn: $followLatest).toggleStyle(.checkbox).font(.caption)
         ScrollViewReader { proxy in
         ScrollView {
             VStack(alignment: .leading, spacing: 6) {
                 if log.entries.isEmpty {
-                    Text(isRunning ? "正在思考…" : "说句话，或输入一条消息开始。")
+                    Text(isRunning ? "任务进行中…" : "说句话，或输入一条消息开始。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 ForEach(log.entries) { entry in
