@@ -255,6 +255,8 @@ struct AskJarvisView: View {
                     .frame(height: 56)
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)))
                     .disabled(isRunning || voice.isRecording || voice.isStarting || voice.isFinishing)
+                Text("语音任务提交后会以明文保存在本机；完成后清除记录。")
+                    .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Button(voice.isRecording ? "停止录音" : (voice.isFinishing ? "取消转写" : "开始说话 ⌘⇧V")) {
                         if voice.isRecording { voice.finishRecording() }
@@ -269,7 +271,10 @@ struct AskJarvisView: View {
                 if let error = voice.errorMessage { Text(error).foregroundStyle(.red).font(.caption) }
                 if let pending = autoSubmit.pendingText {
                     VStack(alignment: .leading) {
-                        Text("即将运行：\(pending)").textSelection(.enabled)
+                        Text("即将运行：\(pending)").lineLimit(2).truncationMode(.tail)
+                            .accessibilityLabel("即将运行的完整转写：\(pending)")
+                        Text("完整文字可在上方输入框查看。")
+                            .font(.caption)
                         HStack {
                             Text("\(autoSubmit.secondsRemaining) 秒后自动运行；编辑文字也会取消。")
                             Button("取消自动运行") { autoSubmit.cancel() }
