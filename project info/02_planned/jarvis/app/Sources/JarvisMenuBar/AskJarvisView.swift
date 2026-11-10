@@ -253,7 +253,6 @@ struct AskJarvisView: View {
                     if voice.isRecording { Text("● 正在聆听；停顿后结束") .foregroundStyle(.red) }
                     if voice.isStarting { Text("正在准备离线识别…") }
                     if voice.isFinishing { Text("正在完成转写…") }
-                    if conversation.isActive { Button("结束语音对话") { stopConversation() } }
                 }
                 Text(voice.isRecording ? "麦克风：开启" : "麦克风：关闭")
                     .font(.caption).foregroundStyle(voice.isRecording ? .red : .secondary)
@@ -339,19 +338,38 @@ struct AskJarvisView: View {
     }
 
     private var controlsBar: some View {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(statusText).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                Spacer()
-                Button("朗读回答") {
-                    voice.speak(lastAnswer)
-                }.disabled(lastAnswer.isEmpty || voice.isRecording || voice.isStarting || voice.isFinishing)
-                Button("停止朗读") { stopConversation() }.disabled(!voice.isSpeaking)
-                Button("取消任务") { cancel() }
-                    .disabled(!isRunning)
-                Button(isRunning ? "运行中…" : "发送") { start(fromVoice: conversation.manualRunToken != nil) }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(!canRun)
+                Spacer(minLength: 8)
+                if conversation.isActive {
+                    Button("结束语音对话") { stopConversation() }
+                        .controlSize(.large)
+                        .accessibilityHint("停止连续对话和麦克风")
+                }
             }
+            ViewThatFits(in: .horizontal) {
+                HStack {
+                    Button("朗读回答") { voice.speak(lastAnswer) }
+                        .disabled(lastAnswer.isEmpty || voice.isRecording || voice.isStarting || voice.isFinishing)
+                    Button("停止朗读") { stopConversation() }.disabled(!voice.isSpeaking)
+                    Button("取消任务") { cancel() }.disabled(!isRunning)
+                    Button(isRunning ? "运行中…" : "发送") { start(fromVoice: conversation.manualRunToken != nil) }
+                        .keyboardShortcut(.defaultAction).disabled(!canRun)
+                }
+                HStack {
+                    Menu("更多操作") {
+                        Button("朗读回答") { voice.speak(lastAnswer) }
+                            .disabled(lastAnswer.isEmpty || voice.isRecording || voice.isStarting || voice.isFinishing)
+                        Button("停止朗读") { stopConversation() }.disabled(!voice.isSpeaking)
+                        Button("取消任务") { cancel() }.disabled(!isRunning)
+                    }
+                    Spacer()
+                    Button(isRunning ? "运行中…" : "发送") { start(fromVoice: conversation.manualRunToken != nil) }
+                        .keyboardShortcut(.defaultAction).disabled(!canRun)
+                }
+            }
+        }
     }
 
     private var availableChineseVoices: [AVSpeechSynthesisVoice] {
