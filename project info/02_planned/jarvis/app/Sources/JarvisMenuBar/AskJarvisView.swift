@@ -143,9 +143,9 @@ struct AskJarvisView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     ViewThatFits(in: .horizontal) {
-                        HStack(alignment: .top, spacing: 24) {
-                            voiceCore.frame(width: 280)
-                            conversationPanel.frame(minWidth: 420)
+                        HStack(alignment: .top, spacing: 16) {
+                            voiceCore.frame(width: 170)
+                            conversationPanel.frame(minWidth: 300)
                         }
                         VStack(spacing: 18) {
                             voiceCore
@@ -181,17 +181,17 @@ struct AskJarvisView: View {
     private var voiceCore: some View {
             VStack(alignment: .center, spacing: 12) {
                 ZStack {
-                    Circle().stroke(.cyan.opacity(0.13), lineWidth: 1).frame(width: 142, height: 142)
+                    Circle().stroke(.cyan.opacity(0.13), lineWidth: 1).frame(width: 86, height: 86)
                     Circle().trim(from: 0.04, to: 0.78)
                         .stroke(.cyan.opacity(0.5), style: StrokeStyle(lineWidth: 1, lineCap: .round))
-                        .frame(width: 126, height: 126).rotationEffect(.degrees(haloExpanded ? 180 : 0))
+                        .frame(width: 76, height: 76).rotationEffect(.degrees(haloExpanded ? 180 : 0))
                     Circle().trim(from: 0.1, to: 0.92)
                         .stroke(.cyan.opacity(0.8), style: StrokeStyle(lineWidth: 2, lineCap: .round))
-                        .frame(width: 98, height: 98).rotationEffect(.degrees(haloExpanded ? -180 : 0))
+                        .frame(width: 60, height: 60).rotationEffect(.degrees(haloExpanded ? -180 : 0))
                     Circle().fill(RadialGradient(colors: [.cyan.opacity(0.35), .cyan.opacity(0.03)], center: .center, startRadius: 2, endRadius: 44))
-                        .frame(width: 82, height: 82)
+                        .frame(width: 50, height: 50)
                     Image(systemName: voice.isRecording ? "waveform" : (voice.isSpeaking ? "speaker.wave.2.fill" : "sparkles"))
-                        .font(.system(size: 26, weight: .light)).foregroundStyle(.cyan)
+                        .font(.system(size: 18, weight: .light)).foregroundStyle(.cyan)
                 }
                 .accessibilityHidden(true)
                 .onAppear {
@@ -200,7 +200,7 @@ struct AskJarvisView: View {
                     }
                 }
                 VStack(alignment: .center, spacing: 8) {
-                    Text("JARVIS").font(.system(size: 34, weight: .ultraLight, design: .rounded)).tracking(7)
+                    Text("JARVIS").font(.system(size: 23, weight: .ultraLight, design: .rounded)).tracking(7)
                     Text("你的个人智能助手").font(.callout).foregroundStyle(.secondary)
                     Label(VoiceInterfaceStatus.label(recording: voice.isRecording, running: isRunning, speaking: voice.isSpeaking),
                           systemImage: voice.isRecording ? "waveform" : "circle.fill")
@@ -209,7 +209,7 @@ struct AskJarvisView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .center)
-            .padding(.horizontal, 24).padding(.vertical, 14)
+            .padding(.horizontal, 12).padding(.vertical, 10)
             .background(LinearGradient(colors: [Color.cyan.opacity(0.09), Color.cyan.opacity(0.015)], startPoint: .leading, endPoint: .trailing), in: RoundedRectangle(cornerRadius: 16))
             .overlay(RoundedRectangle(cornerRadius: 16).stroke(.cyan.opacity(0.22)))
 
@@ -421,7 +421,7 @@ struct AskJarvisView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(8)
         }
-        .frame(minHeight: 180)
+        .frame(minHeight: 120, idealHeight: 160)
         .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)))
         .onChange(of: log.entries.count) { _, _ in
             if followLatest, let last = log.entries.last(where: { $0.kind == .assistant || $0.kind == .approval || $0.kind == .error || ($0.kind == .info && $0.text.hasPrefix("你：")) }) { proxy.scrollTo(last.id, anchor: .bottom) }
