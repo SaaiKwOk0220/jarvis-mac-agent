@@ -152,12 +152,12 @@ struct AskJarvisView: View {
                             conversationPanel
                         }
                     }
-                    composer
+                    composerDetails
                     settingsPanel
                 }.padding(24)
             }
             Divider()
-            controlsBar.padding(.horizontal, 24).padding(.vertical, 12)
+            VStack(spacing: 8) { composer; controlsBar }.padding(.horizontal, 24).padding(.vertical, 12)
                 .background(Color.black.opacity(0.45))
         }
         .background(LinearGradient(colors: [Color(red: 0.025, green: 0.055, blue: 0.09), Color(red: 0.015, green: 0.025, blue: 0.045)], startPoint: .topLeading, endPoint: .bottomTrailing))
@@ -252,7 +252,7 @@ struct AskJarvisView: View {
                     .padding(8)
                     .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
                     .accessibilityLabel("消息输入")
-                    .frame(minHeight: 70)
+                    .frame(height: 56)
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)))
                     .disabled(isRunning || voice.isRecording || voice.isStarting || voice.isFinishing)
                 HStack {
@@ -266,24 +266,6 @@ struct AskJarvisView: View {
                     if voice.isStarting { Text("正在准备离线识别…") }
                     if voice.isFinishing { Text("正在完成转写…") }
                 }
-                Text(voice.isRecording ? "麦克风：开启" : "麦克风：关闭")
-                    .font(.caption).foregroundStyle(voice.isRecording ? .red : .secondary)
-                Text((voice.isRecording || voice.isStarting || voice.isFinishing
-                      ? voiceWillAutoSubmit
-                      : VoiceDraftPrefix.allowsAutomaticSubmission(draft: goal, serviceAvailable: service != nil))
-                     ? "说话停顿并识别完成后会自动运行；也可手动停止。"
-                     : "已有草稿将保留，转写后请手动运行。")
-                    .font(.caption).foregroundStyle(.secondary)
-                Text("提交的语音任务以明文保存在本机，成功后清除其记录，恢复的原记录需手动删除；未提交转写关闭窗口会丢失。删除不保证安全擦除。")
-                    .font(.caption)
-                ForEach(savedVoiceDrafts, id: \.id) { draft in
-                    HStack {
-                        Text(draft.text).lineLimit(2).textSelection(.enabled)
-                        Button("恢复") { if goal.isEmpty { goal = draft.text; restoredVoiceDraftID = draft.id } }.disabled(!goal.isEmpty || isRunning)
-                        Button("删除") { deleteVoiceDraft(draft.id); if restoredVoiceDraftID == draft.id { restoredVoiceDraftID = nil } }.disabled(isRunning)
-                    }
-                }
-                if let draftStoreError { Text(draftStoreError).foregroundStyle(.red) }
                 if let error = voice.errorMessage { Text(error).foregroundStyle(.red).font(.caption) }
                 if let pending = autoSubmit.pendingText {
                     VStack(alignment: .leading) {
@@ -302,6 +284,29 @@ struct AskJarvisView: View {
                 }
             }
 
+    }
+
+    private var composerDetails: some View {
+        VStack(alignment: .leading, spacing: 4) {
+                Text(voice.isRecording ? "麦克风：开启" : "麦克风：关闭")
+                    .font(.caption).foregroundStyle(voice.isRecording ? .red : .secondary)
+                Text((voice.isRecording || voice.isStarting || voice.isFinishing
+                      ? voiceWillAutoSubmit
+                      : VoiceDraftPrefix.allowsAutomaticSubmission(draft: goal, serviceAvailable: service != nil))
+                     ? "说话停顿并识别完成后会自动运行；也可手动停止。"
+                     : "已有草稿将保留，转写后请手动运行。")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("提交的语音任务以明文保存在本机，成功后清除其记录，恢复的原记录需手动删除；未提交转写关闭窗口会丢失。删除不保证安全擦除。")
+                    .font(.caption)
+                ForEach(savedVoiceDrafts, id: \.id) { draft in
+                    HStack {
+                        Text(draft.text).lineLimit(2).textSelection(.enabled)
+                        Button("恢复") { if goal.isEmpty { goal = draft.text; restoredVoiceDraftID = draft.id } }.disabled(!goal.isEmpty || isRunning)
+                        Button("删除") { deleteVoiceDraft(draft.id); if restoredVoiceDraftID == draft.id { restoredVoiceDraftID = nil } }.disabled(isRunning)
+                    }
+                }
+                if let draftStoreError { Text(draftStoreError).foregroundStyle(.red) }
+        }
     }
 
     private var settingsPanel: some View {
