@@ -205,6 +205,25 @@ private struct ConversationTestWaiter: ApprovalWaiter {
         XCTAssertEqual(cancelled, [id])
         XCTAssertEqual(currentDraft, "", "A delayed old cancellation restored an old goal into the new session")
     }
+    func testClearingVoiceDraftResetsOriginBeforeTypingAgain() {
+        var origin = VoiceInputOrigin(containsVoice: true, restoredID: "old")
+        origin.applyEdit("")
+        origin.applyEdit("纯文字")
+        XCTAssertFalse(origin.containsVoice)
+        XCTAssertNil(origin.restoredID)
+    }
+
+    func testFailedVoiceDraftsRemainRecoverableWithoutBlockingNewTurn() {
+        var recovery = VoiceFailedDrafts()
+        recovery.save("第一句")
+        recovery.save("第二句")
+        XCTAssertEqual(recovery.items, ["第一句", "第二句"])
+        XCTAssertNil(recovery.takeIfDraftEmpty("正在编辑"))
+        XCTAssertEqual(recovery.items.count, 2)
+        XCTAssertEqual(recovery.takeIfDraftEmpty(""), "第一句")
+        XCTAssertEqual(recovery.items, ["第二句"])
+    }
+
     func testDelayedOldRunCannotRestoreIntoNewRunOrClosedWindow() {
         let lifecycle = VoiceRunLifecycle()
         let old = lifecycle.begin()
@@ -388,6 +407,18 @@ private struct ConversationTestWaiter: ApprovalWaiter {
         backend.finishHandler?(true)
         backend.finishHandler?(true)
         XCTAssertEqual(sent, ["测试"])
+    }
+
+    func testTwoSuccessiveVoiceTurnsEachFinishOnSilence() async {
+        let backend = FakeVoiceBackend(); let voice = VoiceCoordinator(backend: backend)
+        var sent: [String] = []
+        for text in ["第一句", "第二句"] {
+            await voice.start(autoSubmit: { sent.append($0) })
+            backend.handler?(text)
+            backend.silenceHandler?()
+            backend.finishHandler?(true)
+        }
+        XCTAssertEqual(sent, ["第一句", "第二句"])
     }
 
     func testDraftUpdatePrecedesAutoSubmitAndLateTextIsIgnored() async {
@@ -820,5 +851,62 @@ private struct ConversationTestWaiter: ApprovalWaiter {
         XCTAssertFalse(backend.started)
         XCTAssertFalse(backend.microphoneRequested)
         XCTAssertFalse(voice.isRecording)
+    }
+}
+
+extension VoiceCoordinatorTests {
+    func testDiagnosticsAreIsolatedPerMonitorAndCleared() {
+        let first = AudioPauseMonitor(onSilence: {})
+        let second = AudioPauseMonitor(onSilence: {})
+        first.setDiagnosticsEnabled(true)
+        second.setDiagnosticsEnabled(true)
+        first.recordDiagnostic(formatSupported: true, aboveThreshold: true, duration: 0.5)
+        first.recordDiagnostic(formatSupported: true, aboveThreshold: false, duration: 0.25)
+        XCTAssertEqual(first.diagnosticSnapshot().silenceSeconds, 0.25, accuracy: 0.001)
+        XCTAssertEqual(second.diagnosticSnapshot().silenceSeconds, 0, accuracy: 0.001)
+        first.clearDiagnostics()
+        XCTAssertNil(first.diagnosticSnapshot().formatSupported)
+    }
+}
+
+extension VoiceCoordinatorTests {
+    func testConcurrentDiagnosticSnapshotsRemainSessionLocal() {
+        let first = AudioPauseMonitor(onSilence: {})
+        let second = AudioPauseMonitor(onSilence: {})
+        first.setDiagnosticsEnabled(true)
+        second.setDiagnosticsEnabled(true)
+        DispatchQueue.concurrentPerform(iterations: 1000) { index in
+            let monitor = index.isMultiple(of: 2) ? first : second
+            monitor.recordDiagnostic(formatSupported: true, aboveThreshold: index.isMultiple(of: 2), duration: 0.01)
+            _ = monitor.diagnosticSnapshot()
+        }
+        XCTAssertEqual(first.diagnosticSnapshot().aboveThreshold, true)
+        XCTAssertEqual(second.diagnosticSnapshot().aboveThreshold, false)
+        XCTAssertEqual(first.diagnosticSnapshot().silenceSeconds, 0, accuracy: 0.001)
+        XCTAssertEqual(second.diagnosticSnapshot().silenceSeconds, 5, accuracy: 0.001)
+    }
+}
+
+extension VoiceCoordinatorTests {
+    func testDiagnosticReasonsDistinguishManualFinishAndSilence() async {
+        let manualBackend = FakeVoiceBackend()
+        let manual = VoiceCoordinator(backend: manualBackend)
+        await manual.start()
+        manual.finishRecording()
+        manualBackend.finishHandler?(true)
+        XCTAssertEqual(manual.diagnosticReason, "手动结束录音")
+
+        let autoBackend = FakeVoiceBackend()
+        let automatic = VoiceCoordinator(backend: autoBackend)
+        await automatic.start()
+        autoBackend.silenceHandler?()
+        autoBackend.finishHandler?(true)
+        XCTAssertEqual(automatic.diagnosticReason, "检测到停顿")
+
+        let stoppedBackend = FakeVoiceBackend()
+        let stopped = VoiceCoordinator(backend: stoppedBackend)
+        await stopped.start()
+        stopped.stop()
+        XCTAssertEqual(stopped.diagnosticReason, "手动停止")
     }
 }

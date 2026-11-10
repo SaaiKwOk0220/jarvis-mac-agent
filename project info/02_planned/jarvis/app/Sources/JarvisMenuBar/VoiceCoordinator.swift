@@ -27,6 +27,16 @@ enum CancellableTaskCreation {
     }
 }
 
+/// Holds unsuccessful voice turns separately from the next editable message.
+struct VoiceFailedDrafts {
+    private(set) var items: [String] = []
+    mutating func save(_ text: String) { if !text.isEmpty { items.append(text) } }
+    mutating func takeIfDraftEmpty(_ draft: String) -> String? {
+        guard draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !items.isEmpty else { return nil }
+        return items.removeFirst()
+    }
+}
+
 /// Tracks a user-started conversation; stale callbacks cannot restart it.
 @MainActor final class VoiceConversationSession: ObservableObject {
     @Published private(set) var isActive = false
@@ -155,6 +165,10 @@ struct VoiceDraftPrefix {
     private var finishTimeout: Task<Void, Never>?
     private var recordingTimeout: Task<Void, Never>?
     private var automaticFinish = false
+    private(set) var diagnosticReason: String?
+    func setDiagnosticsEnabled(_ enabled: Bool) { (backend as? OnDeviceSpeechBackend)?.setDiagnosticsEnabled(enabled); if !enabled { diagnosticReason = nil } }
+    func diagnosticSnapshot() -> VoiceDiagnosticSnapshot? { (backend as? OnDeviceSpeechBackend)?.diagnosticSnapshot() }
+    func clearDiagnostics() { (backend as? OnDeviceSpeechBackend)?.clearDiagnostics(); diagnosticReason = nil }
     private var autoSubmit: (@MainActor @Sendable (String) -> Void)?
 
     init(backend: any VoiceBackend, speaker: (any VoiceSpeaker)? = nil, recordingLimit: Duration? = nil) {
@@ -171,6 +185,7 @@ struct VoiceDraftPrefix {
         let current = generation
         self.autoSubmit = autoSubmit
         automaticFinish = false
+        diagnosticReason = nil
         errorMessage = nil
         guard backend.isOnDeviceSupported else { errorMessage = "本机不支持离线中文语音识别。"; return }
         guard await backend.requestSpeechPermission() else { if current == generation { errorMessage = "需要麦克风和语音识别权限。" }; return }
@@ -190,10 +205,12 @@ struct VoiceDraftPrefix {
             } onFailure: { [weak self] message in
                 guard let self, self.generation == current else { return }
                 self.needsConfirmation = !self.transcript.isEmpty
+                self.diagnosticReason = "识别失败"
                 self.stop()
                 self.errorMessage = message
             } onFinish: { [weak self] finalHasText in
                 guard let self, self.generation == current else { return }
+                if self.diagnosticReason == nil { self.diagnosticReason = "识别完成" }
                 let output = self.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
                 let submit = self.automaticFinish && finalHasText && !output.isEmpty ? self.autoSubmit : nil
                 self.needsConfirmation = !finalHasText && !self.transcript.isEmpty
@@ -202,6 +219,7 @@ struct VoiceDraftPrefix {
             } onSilence: { [weak self] in
                 guard let self, self.generation == current, self.isRecording else { return }
                 self.automaticFinish = true
+                self.diagnosticReason = "检测到停顿"
                 self.finishRecording()
             }
             isRecording = true
@@ -210,6 +228,7 @@ struct VoiceDraftPrefix {
                 try? await Task.sleep(for: limit)
                 guard !Task.isCancelled, let self, self.generation == current, self.isRecording else { return }
                 self.automaticFinish = false
+                self.diagnosticReason = "录音达到上限"
                 self.errorMessage = "未检测到可靠停顿，请检查转写并手动运行。"
                 self.finishRecording()
             }
@@ -247,6 +266,7 @@ struct VoiceDraftPrefix {
 
     func finishRecording() {
         guard isRecording else { return }
+        if diagnosticReason == nil { diagnosticReason = "手动结束录音" }
         isRecording = false
         isFinishing = true
         let current = generation
@@ -256,12 +276,14 @@ struct VoiceDraftPrefix {
             try? await Task.sleep(for: .seconds(5))
             guard !Task.isCancelled, let self, self.generation == current else { return }
             self.needsConfirmation = !self.transcript.isEmpty
+            self.diagnosticReason = "等待最终识别超时"
             self.stop()
             self.errorMessage = "等待最终转写超时，已保留当前文字。"
         }
     }
 
     func stop() {
+        if diagnosticReason == nil && (isRecording || isStarting || isFinishing) { diagnosticReason = "手动停止" }
         generation += 1
         recordingTimeout?.cancel(); recordingTimeout = nil
         automaticFinish = false
@@ -270,5 +292,17 @@ struct VoiceDraftPrefix {
         backend.stop()
         isRecording = false
         isFinishing = false
+    }
+}
+
+/// Tracks provenance when the user clears and replaces an editable message.
+struct VoiceInputOrigin {
+    var containsVoice: Bool
+    var restoredID: String?
+    mutating func applyEdit(_ value: String) {
+        if value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            containsVoice = false
+            restoredID = nil
+        }
     }
 }
