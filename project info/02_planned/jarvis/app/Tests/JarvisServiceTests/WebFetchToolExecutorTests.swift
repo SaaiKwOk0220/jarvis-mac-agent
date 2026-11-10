@@ -198,3 +198,77 @@ final class WebFetchToolExecutorTests: XCTestCase {
             "truncated body must not be empty when source body is large")
     }
 }
+extension WebFetchToolExecutorTests {
+    func testRedirectMustRemainOnExactHTTPSHost() {
+        XCTAssertTrue(FetchRedirectPolicy.permits(original: URL(string: "https://example.com/a")!, destination: URL(string: "https://EXAMPLE.com/b")!))
+        XCTAssertFalse(FetchRedirectPolicy.permits(original: URL(string: "https://example.com/a")!, destination: URL(string: "https://evil.example.com/b")!))
+        XCTAssertFalse(FetchRedirectPolicy.permits(original: URL(string: "https://example.com/a")!, destination: URL(string: "http://example.com/b")!))
+        XCTAssertFalse(FetchRedirectPolicy.permits(original: URL(string: "https://example.com/a")!, destination: URL(string: "https://user@example.com/b")!))
+    }
+
+    func testStreamBufferStopsAtExactLimit() {
+        var buffer = FetchBoundedBuffer(limit: 5)
+        XCTAssertFalse(buffer.append(Data("abc".utf8)))
+        XCTAssertTrue(buffer.append(Data("defgh".utf8)))
+        XCTAssertEqual(String(decoding: buffer.data, as: UTF8.self), "abcde")
+        XCTAssertTrue(buffer.append(Data("more".utf8)))
+        XCTAssertEqual(buffer.data.count, 5)
+    }
+}
+
+private final class ChunkedFetchProtocol: URLProtocol, @unchecked Sendable {
+    private let lock = NSLock()
+    private var stopped = false
+    nonisolated(unsafe) static var onChunk: (@Sendable () -> Void)?
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        sendChunk(remaining: 100)
+    }
+    private func sendChunk(remaining: Int) {
+        lock.lock(); let stopped = self.stopped; lock.unlock()
+        guard !stopped else { return }
+        guard remaining > 0 else { client?.urlProtocolDidFinishLoading(self); return }
+        Self.onChunk?()
+        client?.urlProtocol(self, didLoad: Data(repeating: 65, count: 256))
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.01) { [self] in sendChunk(remaining: remaining - 1) }
+    }
+    override func stopLoading() { lock.lock(); stopped = true; lock.unlock() }
+}
+
+extension WebFetchToolExecutorTests {
+    func testTransferStopsReadingOnceLimitReached() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ChunkedFetchProtocol.self]
+        let chunks = LockedBox(initial: 0)
+        ChunkedFetchProtocol.onChunk = { chunks.set(chunks.get() + 1) }
+        defer { ChunkedFetchProtocol.onChunk = nil }
+        let executor = WebFetchToolExecutor(session: URLSession(configuration: configuration), maxResponseBytes: 512)
+        let request = ToolRequest(taskID: UUID(), name: "fetch", sideEffect: .read, target: "https://example.com", payload: "")
+        let result = try await executor.execute(request)
+        XCTAssertEqual(result.summary.utf8.count, "HTTP 200\n".utf8.count + 512)
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertLessThan(chunks.get(), 10, "transfer should stop before the full response")
+    }
+}
+
+
+extension WebFetchToolExecutorTests {
+    func testRedirectDelegateRejectsCrossOriginAndAllowsSameOrigin() {
+        let original = URL(string: "https://example.com/start")!
+        let transfer = FetchTransfer(original: original, limit: 100)
+        let session = URLSession(configuration: .ephemeral)
+        let task = session.dataTask(with: original)
+        let response = HTTPURLResponse(url: original, statusCode: 302, httpVersion: nil, headerFields: nil)!
+        let result = LockedBox<URLRequest?>(initial: nil)
+        let same = URLRequest(url: URL(string: "https://example.com/next")!)
+        transfer.urlSession(session, task: task, willPerformHTTPRedirection: response, newRequest: same) { result.set($0) }
+        XCTAssertEqual(result.get()?.url, same.url)
+        let other = URLRequest(url: URL(string: "https://evil.example.net")!)
+        transfer.urlSession(session, task: task, willPerformHTTPRedirection: response, newRequest: other) { result.set($0) }
+        XCTAssertNil(result.get())
+        session.invalidateAndCancel()
+    }
+}
