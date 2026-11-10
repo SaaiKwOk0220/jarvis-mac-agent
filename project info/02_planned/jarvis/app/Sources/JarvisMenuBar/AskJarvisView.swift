@@ -139,41 +139,94 @@ struct AskJarvisView: View {
     @AppStorage(VoicePlaybackSettings.rateKey) private var voiceRate = 0.5
 
     var body: some View {
-        ScrollView {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .center, spacing: 22) {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    voiceCore
+                    conversationPanel
+                    composerDetails
+                    settingsPanel
+                }.padding(16)
+            }
+            Divider()
+            VStack(spacing: 8) { composer; controlsBar }.padding(.horizontal, 24).padding(.vertical, 12)
+                .background(Color.black.opacity(0.45))
+        }
+        .background(LinearGradient(colors: [Color(red: 0.025, green: 0.055, blue: 0.09), Color(red: 0.015, green: 0.025, blue: 0.045)], startPoint: .topLeading, endPoint: .bottomTrailing))
+        .preferredColorScheme(.dark)
+        .onAppear { isVisible = true; refreshVoiceDrafts() }
+        .onChange(of: voice.errorMessage) { _, message in
+            if message != nil { conversation.stop(); autoSubmit.cancel() }
+        }
+        .task(id: showVoiceDiagnostics) {
+            voice.setDiagnosticsEnabled(showVoiceDiagnostics)
+            guard showVoiceDiagnostics else { voiceDiagnostic = nil; voiceDiagnosticReason = nil; return }
+            while !Task.isCancelled {
+                voiceDiagnostic = voice.diagnosticSnapshot()
+                voiceDiagnosticReason = voice.diagnosticReason
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+        .onDisappear { isVisible = false; runLifecycle.invalidate(); stopConversation(); voice.clearDiagnostics(); voiceDiagnostic = nil; voiceDiagnosticReason = nil; showVoiceDiagnostics = false }
+    }
+
+    private var voiceCore: some View {
+            HStack(alignment: .center, spacing: 16) {
                 ZStack {
-                    Circle().stroke(.cyan.opacity(0.15), lineWidth: 1).frame(width: 100, height: 100)
-                    Circle().trim(from: 0.03, to: 0.83).stroke(.cyan.opacity(0.65), style: StrokeStyle(lineWidth: 2, lineCap: .round))
-                        .frame(width: 82, height: 82).rotationEffect(.degrees(haloExpanded ? 180 : 0))
-                    Circle().fill(.cyan.opacity(0.12)).frame(width: 58, height: 58)
-                    Image(systemName: voice.isRecording ? "waveform" : "sparkles")
-                        .font(.title).foregroundStyle(.cyan)
+                    Circle().stroke(.cyan.opacity(0.13), lineWidth: 1).frame(width: 68, height: 68)
+                    Circle().trim(from: 0.04, to: 0.78)
+                        .stroke(.cyan.opacity(0.5), style: StrokeStyle(lineWidth: 1, lineCap: .round))
+                        .frame(width: 60, height: 60).rotationEffect(.degrees(haloExpanded ? 180 : 0))
+                    Circle().trim(from: 0.1, to: 0.92)
+                        .stroke(.cyan.opacity(0.8), style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                        .frame(width: 48, height: 48).rotationEffect(.degrees(haloExpanded ? -180 : 0))
+                    Circle().fill(RadialGradient(colors: [.cyan.opacity(0.35), .cyan.opacity(0.03)], center: .center, startRadius: 2, endRadius: 44))
+                        .frame(width: 40, height: 40)
+                    Image(systemName: voice.isRecording ? "waveform" : (voice.isSpeaking ? "speaker.wave.2.fill" : "sparkles"))
+                        .font(.system(size: 18, weight: .light)).foregroundStyle(.cyan)
                 }
                 .accessibilityHidden(true)
                 .onAppear {
                     if !reduceMotion {
-                        withAnimation(.linear(duration: 14).repeatForever(autoreverses: false)) { haloExpanded = true }
+                        withAnimation(.linear(duration: 20).repeatForever(autoreverses: false)) { haloExpanded = true }
                     }
                 }
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("JARVIS").font(.title.weight(.light)).tracking(6)
-                    Text("个人智能中控").font(.subheadline).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("JARVIS").font(.system(size: 23, weight: .ultraLight, design: .rounded)).tracking(7)
                     Label(VoiceInterfaceStatus.label(recording: voice.isRecording, running: isRunning, speaking: voice.isSpeaking),
                           systemImage: voice.isRecording ? "waveform" : "circle.fill")
-                        .font(.caption.weight(.semibold)).foregroundStyle(voice.isRecording ? .red : .cyan)
+                        .font(.callout.weight(.medium)).foregroundStyle(voice.isRecording ? .red : .cyan)
                 }
-                Spacer()
             }
-            .frame(maxWidth: .infinity, alignment: .center)
-            .padding(16)
-            .background(RoundedRectangle(cornerRadius: 18).fill(.cyan.opacity(0.045)))
-            .overlay(RoundedRectangle(cornerRadius: 18).stroke(.cyan.opacity(0.2)))
-            Text("开启语音对话后，回答朗读结束会再次打开麦克风。可随时点击“结束语音对话”停止。取消自动运行后编辑并手动运行，仍会继续本次语音对话。")
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12).padding(.vertical, 10)
+            .background(LinearGradient(colors: [Color.cyan.opacity(0.09), Color.cyan.opacity(0.015)], startPoint: .leading, endPoint: .trailing), in: RoundedRectangle(cornerRadius: 16))
+            .overlay(RoundedRectangle(cornerRadius: 16).stroke(.cyan.opacity(0.22)))
+
+    }
+
+    private var conversationPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("开启语音对话后，回答朗读结束会自动重新开启麦克风。可随时点击“结束语音对话”停止。")
                 .font(.caption).foregroundStyle(.secondary)
 
+            DisclosureGroup("能做什么与权限") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("语音对话需要麦克风和语音识别权限。开启连续对话后，朗读结束会重新聆听；可随时结束对话。")
+                    Text("截图需要屏幕录制权限；读取应用界面需要辅助功能权限，目前仅支持 Finder、Safari 和终端。")
+                    Text("网页读取仅限允许的网站；当前没有配置允许的网站。需要审批的操作会暂停并等待你的决定。")
+                    Text("本地命令目前仅支持 pwd，并须经你批准。")
+                }
+                .font(.caption).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 6)
+            }
+            .font(.caption.weight(.medium))
             progressLog
+        }
+    }
 
+    private var composer: some View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("你的消息").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 TextEditor(text: Binding(get: { goal }, set: { value in
@@ -184,11 +237,16 @@ struct AskJarvisView: View {
                     restoredVoiceDraftID = origin.restoredID
                     goal = value
                 }))
-                    .font(.system(.body, design: .monospaced))
+                    .font(.body)
+                    .scrollContentBackground(.hidden)
+                    .padding(8)
+                    .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
                     .accessibilityLabel("消息输入")
-                    .frame(minHeight: 70)
+                    .frame(height: 56)
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)))
                     .disabled(isRunning || voice.isRecording || voice.isStarting || voice.isFinishing)
+                Text("语音任务以明文保存在本机；成功后清除本次记录。失败或恢复的原记录可能保留，需手动删除。")
+                    .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Button(voice.isRecording ? "停止录音" : (voice.isFinishing ? "取消转写" : "开始说话 ⌘⇧V")) {
                         if voice.isRecording { voice.finishRecording() }
@@ -199,8 +257,32 @@ struct AskJarvisView: View {
                     if voice.isRecording { Text("● 正在聆听；停顿后结束") .foregroundStyle(.red) }
                     if voice.isStarting { Text("正在准备离线识别…") }
                     if voice.isFinishing { Text("正在完成转写…") }
-                    if conversation.isActive { Button("结束语音对话") { stopConversation() } }
                 }
+                if let error = voice.errorMessage { Text(error).foregroundStyle(.red).font(.caption) }
+                if let pending = autoSubmit.pendingText {
+                    VStack(alignment: .leading) {
+                        Text("即将运行：\(pending)").lineLimit(2).truncationMode(.tail)
+                            .accessibilityLabel("即将运行的完整转写：\(pending)")
+                        Text("完整文字可在上方输入框查看。")
+                            .font(.caption)
+                        HStack {
+                            Text("\(autoSubmit.secondsRemaining) 秒后自动运行；编辑文字也会取消。")
+                            Button("取消自动运行") { autoSubmit.cancel() }
+                        }
+                    }.font(.caption).foregroundStyle(.orange)
+                }
+                if voice.needsConfirmation {
+                    HStack {
+                        Text("最终转写未确认，请检查文字后确认。")
+                        Button("确认转写") { voice.confirmTranscript() }
+                    }.foregroundStyle(.orange).font(.caption)
+                }
+            }
+
+    }
+
+    private var composerDetails: some View {
+        VStack(alignment: .leading, spacing: 4) {
                 Text(voice.isRecording ? "麦克风：开启" : "麦克风：关闭")
                     .font(.caption).foregroundStyle(voice.isRecording ? .red : .secondary)
                 Text((voice.isRecording || voice.isStarting || voice.isFinishing
@@ -219,27 +301,16 @@ struct AskJarvisView: View {
                     }
                 }
                 if let draftStoreError { Text(draftStoreError).foregroundStyle(.red) }
-                if let error = voice.errorMessage { Text(error).foregroundStyle(.red).font(.caption) }
-                if let pending = autoSubmit.pendingText {
-                    VStack(alignment: .leading) {
-                        Text("即将运行：\(pending)").textSelection(.enabled)
-                        HStack {
-                            Text("\(autoSubmit.secondsRemaining) 秒后自动运行；编辑文字也会取消。")
-                            Button("取消自动运行") { autoSubmit.cancel() }
-                        }
-                    }.font(.caption).foregroundStyle(.orange)
-                }
-                if voice.needsConfirmation {
-                    HStack {
-                        Text("最终转写未确认，请检查文字后确认。")
-                        Button("确认转写") { voice.confirmTranscript() }
-                    }.foregroundStyle(.orange).font(.caption)
-                }
-            }
+        }
+    }
 
+    private var settingsPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            DisclosureGroup("诊断与技术信息") {
             Toggle("显示语音诊断（仅此窗口）", isOn: $showVoiceDiagnostics).font(.caption)
             if showVoiceDiagnostics {
                 Text("格式：\(voiceDiagnostic?.formatSupported.map { $0 ? "支持" : "不支持" } ?? "未知") · 超过阈值：\(voiceDiagnostic?.aboveThreshold.map { $0 ? "是" : "否" } ?? "未知") · 静音：\(voiceDiagnostic?.silenceSeconds ?? 0, specifier: "%.1f") 秒 · 结束：\(voiceDiagnosticReason ?? "尚未结束")").font(.caption)
+            }
             }
             DisclosureGroup("语音设置") {
                 HStack {
@@ -275,38 +346,42 @@ struct AskJarvisView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
 
+        }
+    }
+
+    private var controlsBar: some View {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(statusText).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                Spacer()
-                Button("朗读回答") {
-                    voice.speak(lastAnswer)
-                }.disabled(lastAnswer.isEmpty || voice.isRecording || voice.isStarting || voice.isFinishing)
-                Button("停止朗读") { stopConversation() }.disabled(!voice.isSpeaking)
-                Button("取消任务") { cancel() }
-                    .disabled(!isRunning)
-                Button(isRunning ? "运行中…" : "发送") { start(fromVoice: conversation.manualRunToken != nil) }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(!canRun)
+                Spacer(minLength: 8)
+                if conversation.isActive {
+                    Button("结束语音对话") { stopConversation() }
+                        .controlSize(.large)
+                        .accessibilityHint("停止连续对话和麦克风")
+                }
+            }
+            ViewThatFits(in: .horizontal) {
+                HStack {
+                    Button("朗读回答") { voice.speak(lastAnswer) }
+                        .disabled(lastAnswer.isEmpty || voice.isRecording || voice.isStarting || voice.isFinishing)
+                    Button("停止朗读") { stopConversation() }.disabled(!voice.isSpeaking)
+                    Button("取消任务") { cancel() }.disabled(!isRunning)
+                    Button(isRunning ? "运行中…" : "发送") { start(fromVoice: conversation.manualRunToken != nil) }
+                        .keyboardShortcut(.defaultAction).disabled(!canRun)
+                }
+                HStack {
+                    Menu("更多操作") {
+                        Button("朗读回答") { voice.speak(lastAnswer) }
+                            .disabled(lastAnswer.isEmpty || voice.isRecording || voice.isStarting || voice.isFinishing)
+                        Button("停止朗读") { stopConversation() }.disabled(!voice.isSpeaking)
+                        Button("取消任务") { cancel() }.disabled(!isRunning)
+                    }
+                    Spacer()
+                    Button(isRunning ? "运行中…" : "发送") { start(fromVoice: conversation.manualRunToken != nil) }
+                        .keyboardShortcut(.defaultAction).disabled(!canRun)
+                }
             }
         }
-        .padding(24)
-        }
-        .background(Color(red: 0.035, green: 0.06, blue: 0.095))
-        .preferredColorScheme(.dark)
-        .onAppear { isVisible = true; refreshVoiceDrafts() }
-        .onChange(of: voice.errorMessage) { _, message in
-            if message != nil { conversation.stop(); autoSubmit.cancel() }
-        }
-        .task(id: showVoiceDiagnostics) {
-            voice.setDiagnosticsEnabled(showVoiceDiagnostics)
-            guard showVoiceDiagnostics else { voiceDiagnostic = nil; voiceDiagnosticReason = nil; return }
-            while !Task.isCancelled {
-                voiceDiagnostic = voice.diagnosticSnapshot()
-                voiceDiagnosticReason = voice.diagnosticReason
-                try? await Task.sleep(for: .seconds(1))
-            }
-        }
-        .onDisappear { isVisible = false; runLifecycle.invalidate(); stopConversation(); voice.clearDiagnostics(); voiceDiagnostic = nil; voiceDiagnosticReason = nil; showVoiceDiagnostics = false }
     }
 
     private var availableChineseVoices: [AVSpeechSynthesisVoice] {
@@ -317,21 +392,21 @@ struct AskJarvisView: View {
 
     @ViewBuilder private var progressLog: some View {
         Divider()
-        Text("对话与任务").font(.headline)
+        Text("对话").font(.title3.weight(.medium))
         Toggle("自动跟随最新消息", isOn: $followLatest).toggleStyle(.checkbox).font(.caption)
         ScrollViewReader { proxy in
         ScrollView {
             VStack(alignment: .leading, spacing: 6) {
                 if log.entries.isEmpty {
-                    Text(isRunning ? "正在思考…" : "说句话，或输入一条消息开始。")
+                    Text(isRunning ? "任务进行中…" : "说句话，或输入一条消息开始。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                ForEach(log.entries) { entry in
+                ForEach(log.entries.filter { $0.kind == .assistant || $0.kind == .approval || $0.kind == .error || ($0.kind == .info && $0.text.hasPrefix("你：")) }) { entry in
                     HStack(alignment: .top, spacing: 6) {
                         Image(systemName: entry.kind == .assistant ? "sparkles" : "circle.fill")
                             .font(.caption2).foregroundStyle(color(for: entry.kind))
                             .accessibilityHidden(true)
-                        Text(entry.text)
+                        Text(entry.text.hasPrefix("Assistant: ") ? String(entry.text.dropFirst(11)) : entry.text)
                             .font(.callout)
                             .foregroundStyle(color(for: entry.kind))
                             .textSelection(.enabled)
@@ -346,12 +421,17 @@ struct AskJarvisView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(8)
         }
-        .frame(minHeight: 180)
+        .frame(minHeight: 120, idealHeight: 160)
         .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)))
         .onChange(of: log.entries.count) { _, _ in
-            if followLatest, let last = log.entries.last { proxy.scrollTo(last.id, anchor: .bottom) }
+            if followLatest, let last = log.entries.last(where: { $0.kind == .assistant || $0.kind == .approval || $0.kind == .error || ($0.kind == .info && $0.text.hasPrefix("你：")) }) { proxy.scrollTo(last.id, anchor: .bottom) }
         }
-        Button("跳至最新消息") { if let last = log.entries.last { proxy.scrollTo(last.id, anchor: .bottom) } }.font(.caption)
+        Button("跳至最新消息") { if let last = log.entries.last(where: { $0.kind == .assistant || $0.kind == .approval || $0.kind == .error || ($0.kind == .info && $0.text.hasPrefix("你：")) }) { proxy.scrollTo(last.id, anchor: .bottom) } }.font(.caption)
+        DisclosureGroup("任务详情") {
+            ForEach(log.entries) { entry in
+                Text(entry.text).font(.caption).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }.font(.caption)
         }
     }
 
