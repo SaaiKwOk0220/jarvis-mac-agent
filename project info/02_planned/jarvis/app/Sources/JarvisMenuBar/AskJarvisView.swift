@@ -141,20 +141,12 @@ struct AskJarvisView: View {
     var body: some View {
         VStack(spacing: 0) {
             ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    ViewThatFits(in: .horizontal) {
-                        HStack(alignment: .top, spacing: 16) {
-                            voiceCore.frame(width: 170)
-                            conversationPanel.frame(minWidth: 300)
-                        }
-                        VStack(spacing: 18) {
-                            voiceCore
-                            conversationPanel
-                        }
-                    }
+                VStack(alignment: .leading, spacing: 10) {
+                    voiceCore
+                    conversationPanel
                     composerDetails
                     settingsPanel
-                }.padding(24)
+                }.padding(16)
             }
             Divider()
             VStack(spacing: 8) { composer; controlsBar }.padding(.horizontal, 24).padding(.vertical, 12)
@@ -179,17 +171,17 @@ struct AskJarvisView: View {
     }
 
     private var voiceCore: some View {
-            VStack(alignment: .center, spacing: 12) {
+            HStack(alignment: .center, spacing: 16) {
                 ZStack {
-                    Circle().stroke(.cyan.opacity(0.13), lineWidth: 1).frame(width: 86, height: 86)
+                    Circle().stroke(.cyan.opacity(0.13), lineWidth: 1).frame(width: 68, height: 68)
                     Circle().trim(from: 0.04, to: 0.78)
                         .stroke(.cyan.opacity(0.5), style: StrokeStyle(lineWidth: 1, lineCap: .round))
-                        .frame(width: 76, height: 76).rotationEffect(.degrees(haloExpanded ? 180 : 0))
+                        .frame(width: 60, height: 60).rotationEffect(.degrees(haloExpanded ? 180 : 0))
                     Circle().trim(from: 0.1, to: 0.92)
                         .stroke(.cyan.opacity(0.8), style: StrokeStyle(lineWidth: 2, lineCap: .round))
-                        .frame(width: 60, height: 60).rotationEffect(.degrees(haloExpanded ? -180 : 0))
+                        .frame(width: 48, height: 48).rotationEffect(.degrees(haloExpanded ? -180 : 0))
                     Circle().fill(RadialGradient(colors: [.cyan.opacity(0.35), .cyan.opacity(0.03)], center: .center, startRadius: 2, endRadius: 44))
-                        .frame(width: 50, height: 50)
+                        .frame(width: 40, height: 40)
                     Image(systemName: voice.isRecording ? "waveform" : (voice.isSpeaking ? "speaker.wave.2.fill" : "sparkles"))
                         .font(.system(size: 18, weight: .light)).foregroundStyle(.cyan)
                 }
@@ -199,16 +191,14 @@ struct AskJarvisView: View {
                         withAnimation(.linear(duration: 20).repeatForever(autoreverses: false)) { haloExpanded = true }
                     }
                 }
-                VStack(alignment: .center, spacing: 8) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text("JARVIS").font(.system(size: 23, weight: .ultraLight, design: .rounded)).tracking(7)
-                    Text("你的个人智能助手").font(.callout).foregroundStyle(.secondary)
                     Label(VoiceInterfaceStatus.label(recording: voice.isRecording, running: isRunning, speaking: voice.isSpeaking),
                           systemImage: voice.isRecording ? "waveform" : "circle.fill")
                         .font(.callout.weight(.medium)).foregroundStyle(voice.isRecording ? .red : .cyan)
-                    Text(statusText).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .center)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 12).padding(.vertical, 10)
             .background(LinearGradient(colors: [Color.cyan.opacity(0.09), Color.cyan.opacity(0.015)], startPoint: .leading, endPoint: .trailing), in: RoundedRectangle(cornerRadius: 16))
             .overlay(RoundedRectangle(cornerRadius: 16).stroke(.cyan.opacity(0.22)))
