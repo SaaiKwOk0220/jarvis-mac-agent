@@ -139,8 +139,46 @@ struct AskJarvisView: View {
     @AppStorage(VoicePlaybackSettings.rateKey) private var voiceRate = 0.5
 
     var body: some View {
-        ScrollView {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    ViewThatFits(in: .horizontal) {
+                        HStack(alignment: .top, spacing: 24) {
+                            voiceCore.frame(width: 280)
+                            conversationPanel.frame(minWidth: 420)
+                        }
+                        VStack(spacing: 18) {
+                            voiceCore
+                            conversationPanel
+                        }
+                    }
+                    composer
+                    settingsPanel
+                }.padding(24)
+            }
+            Divider()
+            controlsBar.padding(.horizontal, 24).padding(.vertical, 12)
+                .background(Color.black.opacity(0.45))
+        }
+        .background(LinearGradient(colors: [Color(red: 0.025, green: 0.055, blue: 0.09), Color(red: 0.015, green: 0.025, blue: 0.045)], startPoint: .topLeading, endPoint: .bottomTrailing))
+        .preferredColorScheme(.dark)
+        .onAppear { isVisible = true; refreshVoiceDrafts() }
+        .onChange(of: voice.errorMessage) { _, message in
+            if message != nil { conversation.stop(); autoSubmit.cancel() }
+        }
+        .task(id: showVoiceDiagnostics) {
+            voice.setDiagnosticsEnabled(showVoiceDiagnostics)
+            guard showVoiceDiagnostics else { voiceDiagnostic = nil; voiceDiagnosticReason = nil; return }
+            while !Task.isCancelled {
+                voiceDiagnostic = voice.diagnosticSnapshot()
+                voiceDiagnosticReason = voice.diagnosticReason
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+        .onDisappear { isVisible = false; runLifecycle.invalidate(); stopConversation(); voice.clearDiagnostics(); voiceDiagnostic = nil; voiceDiagnosticReason = nil; showVoiceDiagnostics = false }
+    }
+
+    private var voiceCore: some View {
             VStack(alignment: .center, spacing: 12) {
                 ZStack {
                     Circle().stroke(.cyan.opacity(0.13), lineWidth: 1).frame(width: 142, height: 142)
@@ -175,11 +213,18 @@ struct AskJarvisView: View {
             .background(LinearGradient(colors: [Color.cyan.opacity(0.09), Color.cyan.opacity(0.015)], startPoint: .leading, endPoint: .trailing), in: RoundedRectangle(cornerRadius: 16))
             .overlay(RoundedRectangle(cornerRadius: 16).stroke(.cyan.opacity(0.22)))
 
+    }
+
+    private var conversationPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
             Text("开启语音对话后，回答朗读结束会自动重新开启麦克风。可随时点击“结束语音对话”停止。")
                 .font(.caption).foregroundStyle(.secondary)
 
             progressLog
+        }
+    }
 
+    private var composer: some View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("你的消息").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 TextEditor(text: Binding(get: { goal }, set: { value in
@@ -246,6 +291,10 @@ struct AskJarvisView: View {
                 }
             }
 
+    }
+
+    private var settingsPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
             DisclosureGroup("诊断与技术信息") {
             Toggle("显示语音诊断（仅此窗口）", isOn: $showVoiceDiagnostics).font(.caption)
             if showVoiceDiagnostics {
@@ -286,6 +335,10 @@ struct AskJarvisView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
 
+        }
+    }
+
+    private var controlsBar: some View {
             HStack {
                 Text(statusText).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 Spacer()
@@ -299,25 +352,6 @@ struct AskJarvisView: View {
                     .keyboardShortcut(.defaultAction)
                     .disabled(!canRun)
             }
-        }
-        .padding(24)
-        }
-        .background(LinearGradient(colors: [Color(red: 0.025, green: 0.055, blue: 0.09), Color(red: 0.015, green: 0.025, blue: 0.045)], startPoint: .topLeading, endPoint: .bottomTrailing))
-        .preferredColorScheme(.dark)
-        .onAppear { isVisible = true; refreshVoiceDrafts() }
-        .onChange(of: voice.errorMessage) { _, message in
-            if message != nil { conversation.stop(); autoSubmit.cancel() }
-        }
-        .task(id: showVoiceDiagnostics) {
-            voice.setDiagnosticsEnabled(showVoiceDiagnostics)
-            guard showVoiceDiagnostics else { voiceDiagnostic = nil; voiceDiagnosticReason = nil; return }
-            while !Task.isCancelled {
-                voiceDiagnostic = voice.diagnosticSnapshot()
-                voiceDiagnosticReason = voice.diagnosticReason
-                try? await Task.sleep(for: .seconds(1))
-            }
-        }
-        .onDisappear { isVisible = false; runLifecycle.invalidate(); stopConversation(); voice.clearDiagnostics(); voiceDiagnostic = nil; voiceDiagnosticReason = nil; showVoiceDiagnostics = false }
     }
 
     private var availableChineseVoices: [AVSpeechSynthesisVoice] {
