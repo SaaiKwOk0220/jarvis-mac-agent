@@ -11,7 +11,7 @@ let package = Package(
         .executable(name: "JarvisMenuBar", targets: ["JarvisMenuBar"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.8.0"),
+        .package(url: "https://github.com/groue/GRDB.swift.git", exact: "7.11.1"),
         .package(url: "https://github.com/apple/swift-atomics.git", exact: "1.2.0"),
         .package(url: "https://github.com/microsoft/onnxruntime-swift-package-manager", exact: "1.24.2"),
     ],

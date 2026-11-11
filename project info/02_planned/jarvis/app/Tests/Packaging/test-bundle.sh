@@ -27,6 +27,11 @@ test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$vad_output/Cont
 test -f "$vad_output/Contents/Resources/Jarvis_JarvisMenuBar.bundle/silero-v6.2.3.onnx"
 if PATH="$tmp_dir/bin:$PATH" FAKE_BUILD_DIR="$tmp_dir/build" JARVIS_SAFARI_EXPERIMENT_BUNDLE=1 "$app_dir/scripts/build-dev-app.sh" --experimental "$tmp_dir/both" >/dev/null 2>&1; then exit 1; fi
 
+combined_output="$(PATH="$tmp_dir/bin:$PATH" FAKE_BUILD_DIR="$tmp_dir/build" "$app_dir/scripts/build-dev-app.sh" --combined-experiment "$tmp_dir/combined")"
+test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$combined_output/Contents/Info.plist")" = local.jarvis.combined-experiment
+test "$(/usr/libexec/PlistBuddy -c 'Print :JarvisCombinedExperiment' "$combined_output/Contents/Info.plist")" = true
+if PATH="$tmp_dir/bin:$PATH" FAKE_BUILD_DIR="$tmp_dir/build" JARVIS_SAFARI_EXPERIMENT_BUNDLE=1 "$app_dir/scripts/build-dev-app.sh" --combined-experiment "$tmp_dir/invalid-combined" >/dev/null 2>&1; then exit 1; fi
+
 # Stable experiment output is predictable and never overwrites an existing app.
 stable="$tmp_dir/stable"
 output="$(PATH="$tmp_dir/bin:$PATH" FAKE_BUILD_DIR="$tmp_dir/build" JARVIS_SAFARI_EXPERIMENT_BUNDLE=1 JARVIS_STABLE_OUTPUT=1 "$app_dir/scripts/build-dev-app.sh" "$stable")"
