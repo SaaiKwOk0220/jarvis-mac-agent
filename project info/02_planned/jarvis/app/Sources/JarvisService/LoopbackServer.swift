@@ -21,6 +21,9 @@ public final class LoopbackServer: @unchecked Sendable {
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
     private var listener: NWListener?
+    private let connectionQueue = DispatchQueue(label: "jarvis.loopback.connections")
+    private var connections: [ObjectIdentifier: NWConnection] = [:]
+    private let connectionLimit = 32
     /// Process-local secret; never include in URLs, logs, or persisted state.
     public let authorizationToken: String?
     private let expectedAuthenticationCode: HMAC<SHA256>.MAC?
@@ -158,8 +161,7 @@ public final class LoopbackServer: @unchecked Sendable {
             self?.handle(connection: connection)
         }
         self.listener = listener
-        let queue = DispatchQueue(label: "jarvis.loopback")
-        listener.start(queue: queue)
+        listener.start(queue: connectionQueue)
         for _ in 0..<100 {
             if let port = listener.port, port.rawValue != 0 { return port.rawValue }
             try await Task.sleep(nanoseconds: 10_000_000)
@@ -171,19 +173,37 @@ public final class LoopbackServer: @unchecked Sendable {
     public func stop() {
         listener?.cancel()
         listener = nil
+        connectionQueue.async { [weak self] in
+            guard let self else { return }
+            self.connections.values.forEach { $0.cancel() }
+            self.connections.removeAll()
+        }
     }
 
     private func handle(connection: NWConnection) {
+        guard connections.count < connectionLimit else { connection.cancel(); return }
+        let id = ObjectIdentifier(connection)
+        connections[id] = connection
         connection.stateUpdateHandler = { [weak self, weak connection] state in
-            guard let self, let connection, case .ready = state else { return }
-            let peer = connection.currentPath?.remoteEndpoint.flatMap { endpoint -> String? in
-                if case let .hostPort(host, _) = endpoint { return "\(host)" }
-                return nil
-            } ?? ""
-            guard Self.isLoopback(peer) else { connection.cancel(); return }
-            self.receive(connection: connection, peerHost: peer)
+            guard let self, let connection else { return }
+            switch state {
+            case .cancelled, .failed:
+                self.connections.removeValue(forKey: id)
+            case .ready:
+                let peer = connection.currentPath?.remoteEndpoint.flatMap { endpoint -> String? in
+                    if case let .hostPort(host, _) = endpoint { return "\(host)" }
+                    return nil
+                } ?? ""
+                guard Self.isLoopback(peer) else { connection.cancel(); return }
+                self.receive(connection: connection, peerHost: peer)
+            default: break
+            }
         }
-        connection.start(queue: DispatchQueue(label: "jarvis.loopback.connection"))
+        connection.start(queue: connectionQueue)
+        connectionQueue.asyncAfter(deadline: .now() + 5) { [weak self, weak connection] in
+            guard let self, let connection, self.connections[id] != nil else { return }
+            connection.cancel()
+        }
     }
 
     private func receive(connection: NWConnection, peerHost: String, buffer: Data = Data()) {
@@ -192,6 +212,19 @@ public final class LoopbackServer: @unchecked Sendable {
             var accumulated = buffer
             accumulated.append(data)
             guard accumulated.count <= 1_048_576 else { connection.cancel(); return }
+            if let end = accumulated.range(of: Data("\r\n\r\n".utf8)) {
+                let header = String(decoding: accumulated[..<end.lowerBound], as: UTF8.self)
+                let lines = header.components(separatedBy: "\r\n")
+                let auth = lines.dropFirst().compactMap { line -> String? in
+                    let parts = line.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+                    guard parts.count == 2, parts[0].trimmingCharacters(in: .whitespaces).lowercased() == "authorization" else { return nil }
+                    return parts[1].trimmingCharacters(in: .whitespaces)
+                }
+                guard auth.count == 1, self.isAuthorized(auth[0]) else {
+                    connection.send(content: self.httpResponse(LoopbackResponse(status: 403)), completion: .contentProcessed { _ in connection.cancel() })
+                    return
+                }
+            } else if accumulated.count > 32_768 { connection.cancel(); return }
             if !self.completeHTTPRequest(in: accumulated) {
                 if self.headerIsMalformed(in: accumulated) {
                     let response = self.httpResponse(LoopbackResponse(status: 400))

@@ -185,6 +185,15 @@ private func sendRawLoopback(port: UInt16, request: String) throws -> String {
 }
 
 extension LoopbackServerTests {
+    func testUnauthenticatedIncompleteBodyIsRejectedImmediately() async throws {
+        let (service, _, _, _, _, _) = try makeService()
+        let server = LoopbackServer(service: service)
+        let port = try await server.start()
+        defer { server.stop() }
+        let response = try sendRawLoopback(port: port, request: "POST /tasks HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\nContent-Length: 100000\r\n\r\n")
+        XCTAssertTrue(response.hasPrefix("HTTP/1.1 403"))
+    }
+
     func testAuthenticatedNetworkEnforcesHostOriginAndJSON() async throws {
         let (service, _, _, _, _, _) = try makeService()
         let server = LoopbackServer(service: service)
