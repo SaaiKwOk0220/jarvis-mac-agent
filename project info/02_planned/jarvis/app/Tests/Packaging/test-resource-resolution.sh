@@ -1,5 +1,6 @@
 #!/bin/bash
-# Test the same Bundle.main lookup used by SwiftPM's GRDB resource accessor.
+# Test only physical resource placement; this is not the SwiftPM GRDB accessor.
+# GRDB's generated accessor searches bundle root or an absolute build path.
 # The temporary probe has no build-path fallback and does not launch Jarvis.
 set -euo pipefail
 app_dir="${1:?Pass the path to a real built Jarvis.app}"
@@ -18,7 +19,7 @@ guard let bundle = Bundle(url: path), bundle.url(forResource: "PrivacyInfo", wit
     fputs("GRDB resource bundle could not be resolved at \(path.path)\n", stderr)
     exit(1)
 }
-print("Resolved GRDB resources at \(path.path)")
+print("Found GRDB resource at \(path.path); generated accessor not exercised")
 SWIFT
 swiftc "$tmp_dir/probe.swift" -o "$probe/Contents/MacOS/Probe"
 "$probe/Contents/MacOS/Probe"
