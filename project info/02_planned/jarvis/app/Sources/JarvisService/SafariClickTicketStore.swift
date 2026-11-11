@@ -64,3 +64,42 @@ actor SafariClickCapture {
     }
 }
 #endif
+
+#if os(macOS)
+/// Testable approval coordinator. Not wired to any production tool or AX action.
+actor SafariClickApprovalPrototype {
+    enum Failure: Error { case disabled, invalid, expired, changed }
+    private struct Pending { let requestID: UUID; let identity: SafariClickIdentity; let expires: TimeInterval; let generation: UInt64 }
+    private var pending: [UUID: Pending] = [:]
+    private var generation: UInt64 = 0
+    private var preparing = false
+    private let enabled: Bool
+    private let capture: SafariClickCapture
+    private let perform: @Sendable () async throws -> Void
+    init(enabled: Bool = false, capture: SafariClickCapture, perform: @escaping @Sendable () async throws -> Void) {
+        self.enabled = enabled; self.capture = capture; self.perform = perform
+    }
+    func prepare(requestID: UUID, identity: SafariClickIdentity, now: TimeInterval) async throws -> UUID {
+        guard enabled else { throw Failure.disabled }
+        guard pending.isEmpty && !preparing else { throw Failure.invalid }
+        preparing = true
+        defer { preparing = false }
+        let current = generation
+        try await capture.capture(expected: identity)
+        guard current == generation else { throw Failure.invalid }
+        let token = UUID()
+        pending[token] = Pending(requestID: requestID, identity: identity, expires: now + 60, generation: current)
+        return token
+    }
+    func cancel() { generation &+= 1; pending.removeAll() }
+    func reject(token: UUID) { pending.removeValue(forKey: token) }
+    func approve(token: UUID, requestID: UUID, digest: String, now: TimeInterval) async throws {
+        guard let entry = pending.removeValue(forKey: token), entry.requestID == requestID,
+              entry.identity.requestDigest == digest, entry.generation == generation else { throw Failure.invalid }
+        guard now < entry.expires else { throw Failure.expired }
+        try await capture.verify(expected: entry.identity)
+        guard entry.generation == generation else { throw Failure.invalid }
+        try await perform()
+    }
+}
+#endif

@@ -18,12 +18,37 @@ final class SafariClickTicketTests: XCTestCase {
 #if os(macOS)
 import ApplicationServices
 
+private actor ClickActionCounter {
+    var value = 0
+    func increment() { value += 1 }
+}
+
 private actor ClickFixtureCounter {
     var count: TimeInterval = 0
     func next() -> Date { count += 1; return Date(timeIntervalSince1970: count) }
 }
 
 extension SafariClickTicketTests {
+    func testApprovalPrototypeExecutesOnceAndFailsClosed() async throws {
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "digest")
+        let element = AXUIElementCreateSystemWide()
+        let candidate = SafariClickCandidate(element: element, window: element, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let capture = SafariClickCapture { [candidate] }
+        let counter = ClickActionCounter()
+        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: capture) { await counter.increment() }
+        let id = UUID()
+        let token = try await coordinator.prepare(requestID: id, identity: identity, now: 10)
+        try await coordinator.approve(token: token, requestID: id, digest: "digest", now: 11)
+        do { try await coordinator.approve(token: token, requestID: id, digest: "digest", now: 12); XCTFail("replay") } catch { }
+        let expired = try await coordinator.prepare(requestID: id, identity: identity, now: 10)
+        do { try await coordinator.approve(token: expired, requestID: id, digest: "digest", now: 70); XCTFail("expired") } catch { }
+        let cancelled = try await coordinator.prepare(requestID: id, identity: identity, now: 10)
+        await coordinator.cancel()
+        do { try await coordinator.approve(token: cancelled, requestID: id, digest: "digest", now: 11); XCTFail("cancelled") } catch { }
+        let count = await counter.value
+        XCTAssertEqual(count, 1)
+    }
+
     func testCaptureRejectsReusedPIDWithDifferentLaunchDate() async throws {
         let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "digest")
         let ref = AXUIElementCreateSystemWide()
