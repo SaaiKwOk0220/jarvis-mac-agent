@@ -13,6 +13,11 @@ enum VADBuildAccess {
     static func allowed(experimentalBuild: Bool, bundleID: String?, isolation: Bool) -> Bool {
         experimentalBuild && bundleID == "local.jarvis.vad-experiment" && isolation
     }
+    static func validateStartup(experimentalBuild: Bool, bundleID: String?, isolation: Bool) throws {
+        if experimentalBuild && !allowed(experimentalBuild: true, bundleID: bundleID, isolation: isolation) {
+            throw VADSessionError.invalidIdentity
+        }
+    }
     static var currentAllowed: Bool {
         allowed(experimentalBuild: experimentalBuild, bundleID: Bundle.main.bundleIdentifier,
                 isolation: Bundle.main.object(forInfoDictionaryKey: "JarvisExperimentalIsolation") as? Bool == true)

@@ -15,6 +15,16 @@ struct JarvisMenuBarApp: App {
     private let instanceLock: SingleInstanceLock
 
     init() {
+        do {
+            try VADBuildAccess.validateStartup(
+                experimentalBuild: VADBuildAccess.experimentalBuild,
+                bundleID: Bundle.main.bundleIdentifier,
+                isolation: Bundle.main.object(forInfoDictionaryKey: "JarvisExperimentalIsolation") as? Bool == true
+            )
+        } catch {
+            FileHandle.standardError.write(Data("实验构建身份或数据隔离配置无效，已停止启动。\n".utf8))
+            exit(EXIT_FAILURE)
+        }
         do { instanceLock = try SingleInstanceLock() }
         catch {
             let message = "Jarvis is already running, or its instance lock is unavailable. Close older Jarvis instances and try again."
