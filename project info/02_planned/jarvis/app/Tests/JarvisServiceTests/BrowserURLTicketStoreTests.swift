@@ -21,6 +21,25 @@ final class BrowserURLTicketStoreTests: XCTestCase {
 }
 
 extension BrowserURLTicketStoreTests {
+    func testExpiredTicketCannotBindToRequest() {
+        let store = BrowserURLTicketStore(lifetime: 0)
+        let ticket = store.issue(url: "https://example.com/private")
+        XCTAssertFalse(store.bind(ticket, taskID: UUID(), requestID: UUID()))
+    }
+
+    func testBoundTicketRequiresMatchingTaskAndRequestAndCannotUseUnboundConsume() {
+        let store = BrowserURLTicketStore()
+        let ticket = store.issue(url: "https://example.com/private")
+        let task = UUID(), request = UUID()
+        XCTAssertTrue(store.bind(ticket, taskID: task, requestID: request))
+        XCTAssertFalse(store.bind(ticket, taskID: task, requestID: request))
+        XCTAssertNil(store.consume(id: ticket.id, digest: ticket.digest))
+        XCTAssertNil(store.peekBound(ticket, taskID: UUID(), requestID: request))
+        XCTAssertNil(store.consumeBound(ticket, taskID: task, requestID: UUID()))
+        XCTAssertEqual(store.consumeBound(ticket, taskID: task, requestID: request), "https://example.com/private")
+        XCTAssertNil(store.consumeBound(ticket, taskID: task, requestID: request))
+    }
+
     func testPeekChecksDigestAndExpiryWithoutConsuming() {
         let store = BrowserURLTicketStore(lifetime: 5)
         let ticket = store.issue(url: "https://example.com/private", now: Date(timeIntervalSince1970: 10))
@@ -52,5 +71,15 @@ extension BrowserURLTicketStoreTests {
         XCTAssertFalse(stored.payload.contains("secret"))
         XCTAssertFalse(stored.payload.contains("private"))
         XCTAssertTrue(stored.payload.contains(ticket.digest))
+    }
+}
+
+extension BrowserURLTicketStoreTests {
+    func testNewStoreCannotRestorePriorProcessTicket() {
+        let firstStore = BrowserURLTicketStore()
+        let ticket = firstStore.issue(url: "https://example.com/private?token=secret")
+        let restartedStore = BrowserURLTicketStore()
+        XCTAssertNil(restartedStore.peek(id: ticket.id, digest: ticket.digest))
+        XCTAssertNil(restartedStore.consume(id: ticket.id, digest: ticket.digest))
     }
 }

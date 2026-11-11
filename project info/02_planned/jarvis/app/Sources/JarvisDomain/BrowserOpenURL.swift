@@ -2,6 +2,17 @@ import Foundation
 
 /// Validates a conservative browser destination without credentials, query or fragment.
 public enum BrowserOpenURL {
+    /// Validates an exact HTTPS destination while retaining the origin's host rules.
+    public static func validatedExact(_ value: String) -> URL? {
+        guard !value.isEmpty,
+              value.unicodeScalars.allSatisfy({ $0.isASCII && !$0.properties.isWhitespace && !CharacterSet.controlCharacters.contains($0) }),
+              let parts = URLComponents(string: value), parts.scheme == "https",
+              parts.user == nil, parts.password == nil, parts.fragment == nil,
+              let host = parts.host else { return nil }
+        let origin = "https://\(host)" + (parts.port.map { ":\($0)" } ?? "")
+        guard validated(origin) != nil, let url = parts.url, url.absoluteString == value else { return nil }
+        return url
+    }
     public static func validated(_ value: String) -> URL? {
         guard !value.isEmpty, value.unicodeScalars.allSatisfy({ $0.isASCII && !$0.properties.isWhitespace && !CharacterSet.controlCharacters.contains($0) }),
               let parts = URLComponents(string: value), parts.scheme == "https",
