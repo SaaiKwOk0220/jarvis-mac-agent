@@ -395,6 +395,8 @@ final class OptionalLiveVAD: @unchecked Sendable {
     private let beforeInitialize: (@Sendable () -> Void)?
     private let beforeInference: (@Sendable () -> Void)?
     private let onFailure: @MainActor @Sendable (String) -> Void
+    private let onCandidate: @MainActor @Sendable (VADTapDrainGate) -> Void
+    private let probabilityOverride: (@Sendable ([Float]) throws -> Float)?
     private let onSilence: @MainActor @Sendable () -> Void
     private var converter: StreamingPCMResampler?
     private var model: SileroOfflineInference?
@@ -402,11 +404,15 @@ final class OptionalLiveVAD: @unchecked Sendable {
     private var timer: DispatchSourceTimer?
     private var pending = [Float]()
     private var detector: SpeechPauseDetector
+    private var draining = false
+    private var drainDeadline: DispatchTime?
     init(format: AVAudioFormat, modelURL: URL, pause: Double,
          onProducerAcquired: (@Sendable () -> Void)? = nil,
          beforeInitialize: (@Sendable () -> Void)? = nil,
          beforeInference: (@Sendable () -> Void)? = nil,
          onFailure: @escaping @MainActor @Sendable (String) -> Void,
+         onCandidate: @escaping @MainActor @Sendable (VADTapDrainGate) -> Void = { _ in },
+         probabilityOverride: (@Sendable ([Float]) throws -> Float)? = nil,
          onSilence: @escaping @MainActor @Sendable () -> Void) throws {
         guard format.commonFormat == .pcmFormatFloat32, (1...8).contains(Int(format.channelCount)),
               format.sampleRate.isFinite, (16_000...192_000).contains(format.sampleRate) else { throw NSError(domain: "JarvisVAD", code: 20) }
@@ -416,7 +422,7 @@ final class OptionalLiveVAD: @unchecked Sendable {
         self.modelURL = modelURL
         detector = SpeechPauseDetector(pauseDuration: pause)
         self.onProducerAcquired = onProducerAcquired; self.beforeInitialize = beforeInitialize; self.beforeInference = beforeInference
-        self.onFailure = onFailure; self.onSilence = onSilence
+        self.onFailure = onFailure; self.onCandidate = onCandidate; self.probabilityOverride = probabilityOverride; self.onSilence = onSilence
     }
     func start() {
         let timer = DispatchSource.makeTimerSource(queue: worker)
@@ -466,24 +472,60 @@ final class OptionalLiveVAD: @unchecked Sendable {
         let framesPerTick = Int(ceil(sampleRate * 0.04))
         var raw = [Float](repeating: 0, count: framesPerTick * channelCount)
         let count = raw.withUnsafeMutableBufferPointer { queue.read(into: $0) }
-        guard count > 0 else { return }
+        if count == 0 && !draining { return }
         _ = consumedFrames.wrappingIncrementThenLoad(by: count / channelCount, ordering: .relaxed)
         do {
-            guard count % channelCount == 0 else { throw NSError(domain: "JarvisVAD", code: 21) }
-            let mono = try VADDownmix.mono(Array(raw.prefix(count)), channels: channelCount)
-            pending += try converter.convert(mono)
+            if count > 0 {
+                guard count % channelCount == 0 else { throw NSError(domain: "JarvisVAD", code: 21) }
+                let mono = try VADDownmix.mono(Array(raw.prefix(count)), channels: channelCount)
+                pending += try converter.convert(mono)
+            }
             while pending.count >= 512 {
                 let frame = Array(pending.prefix(512)); pending.removeFirst(512)
                 beforeInference?()
-                let probability = try model.probability(frame: frame)
+                let probability = try probabilityOverride?(frame) ?? model.probability(frame: frame)
                 guard !invalid.load(ordering: .acquiring), active.load(ordering: .acquiring) else { fail(); return }
-                if detector.observe(level: probability >= 0.5 ? 0.03 : 0, duration: 512.0 / 16000) {
+                if draining {
+                    if probability >= 0.5 { fail(); return }
+                } else if detector.observe(level: probability >= 0.5 ? 0.03 : 0, duration: 512.0 / 16000) {
                     guard terminal.endpoint() else { fail(); return }
-                    active.store(false, ordering: .releasing)
-                    DispatchQueue.main.async { [onSilence] in onSilence() }
-                    return
+                    draining = true
+                    drainDeadline = .now() + .seconds(3)
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, self.active.load(ordering: .acquiring) else { return }
+                        self.onCandidate(self.tapGate)
+                    }
+                    break
                 }
             }
+            if draining && pending.count < 512 { finishDrainIfReady(model: model, converter: converter) }
+        } catch { fail() }
+    }
+    private func finishDrainIfReady(model: SileroOfflineInference, converter: StreamingPCMResampler) {
+        let queued = max(0, acceptedFrames.load(ordering: .acquiring) - consumedFrames.load(ordering: .acquiring))
+        let timedOut = drainDeadline.map { DispatchTime.now() >= $0 } ?? true
+        switch VADDrainReadiness.evaluate(isDrained: tapGate.isDrained, queuedSamples: queued, invalid: invalid.load(ordering: .acquiring), timedOut: timedOut) {
+        case .wait: return
+        case .fail: fail(); return
+        case .ready: break
+        }
+        do {
+            // Flush the converter before judging the final buffered audio.
+            pending += try converter.convert([], final: true)
+            while pending.count >= 512 {
+                let frame = Array(pending.prefix(512)); pending.removeFirst(512)
+                guard try (probabilityOverride?(frame) ?? model.probability(frame: frame)) < 0.5 else { fail(); return }
+            }
+            // Any residual partial model frame is evaluated with zero padding.
+            if !pending.isEmpty {
+                pending += Array(repeating: 0, count: 512 - pending.count)
+                guard try (probabilityOverride?(pending) ?? model.probability(frame: pending)) < 0.5 else { fail(); return }
+                pending.removeAll()
+            }
+            guard let deadline = drainDeadline, DispatchTime.now() < deadline,
+                  !invalid.load(ordering: .acquiring), terminal.confirmEndpoint(),
+                  active.exchange(false, ordering: .acquiringAndReleasing) else { fail(); return }
+            DispatchQueue.main.async { [onSilence] in onSilence() }
         } catch { fail() }
     }
     private func fail() {

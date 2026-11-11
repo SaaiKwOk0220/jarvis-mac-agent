@@ -285,7 +285,8 @@ final class AudioPauseMonitor: @unchecked Sendable {
             guard let modelURL = OptionalVADAvailability.bundledModelURL else { throw SpeechError.unavailable }
             let vad = try OptionalLiveVAD(format: format, modelURL: modelURL, pause: VoiceEndpointSettings.pauseSeconds(),
                 onFailure: onFailure,
-                onSilence: { onFinish(false) })
+                onCandidate: { [weak self] _ in self?.stopCaptureForVADCandidate() },
+                onSilence: onSilence)
             optionalVAD = vad
             vad.start()
             input.installTap(onBus: 0, bufferSize: 1024, format: format, block: SpeechCallbackBridge.tap(gate: gate, vad: vad, drainGate: vad.tapGate))
@@ -299,6 +300,12 @@ final class AudioPauseMonitor: @unchecked Sendable {
         recognitionTask = recognizer.recognitionTask(with: request, resultHandler: SpeechCallbackBridge.recognition(onText: onText, onFailure: onFailure, onFinish: onFinish))
         engine.prepare()
         try engine.start()
+    }
+
+    private func stopCaptureForVADCandidate() {
+        engine.stop()
+        if hasTap { engine.inputNode.removeTap(onBus: 0); hasTap = false }
+        optionalVAD?.tapGate.close()
     }
 
     func finish() {
