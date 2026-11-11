@@ -275,34 +275,53 @@ final class OptionalLiveVAD: @unchecked Sendable {
     private let worker = DispatchQueue(label: "jarvis.vad.live", qos: .userInitiated)
     private let invalid = ManagedAtomic(false)
     private let active = ManagedAtomic(true)
+    private let producerBusy = ManagedAtomic(false)
+    private let onProducerAcquired: (@Sendable () -> Void)?
     private let onFailure: @MainActor @Sendable (String) -> Void
     private let onSilence: @MainActor @Sendable () -> Void
-    private let converter: StreamingPCMResampler
-    private let model: SileroOfflineInference
+    private var converter: StreamingPCMResampler?
+    private var model: SileroOfflineInference?
+    private let modelURL: URL
     private var timer: DispatchSourceTimer?
     private var pending = [Float]()
     private var detector: SpeechPauseDetector
     init(format: AVAudioFormat, modelURL: URL, pause: Double,
+         onProducerAcquired: (@Sendable () -> Void)? = nil,
          onFailure: @escaping @MainActor @Sendable (String) -> Void,
          onSilence: @escaping @MainActor @Sendable () -> Void) throws {
         guard format.commonFormat == .pcmFormatFloat32, (1...8).contains(Int(format.channelCount)),
               format.sampleRate.isFinite, (16_000...192_000).contains(format.sampleRate) else { throw NSError(domain: "JarvisVAD", code: 20) }
         channelCount = Int(format.channelCount); sampleRate = format.sampleRate
         queue = RealtimePCMBuffer(capacity: Int(format.sampleRate) * channelCount * 2)
-        converter = try StreamingPCMResampler(sourceRate: format.sampleRate)
-        model = try SileroOfflineInference(modelURL: modelURL)
+        self.modelURL = modelURL
         detector = SpeechPauseDetector(pauseDuration: pause)
+        self.onProducerAcquired = onProducerAcquired
         self.onFailure = onFailure; self.onSilence = onSilence
     }
     func start() {
         let timer = DispatchSource.makeTimerSource(queue: worker)
         timer.schedule(deadline: .now(), repeating: .milliseconds(20))
         timer.setEventHandler { [weak self] in self?.consume() }
-        self.timer = timer; timer.resume()
+        self.timer = timer
+        worker.async { [weak self] in
+            guard let self, self.active.load(ordering: .acquiring) else { return }
+            do {
+                let converter = try StreamingPCMResampler(sourceRate: self.sampleRate)
+                let model = try SileroOfflineInference(modelURL: self.modelURL)
+                guard self.active.load(ordering: .acquiring) else { return }
+                self.converter = converter; self.model = model
+            } catch { self.fail() }
+        }
+        timer.resume()
     }
     /// Called by one audio producer. Copies only; never waits or schedules work.
     func submit(_ buffer: AVAudioPCMBuffer) {
         guard active.load(ordering: .acquiring) else { return }
+        guard producerBusy.compareExchange(expected: false, desired: true, ordering: .acquiringAndReleasing).exchanged else {
+            invalid.store(true, ordering: .releasing); return
+        }
+        defer { producerBusy.store(false, ordering: .releasing) }
+        onProducerAcquired?()
         guard Int(buffer.format.channelCount) == channelCount, buffer.format.sampleRate == sampleRate,
               queue.writePCM(buffer) else { invalid.store(true, ordering: .releasing); return }
     }
@@ -311,7 +330,9 @@ final class OptionalLiveVAD: @unchecked Sendable {
     private func consume() {
         guard active.load(ordering: .acquiring) else { return }
         guard !invalid.load(ordering: .acquiring) else { fail(); return }
-        var raw = [Float](repeating: 0, count: 1024 * channelCount)
+        guard let converter, let model else { return }
+        let framesPerTick = Int(ceil(sampleRate * 0.04))
+        var raw = [Float](repeating: 0, count: framesPerTick * channelCount)
         let count = raw.withUnsafeMutableBufferPointer { queue.read(into: $0) }
         guard count > 0 else { return }
         do {
