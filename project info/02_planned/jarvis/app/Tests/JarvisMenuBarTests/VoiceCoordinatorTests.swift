@@ -74,6 +74,24 @@ private struct ConversationTestWaiter: ApprovalWaiter {
 }
 
 @MainActor final class VoiceCoordinatorTests: XCTestCase {
+    func testStalePartialFallsBackWithoutSending() async throws {
+        let backend = FakeVoiceBackend()
+        let voice = VoiceCoordinator(backend: backend, stalePartialLimit: .milliseconds(40))
+        var sent: [String] = []
+        await voice.start(autoSubmit: { sent.append($0) })
+        backend.handler?("第一句")
+        try await Task.sleep(for: .milliseconds(25))
+        backend.handler?("更新的第一句")
+        try await Task.sleep(for: .milliseconds(25))
+        XCTAssertTrue(voice.isRecording)
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertTrue(voice.isFinishing)
+        backend.finishHandler?(true)
+        XCTAssertEqual(voice.transcript, "更新的第一句")
+        XCTAssertTrue(sent.isEmpty)
+        XCTAssertNotNil(voice.errorMessage)
+    }
+
     func testVoiceQualityLabelsAndPreviewDoesNotOpenMicrophone() async {
         XCTAssertEqual(VoicePlaybackSettings.qualityLabel(.default), "默认")
         XCTAssertEqual(VoicePlaybackSettings.qualityLabel(.enhanced), "增强")

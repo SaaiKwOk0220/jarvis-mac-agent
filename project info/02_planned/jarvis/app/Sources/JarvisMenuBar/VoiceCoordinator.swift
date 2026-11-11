@@ -160,6 +160,8 @@ struct VoiceDraftPrefix {
     private let backend: any VoiceBackend
     private let speaker: (any VoiceSpeaker)?
     private let recordingLimit: Duration?
+    private let stalePartialLimit: Duration
+    private var stalePartialTimeout: Task<Void, Never>?
     private var speakerGeneration = 0
     private var generation = 0
     private var finishTimeout: Task<Void, Never>?
@@ -171,8 +173,8 @@ struct VoiceDraftPrefix {
     func clearDiagnostics() { (backend as? OnDeviceSpeechBackend)?.clearDiagnostics(); diagnosticReason = nil }
     private var autoSubmit: (@MainActor @Sendable (String) -> Void)?
 
-    init(backend: any VoiceBackend, speaker: (any VoiceSpeaker)? = nil, recordingLimit: Duration? = nil) {
-        self.backend = backend; self.speaker = speaker; self.recordingLimit = recordingLimit
+    init(backend: any VoiceBackend, speaker: (any VoiceSpeaker)? = nil, recordingLimit: Duration? = nil, stalePartialLimit: Duration = .seconds(12)) {
+        self.backend = backend; self.speaker = speaker; self.recordingLimit = recordingLimit; self.stalePartialLimit = stalePartialLimit
     }
 
     func start(onTranscript: (@MainActor @Sendable (String) -> Void)? = nil,
@@ -200,6 +202,18 @@ struct VoiceDraftPrefix {
                 // Some recognizers may produce an empty final hypothesis after
                 // a useful partial. Do not erase the user's only transcript.
                 guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                if self.transcript != text {
+                    self.stalePartialTimeout?.cancel()
+                    self.stalePartialTimeout = Task { [weak self] in
+                        guard let self else { return }
+                        try? await Task.sleep(for: self.stalePartialLimit)
+                        guard !Task.isCancelled, self.generation == current, self.isRecording else { return }
+                        self.automaticFinish = false
+                        self.diagnosticReason = "转写长时间未更新"
+                        self.errorMessage = "未检测到可靠停顿，请检查转写并手动运行。"
+                        self.finishRecording()
+                    }
+                }
                 self.transcript = text
                 onTranscript?(text)
             } onFailure: { [weak self] message in
@@ -285,6 +299,7 @@ struct VoiceDraftPrefix {
     func stop() {
         if diagnosticReason == nil && (isRecording || isStarting || isFinishing) { diagnosticReason = "手动停止" }
         generation += 1
+        stalePartialTimeout?.cancel(); stalePartialTimeout = nil
         recordingTimeout?.cancel(); recordingTimeout = nil
         automaticFinish = false
         autoSubmit = nil
