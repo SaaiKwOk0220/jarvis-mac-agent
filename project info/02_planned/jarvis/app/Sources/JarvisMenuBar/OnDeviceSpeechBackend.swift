@@ -23,6 +23,7 @@ enum VoiceEndpointSettings {
 /// Never include userInfo or unrecognized domain text in UI diagnostics.
 enum SpeechFailure {
     nonisolated static func safeMessage(_ error: Error) -> String {
+        if let error = error as? VADSessionError { return error.localizedDescription }
         let nsError = error as NSError
         let allowed = ["kAFAssistantErrorDomain", "kLSRErrorDomain", "SFSpeechErrorDomain", "AVFoundationErrorDomain", "NSURLErrorDomain"]
         let domain = allowed.contains(nsError.domain) ? nsError.domain : "其他系统域"

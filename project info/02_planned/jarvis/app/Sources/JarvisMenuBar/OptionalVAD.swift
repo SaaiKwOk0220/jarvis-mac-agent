@@ -275,14 +275,32 @@ final class VADTerminalState: @unchecked Sendable {
     func stop() { _ = state.compareExchange(expected: 0, desired: 3, ordering: .acquiringAndReleasing) }
 }
 
+enum VADSessionError: LocalizedError {
+    case busy
+    var errorDescription: String? { "上一次语音检测仍在结束，请稍后重试，或关闭实验性检测。" }
+}
+
+/// Held until the last worker reference has exited, not merely until stop is requested.
+private final class VADSessionPermit {
+    private static let busy = ManagedAtomic(false)
+    private var acquired = false
+    init() throws {
+        guard Self.busy.compareExchange(expected: false, desired: true, ordering: .acquiringAndReleasing).exchanged else { throw VADSessionError.busy }
+        acquired = true
+    }
+    deinit { if acquired { Self.busy.store(false, ordering: .releasing) } }
+}
+
 /// Optional VAD runs off the tap; any loss or unsupported format fails closed.
 final class OptionalLiveVAD: @unchecked Sendable {
     private static let initializationBusy = ManagedAtomic(false)
+    private let permit: VADSessionPermit
     private let queue: RealtimePCMBuffer
     private let channelCount: Int
     private let sampleRate: Double
     private let worker = DispatchQueue(label: "jarvis.vad.live", qos: .userInitiated)
     private let invalid = ManagedAtomic(false)
+    private let failureCode = ManagedAtomic<Int>(0)
     private let terminal = VADTerminalState()
     private let active = ManagedAtomic(true)
     private let producerBusy = ManagedAtomic(false)
@@ -310,6 +328,7 @@ final class OptionalLiveVAD: @unchecked Sendable {
          onSilence: @escaping @MainActor @Sendable () -> Void) throws {
         guard format.commonFormat == .pcmFormatFloat32, (1...8).contains(Int(format.channelCount)),
               format.sampleRate.isFinite, (16_000...192_000).contains(format.sampleRate) else { throw NSError(domain: "JarvisVAD", code: 20) }
+        permit = try VADSessionPermit()
         channelCount = Int(format.channelCount); sampleRate = format.sampleRate
         queue = RealtimePCMBuffer(capacity: Int(format.sampleRate) * channelCount * 2)
         self.modelURL = modelURL
@@ -341,17 +360,19 @@ final class OptionalLiveVAD: @unchecked Sendable {
     func submit(_ buffer: AVAudioPCMBuffer) {
         guard active.load(ordering: .acquiring) else { return }
         guard producerBusy.compareExchange(expected: false, desired: true, ordering: .acquiringAndReleasing).exchanged else {
-            markInvalid(); return
+            markInvalid(code: 1); return
         }
         defer { producerBusy.store(false, ordering: .releasing) }
         onProducerAcquired?()
         guard Int(buffer.format.channelCount) == channelCount, buffer.format.sampleRate == sampleRate,
-              queue.writePCM(buffer) else { markInvalid(); return }
+              buffer.format.commonFormat == .pcmFormatFloat32 else { markInvalid(code: 2); return }
+        guard queue.writePCM(buffer) else { markInvalid(code: 1); return }
         _ = acceptedFrames.wrappingIncrementThenLoad(by: Int(buffer.frameLength), ordering: .relaxed)
     }
-    func signalLoss() { if active.load(ordering: .acquiring) { markInvalid() } }
-    private func markInvalid() {
+    func signalLoss() { if active.load(ordering: .acquiring) { markInvalid(code: 1) } }
+    private func markInvalid(code: Int) {
         if terminal.fail() {
+            failureCode.store(code, ordering: .releasing)
             invalid.store(true, ordering: .releasing)
         }
     }
@@ -385,6 +406,12 @@ final class OptionalLiveVAD: @unchecked Sendable {
     }
     private func fail() {
         guard active.exchange(false, ordering: .acquiringAndReleasing) else { return }
-        DispatchQueue.main.async { [onFailure] in onFailure("语音检测中断，请检查转写并手动运行。") }
+        let message: String
+        switch failureCode.load(ordering: .acquiring) {
+        case 1: message = "音频处理跟不上或输入丢失，请检查转写并手动发送；可关闭实验性检测后重试。"
+        case 2: message = "麦克风格式发生变化或不受支持，请检查转写并手动发送；可关闭实验性检测后重试。"
+        default: message = "语音检测模型或音频处理不可用，请检查转写并手动发送；可关闭实验性检测后重试。"
+        }
+        DispatchQueue.main.async { [onFailure] in onFailure(message) }
     }
 }

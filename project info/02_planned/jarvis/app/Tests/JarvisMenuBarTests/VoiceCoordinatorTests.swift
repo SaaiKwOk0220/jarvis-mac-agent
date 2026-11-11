@@ -323,35 +323,26 @@ private final class PCMTestCollector: @unchecked Sendable {
         }
     }
 
-    func testLiveVADConcurrentInitializationFailsWithoutWaiting() async throws {
+    func testLiveVADPermitHeldUntilBlockedWorkerExits() async throws {
         let url = try XCTUnwrap(OptionalVADAvailability.bundledModelURL)
         let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
-        let entered = expectation(description: "initialization entered")
-        let failed = expectation(description: "second initialization rejected")
+        let entered = expectation(description: "initialization held")
         let release = DispatchSemaphore(value: 0)
-        let first = try OptionalLiveVAD(format: format, modelURL: url, pause: 2, beforeInitialize: { entered.fulfill(); release.wait() }, onFailure: { _ in }, onSilence: {})
-        let second = try OptionalLiveVAD(format: format, modelURL: url, pause: 2, onFailure: { _ in failed.fulfill() }, onSilence: {})
-        first.start(); await fulfillment(of: [entered], timeout: 2)
-        second.start(); await fulfillment(of: [failed], timeout: 2)
-        second.stop(); first.stop(); release.signal()
-    }
-
-    func testLiveVADRapidRestartsDoNotQueueInitializations() async throws {
-        let url = try XCTUnwrap(OptionalVADAvailability.bundledModelURL)
-        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
-        let entered = expectation(description: "first initialization held")
-        let rejected = expectation(description: "all later initializations rejected")
-        rejected.expectedFulfillmentCount = 10
-        let release = DispatchSemaphore(value: 0)
-        let first = try OptionalLiveVAD(format: format, modelURL: url, pause: 2, beforeInitialize: { entered.fulfill(); release.wait() }, onFailure: { _ in }, onSilence: {})
-        first.start(); await fulfillment(of: [entered], timeout: 2)
-        var others = [OptionalLiveVAD]()
+        var first: OptionalLiveVAD? = try OptionalLiveVAD(format: format, modelURL: url, pause: 2, beforeInitialize: { entered.fulfill(); release.wait() }, onFailure: { _ in }, onSilence: {})
+        first?.start(); await fulfillment(of: [entered], timeout: 2)
+        first?.stop(); first = nil
         for _ in 0..<10 {
-            let vad = try OptionalLiveVAD(format: format, modelURL: url, pause: 2, onFailure: { _ in rejected.fulfill() }, onSilence: {})
-            others.append(vad); vad.start()
+            XCTAssertThrowsError(try OptionalLiveVAD(format: format, modelURL: url, pause: 2, onFailure: { _ in }, onSilence: {}))
         }
-        await fulfillment(of: [rejected], timeout: 3)
-        others.forEach { $0.stop() }; first.stop(); release.signal()
+        release.signal()
+        var retried: OptionalLiveVAD?
+        for _ in 0..<100 {
+            retried = try? OptionalLiveVAD(format: format, modelURL: url, pause: 2, onFailure: { _ in }, onSilence: {})
+            if retried != nil { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertNotNil(retried)
+        retried?.stop()
     }
 
     func testLiveVADSlowInferenceOverflowFailsClosed() async throws {
@@ -371,22 +362,6 @@ private final class PCMTestCollector: @unchecked Sendable {
         release.signal()
         await fulfillment(of: [failed, silence], timeout: 1)
         vad.stop()
-    }
-
-    func testLiveVADStoppedWaitingSessionSkipsInitialization() async throws {
-        let url = try XCTUnwrap(OptionalVADAvailability.bundledModelURL)
-        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
-        let entered = expectation(description: "first initialization entered")
-        let secondEntered = expectation(description: "stopped session must not initialize")
-        secondEntered.isInverted = true
-        let release = DispatchSemaphore(value: 0)
-        let first = try OptionalLiveVAD(format: format, modelURL: url, pause: 2, beforeInitialize: { entered.fulfill(); release.wait() }, onFailure: { _ in }, onSilence: {})
-        let second = try OptionalLiveVAD(format: format, modelURL: url, pause: 2, beforeInitialize: { secondEntered.fulfill() }, onFailure: { _ in }, onSilence: {})
-        first.start()
-        await fulfillment(of: [entered], timeout: 2)
-        second.start(); second.stop(); release.signal()
-        await fulfillment(of: [secondEntered], timeout: 0.3)
-        first.stop()
     }
 
     func testLiveVADSlowInitializationOverflowFailsClosed() async throws {
