@@ -40,7 +40,8 @@ jobs:
       - name: Verify controlled dependency preparation
         env:
           JARVIS_GRDB_SOURCE_REPO: ${{ runner.temp }}/grdb-upstream
-        run: 'project info/02_planned/jarvis/app/Tests/Packaging/test-controlled-grdb.sh'
+        run: |
+          'project info/02_planned/jarvis/app/Tests/Packaging/test-controlled-grdb.sh'
       - name: Run controlled swift test
         run: |
           'project info/02_planned/jarvis/app/scripts/with-controlled-grdb.sh' "$RUNNER_TEMP/grdb-upstream" "$RUNNER_TEMP/grdb-controlled" test
