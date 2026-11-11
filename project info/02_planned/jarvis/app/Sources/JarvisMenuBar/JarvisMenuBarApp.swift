@@ -34,7 +34,7 @@ struct JarvisMenuBarApp: App {
         #endif
         do { instanceLock = try SingleInstanceLock() }
         catch {
-            let message = "Jarvis is already running, or its instance lock is unavailable. Close older Jarvis instances and try again."
+            let message = (error as? PrivateAppStorage.StorageError)?.localizedDescription ?? "Jarvis is already running, or its instance lock is unavailable. Close older Jarvis instances and try again."
             FileHandle.standardError.write(Data("\(message)\n".utf8))
             let alert = NSAlert()
             alert.messageText = "Jarvis could not start"
@@ -140,9 +140,9 @@ private final class Runtime {
 
     init(client: ServiceClient) {
         do {
-            let appSupport = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
-                appropriateFor: nil, create: true).appendingPathComponent(AppStorageScope.currentDirectory, isDirectory: true)
-            try FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true)
+            let supportParent = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                appropriateFor: nil, create: true)
+            let appSupport = try PrivateAppStorage.prepare(parent: supportParent, directoryName: AppStorageScope.currentDirectory)
             let database = try Database(path: appSupport.appendingPathComponent("jarvis.sqlite").path)
             try database.migrate()
             self.voiceDraftStore = try VoiceDraftStore(database: database)
@@ -179,7 +179,13 @@ private final class Runtime {
                 }
             }
         } catch {
-            // The UI remains available and reports an unavailable service if setup fails.
+            if let storageError = error as? PrivateAppStorage.StorageError {
+                let alert = NSAlert()
+                alert.messageText = "无法安全打开 Jarvis 数据"
+                alert.informativeText = storageError.localizedDescription
+                alert.alertStyle = .warning
+                alert.runModal()
+            }
         }
     }
 
