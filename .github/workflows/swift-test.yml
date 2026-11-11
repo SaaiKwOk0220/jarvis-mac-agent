@@ -2,7 +2,7 @@ name: swift-test
 
 on:
   pull_request:
-    branches: [main, feat/voice-conversation]
+    branches: [main, feat/voice-conversation, fix/voice-draft-pr28]
   push:
     branches: [main]
 
