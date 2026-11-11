@@ -367,6 +367,7 @@ private final class VADSessionPermit {
 /// Optional VAD runs off the tap; any loss or unsupported format fails closed.
 final class OptionalLiveVAD: @unchecked Sendable {
     private static let initializationBusy = ManagedAtomic(false)
+    let tapGate = VADTapDrainGate()
     private let permit: VADSessionPermit
     private let queue: RealtimePCMBuffer
     private let channelCount: Int

@@ -1086,6 +1086,24 @@ private final class PCMTestCollector: @unchecked Sendable {
         XCTAssertEqual(validity, [false, false, true])
     }
 
+    func testTapDrainCoversEntireSpeechAppend() async throws {
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let completed = expectation(description: "tap completed")
+        let drain = VADTapDrainGate()
+        let gate = AudioRequestGate(append: { _ in entered.signal(); release.wait() }, end: {})
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1))
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 64))
+        let tap = SpeechCallbackBridge.tap(gate: gate, drainGate: drain)
+        DispatchQueue.global().async { tap(buffer, AVAudioTime(hostTime: 0)); completed.fulfill() }
+        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success)
+        drain.close()
+        XCTAssertFalse(drain.isDrained)
+        release.signal()
+        await fulfillment(of: [completed], timeout: 3)
+        XCTAssertTrue(drain.isDrained)
+    }
+
     func testAudioTapRunsOnBackgroundQueueAndCanFinish() async {
         let done = expectation(description: "background audio tap")
         let gate = AudioRequestGate(SFSpeechAudioBufferRecognitionRequest())

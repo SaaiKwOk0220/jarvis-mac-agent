@@ -57,8 +57,10 @@ enum SpeechCallbackBridge {
         }
     }
 
-    nonisolated static func tap(gate: AudioRequestGate, monitor: AudioPauseMonitor? = nil, vad: OptionalLiveVAD? = nil) -> @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void {
+    nonisolated static func tap(gate: AudioRequestGate, monitor: AudioPauseMonitor? = nil, vad: OptionalLiveVAD? = nil, drainGate: VADTapDrainGate? = nil) -> @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void {
         return { @Sendable buffer, _ in
+            guard drainGate?.enter() ?? true else { return }
+            defer { drainGate?.leave() }
             if gate.append(buffer) { monitor?.observe(buffer); vad?.submit(buffer) }
             else { vad?.signalLoss() }
         }
@@ -286,7 +288,7 @@ final class AudioPauseMonitor: @unchecked Sendable {
                 onSilence: { onFinish(false) })
             optionalVAD = vad
             vad.start()
-            input.installTap(onBus: 0, bufferSize: 1024, format: format, block: SpeechCallbackBridge.tap(gate: gate, vad: vad))
+            input.installTap(onBus: 0, bufferSize: 1024, format: format, block: SpeechCallbackBridge.tap(gate: gate, vad: vad, drainGate: vad.tapGate))
         } else {
             let monitor = AudioPauseMonitor(pauseDuration: VoiceEndpointSettings.pauseSeconds(), onSilence: onSilence)
             self.monitor = monitor
