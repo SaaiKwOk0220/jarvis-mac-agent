@@ -12,8 +12,20 @@ else
   swift build --package-path "$package_dir" --product JarvisMenuBar >&2
   bin_dir="$(swift build --package-path "$package_dir" --show-bin-path)"
 fi
-bundle_dir="$(mktemp -d "$output_dir/Jarvis.XXXXXX")"
-app_dir="$bundle_dir/Jarvis.app"
+if [ "${JARVIS_STABLE_OUTPUT:-0}" = 1 ]; then
+  if [ "${JARVIS_SAFARI_EXPERIMENT_BUNDLE:-0}" != 1 ]; then
+    printf 'Stable output is only supported for the Safari experiment.\n' >&2
+    exit 1
+  fi
+  app_dir="$output_dir/Jarvis.app"
+  if ! mkdir "$app_dir"; then
+    printf 'Refusing to overwrite existing app: %s\n' "$app_dir" >&2
+    exit 1
+  fi
+else
+  bundle_dir="$(mktemp -d "$output_dir/Jarvis.XXXXXX")"
+  app_dir="$bundle_dir/Jarvis.app"
+fi
 mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
 cp "$script_dir/Info.plist" "$app_dir/Contents/Info.plist"
 if [ "${JARVIS_SAFARI_EXPERIMENT_BUNDLE:-0}" = 1 ]; then

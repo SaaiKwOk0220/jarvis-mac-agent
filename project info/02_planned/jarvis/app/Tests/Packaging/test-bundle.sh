@@ -20,3 +20,12 @@ test -f "$output/Contents/Resources/GRDB_GRDB.bundle/test.txt"
 test ! -e "$output/Unrelated.bundle"
 test "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$output/Contents/Info.plist")" = true
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$output/Contents/Info.plist")" = JarvisMenuBar
+
+# Stable experiment output is predictable and never overwrites an existing app.
+stable="$tmp_dir/stable"
+output="$(PATH="$tmp_dir/bin:$PATH" FAKE_BUILD_DIR="$tmp_dir/build" JARVIS_SAFARI_EXPERIMENT_BUNDLE=1 JARVIS_STABLE_OUTPUT=1 "$app_dir/scripts/build-dev-app.sh" "$stable")"
+test "$output" = "$stable/Jarvis.app"
+test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$output/Contents/Info.plist")" = local.jarvis.safari-experiment
+printf sentinel > "$output/sentinel"
+if PATH="$tmp_dir/bin:$PATH" FAKE_BUILD_DIR="$tmp_dir/build" JARVIS_SAFARI_EXPERIMENT_BUNDLE=1 JARVIS_STABLE_OUTPUT=1 "$app_dir/scripts/build-dev-app.sh" "$stable" >/dev/null 2>&1; then exit 1; fi
+test "$(cat "$output/sentinel")" = sentinel
