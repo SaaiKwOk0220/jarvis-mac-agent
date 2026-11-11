@@ -67,7 +67,7 @@ actor SafariClickCapture {
     }
 
     /// Revalidation and AXPress remain non-atomic with respect to Safari.
-    func press(expected: SafariClickIdentity,
+    fileprivate func press(expected: SafariClickIdentity,
                action: (AXUIElement, CFString) -> AXError = AXUIElementPerformAction) async throws {
         guard let before = captured else { throw CaptureError.changed }
         try await verify(expected: expected)
@@ -95,7 +95,7 @@ actor SafariClickApprovalPrototype {
     private var cleaning = 0
     private let enabled: Bool
     private let capture: SafariClickCapture
-    private let perform: @Sendable () async throws -> Void
+    private let action: @Sendable (AXUIElement, CFString) -> AXError
     private let clock: @Sendable () -> TimeInterval
     private var lastReading: TimeInterval?
     private func readClock() throws -> TimeInterval {
@@ -104,8 +104,8 @@ actor SafariClickApprovalPrototype {
         lastReading = value
         return value
     }
-    init(enabled: Bool = false, capture: SafariClickCapture, clock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }, perform: @escaping @Sendable () async throws -> Void) {
-        self.enabled = enabled; self.capture = capture; self.clock = clock; self.perform = perform
+    init(enabled: Bool = false, capture: SafariClickCapture, clock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }, action: @escaping @Sendable (AXUIElement, CFString) -> AXError) {
+        self.enabled = enabled; self.capture = capture; self.clock = clock; self.action = action
     }
     func prepare(requestID: UUID, identity: SafariClickIdentity) async throws -> UUID {
         guard enabled else { throw Failure.disabled }
@@ -156,9 +156,17 @@ actor SafariClickApprovalPrototype {
             try await capture.verify(expected: entry.identity)
             guard entry.generation == generation else { throw Failure.invalid }
             try Task.checkCancellation()
-            guard try readClock() < entry.expires else { throw Failure.expired }
-            // Once perform begins, cancellation cannot undo the external action.
-            try await perform()
+            let beforePress = try readClock()
+            guard beforePress < entry.expires else { throw Failure.expired }
+            let clock = self.clock
+            let action = self.action
+            // The AX check and action are not atomic; cancellation cannot undo a started press.
+            try await capture.press(expected: entry.identity) { element, operation in
+                let now = clock()
+                guard now.isFinite, now >= beforePress, now < entry.expires,
+                      !Task.isCancelled else { return .failure }
+                return action(element, operation)
+            }
             await capture.clear()
         } catch {
             await capture.clear()
@@ -171,7 +179,7 @@ actor SafariClickApprovalPrototype {
 #if os(macOS)
 /// Unregistered adapter. The caller must immediately revalidate capture before
 /// invoking it; AXPress is not atomic with validation and cannot be undone.
-enum SafariAXPressAdapter {
+private enum SafariAXPressAdapter {
     static func perform(_ candidate: SafariClickCandidate,
                         action: (AXUIElement, CFString) -> AXError = AXUIElementPerformAction) throws {
         guard candidate.identity.enabled else { throw SafariAXReadError.targetChanged }

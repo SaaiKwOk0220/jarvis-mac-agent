@@ -25,9 +25,11 @@ private final class ClickTestClock: @unchecked Sendable {
     func set(_ next: TimeInterval) { lock.lock(); defer { lock.unlock() }; value = next }
 }
 
-private actor ClickActionCounter {
-    var value = 0
-    func increment() { value += 1 }
+private final class ClickActionCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+    func increment() { lock.lock(); defer { lock.unlock() }; count += 1 }
 }
 
 private actor ClickVerifyGate {
@@ -54,20 +56,6 @@ private actor ClickFixtureCounter {
 }
 
 extension SafariClickTicketTests {
-    func testPressAdapterAllowsOnlyPressWithInjectedAction() throws {
-        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "digest")
-        let ref = AXUIElementCreateSystemWide()
-        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
-        var calls = 0
-        try SafariAXPressAdapter.perform(candidate) { _, action in
-            calls += 1
-            XCTAssertEqual(action as String, kAXPressAction as String)
-            return .success
-        }
-        XCTAssertEqual(calls, 1)
-        XCTAssertThrowsError(try SafariAXPressAdapter.perform(candidate) { _, _ in .failure })
-    }
-
     func testApprovalPrototypeExecutesOnceAndFailsClosed() async throws {
         let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "digest")
         let element = AXUIElementCreateSystemWide()
@@ -75,11 +63,13 @@ extension SafariClickTicketTests {
         let capture = SafariClickCapture { [candidate] }
         let counter = ClickActionCounter()
         let clock = ClickTestClock()
-        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: capture, clock: { clock.read() }) { await counter.increment() }
+        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: capture, clock: { clock.read() }) { _, operation in XCTAssertEqual(operation as String, kAXPressAction as String); counter.increment(); return .success }
         let id = UUID()
         let token = try await coordinator.prepare(requestID: id, identity: identity)
         try await coordinator.approve(token: token, requestID: id, digest: "digest")
         do { try await coordinator.approve(token: token, requestID: id, digest: "digest"); XCTFail("replay") } catch { }
+        let tampered = try await coordinator.prepare(requestID: id, identity: identity)
+        do { try await coordinator.approve(token: tampered, requestID: id, digest: "tampered"); XCTFail("tampered digest") } catch { }
         let expired = try await coordinator.prepare(requestID: id, identity: identity)
         clock.set(71)
         do { try await coordinator.approve(token: expired, requestID: id, digest: "digest"); XCTFail("expired") } catch { }
@@ -87,21 +77,8 @@ extension SafariClickTicketTests {
         await coordinator.cancel()
         do { try await capture.verify(expected: identity); XCTFail("cancelled reference retained") } catch { }
         do { try await coordinator.approve(token: cancelled, requestID: id, digest: "digest"); XCTFail("cancelled") } catch { }
-        let count = await counter.value
+        let count = counter.value
         XCTAssertEqual(count, 1)
-    }
-
-    func testCaptureRevalidatesBeforeInjectedPress() async throws {
-        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "digest")
-        let ref = AXUIElementCreateSystemWide()
-        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
-        let capture = SafariClickCapture { [candidate] }
-        try await capture.capture(expected: identity)
-        try await capture.press(expected: identity) { _, action in
-            XCTAssertEqual(action as String, kAXPressAction as String)
-            return .success
-        }
-        do { try await capture.press(expected: identity) { _, _ in .success }; XCTFail("replay") } catch { }
     }
 
     func testOverlappingCancelKeepsCleanupBarrier() async throws {
@@ -111,7 +88,7 @@ extension SafariClickTicketTests {
         let entered = expectation(description: "first cleanup")
         let gate = ClickVerifyGate(entered, blockAt: 1)
         let capture = SafariClickCapture(beforeClear: { await gate.visit() }) { [candidate] }
-        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: capture, clock: { 11 }) { }
+        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: capture, clock: { 11 }) { _, _ in .success }
         _ = try await coordinator.prepare(requestID: UUID(), identity: identity)
         let first = Task { await coordinator.cancel() }
         await fulfillment(of: [entered], timeout: 2)
@@ -129,7 +106,7 @@ extension SafariClickTicketTests {
         let entered = expectation(description: "cleanup started")
         let gate = ClickVerifyGate(entered, blockAt: 1)
         let capture = SafariClickCapture(beforeClear: { await gate.visit() }) { [candidate] }
-        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: capture, clock: { 11 }) { }
+        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: capture, clock: { 11 }) { _, _ in .success }
         let token = try await coordinator.prepare(requestID: UUID(), identity: identity)
         let rejection = Task { await coordinator.reject(token: token) }
         await fulfillment(of: [entered], timeout: 2)
@@ -144,13 +121,13 @@ extension SafariClickTicketTests {
         let ref = AXUIElementCreateSystemWide()
         let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
         let counter = ClickActionCounter()
-        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: SafariClickCapture { [candidate] }, clock: { 11 }) { await counter.increment() }
+        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: SafariClickCapture { [candidate] }, clock: { 11 }) { _, operation in XCTAssertEqual(operation as String, kAXPressAction as String); counter.increment(); return .success }
         let id = UUID()
         let token = try await coordinator.prepare(requestID: id, identity: identity)
         await coordinator.reject(token: UUID())
         do { try await coordinator.approve(token: UUID(), requestID: id, digest: "digest"); XCTFail("unknown token") } catch { }
         try await coordinator.approve(token: token, requestID: id, digest: "digest")
-        let count = await counter.value
+        let count = counter.value
         XCTAssertEqual(count, 1)
     }
 
@@ -162,14 +139,14 @@ extension SafariClickTicketTests {
         let gate = ClickVerifyGate(entered, blockAt: 1)
         let capture = SafariClickCapture { await gate.visit(); return [candidate] }
         let counter = ClickActionCounter()
-        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: capture, clock: { 11 }) { await counter.increment() }
+        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: capture, clock: { 11 }) { _, operation in XCTAssertEqual(operation as String, kAXPressAction as String); counter.increment(); return .success }
         let task = Task { try await coordinator.prepare(requestID: UUID(), identity: identity) }
         await fulfillment(of: [entered], timeout: 2)
         task.cancel()
         await gate.release()
         do { _ = try await task.value; XCTFail("cancelled capture issued ticket") } catch { }
         do { try await capture.verify(expected: identity); XCTFail("capture reference retained") } catch { }
-        let count = await counter.value
+        let count = counter.value
         XCTAssertEqual(count, 0)
     }
 
@@ -178,7 +155,7 @@ extension SafariClickTicketTests {
         let ref = AXUIElementCreateSystemWide()
         let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
         let capture = SafariClickCapture { [candidate] }
-        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: capture, clock: { .nan }) { }
+        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: capture, clock: { .nan }) { _, _ in .success }
         do { _ = try await coordinator.prepare(requestID: UUID(), identity: identity); XCTFail("invalid clock") } catch { }
         do { try await capture.verify(expected: identity); XCTFail("clock failure retained reference") } catch { }
     }
@@ -189,12 +166,12 @@ extension SafariClickTicketTests {
         let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
         let clock = ClickTestClock()
         let counter = ClickActionCounter()
-        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: SafariClickCapture { [candidate] }, clock: { clock.read() }) { await counter.increment() }
+        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: SafariClickCapture { [candidate] }, clock: { clock.read() }) { _, operation in XCTAssertEqual(operation as String, kAXPressAction as String); counter.increment(); return .success }
         let id = UUID()
         let token = try await coordinator.prepare(requestID: id, identity: identity)
         clock.set(10)
         do { try await coordinator.approve(token: token, requestID: id, digest: "digest"); XCTFail("clock moved backward") } catch { }
-        let count = await counter.value
+        let count = counter.value
         XCTAssertEqual(count, 0)
     }
 
@@ -207,7 +184,7 @@ extension SafariClickTicketTests {
         let clock = ClickTestClock()
         let capture = SafariClickCapture { await gate.visit(); return [candidate] }
         let counter = ClickActionCounter()
-        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: capture, clock: { clock.read() }) { await counter.increment() }
+        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: capture, clock: { clock.read() }) { _, operation in XCTAssertEqual(operation as String, kAXPressAction as String); counter.increment(); return .success }
         let id = UUID()
         let token = try await coordinator.prepare(requestID: id, identity: identity)
         let task = Task { try await coordinator.approve(token: token, requestID: id, digest: "digest") }
@@ -215,7 +192,7 @@ extension SafariClickTicketTests {
         clock.set(71)
         await gate.release()
         do { try await task.value; XCTFail("expired while verifying") } catch { }
-        let count = await counter.value
+        let count = counter.value
         XCTAssertEqual(count, 0)
     }
 
@@ -226,7 +203,7 @@ extension SafariClickTicketTests {
         let clock = ClickFixtureCounter()
         let capture = SafariClickCapture { let date = await clock.next(); return [SafariClickCandidate(element: candidate.element, window: candidate.window, launchDate: date, identity: identity)] }
         let counter = ClickActionCounter()
-        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: capture, clock: { 11 }) { await counter.increment() }
+        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: capture, clock: { 11 }) { _, operation in XCTAssertEqual(operation as String, kAXPressAction as String); counter.increment(); return .success }
         let id = UUID()
         let rejected = try await coordinator.prepare(requestID: id, identity: identity)
         await coordinator.reject(token: rejected)
@@ -234,7 +211,7 @@ extension SafariClickTicketTests {
         do { try await coordinator.approve(token: rejected, requestID: id, digest: "digest"); XCTFail("rejected") } catch { }
         let changed = try await coordinator.prepare(requestID: id, identity: identity)
         do { try await coordinator.approve(token: changed, requestID: id, digest: "digest"); XCTFail("changed") } catch { }
-        let count = await counter.value
+        let count = counter.value
         XCTAssertEqual(count, 0)
     }
 
@@ -246,7 +223,7 @@ extension SafariClickTicketTests {
         let gate = ClickVerifyGate(entered)
         let capture = SafariClickCapture { await gate.visit(); return [candidate] }
         let counter = ClickActionCounter()
-        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: capture, clock: { 11 }) { await counter.increment() }
+        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: capture, clock: { 11 }) { _, operation in XCTAssertEqual(operation as String, kAXPressAction as String); counter.increment(); return .success }
         let id = UUID()
         let token = try await coordinator.prepare(requestID: id, identity: identity)
         let task = Task { try await coordinator.approve(token: token, requestID: id, digest: "digest") }
@@ -255,7 +232,7 @@ extension SafariClickTicketTests {
         task.cancel()
         await gate.release()
         do { try await task.value; XCTFail("cancelled during verification") } catch { }
-        let count = await counter.value
+        let count = counter.value
         XCTAssertEqual(count, 0)
     }
 
