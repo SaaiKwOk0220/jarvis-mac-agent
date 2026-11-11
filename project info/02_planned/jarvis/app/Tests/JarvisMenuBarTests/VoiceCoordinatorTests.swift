@@ -73,7 +73,155 @@ private struct ConversationTestWaiter: ApprovalWaiter {
     func waitForResolution(requestID: UUID, payloadDigest: String, taskID: UUID) async throws -> ToolResolution { .cancelled }
 }
 
+private final class PCMTestCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [[Float]] = []
+    func append(_ frame: [Float]) { lock.lock(); defer { lock.unlock() }; stored.append(frame) }
+    var frames: [[Float]] { lock.lock(); defer { lock.unlock() }; return stored }
+}
 @MainActor final class VoiceCoordinatorTests: XCTestCase {
+    func testBoundedPCMQueueConcurrentOverflowIsTerminal() async {
+        let queue = BoundedPCMQueue(capacity: 1)
+        XCTAssertTrue(queue.append([1]))
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<100 { group.addTask { _ = queue.append([2]) } }
+        }
+        XCTAssertTrue(queue.failed)
+        XCTAssertNil(queue.take(maximum: 1))
+    }
+    func testFinishWaitsForSubmissionAlreadyHoldingLifecycleLock() async {
+        let entered = expectation(description: "submit entered critical section")
+        let release = DispatchSemaphore(value: 0)
+        let finishStarted = expectation(description: "finish attempts lifecycle lock")
+        let values = PCMTestCollector()
+        let worker = OfflineVADWorker(capacity: 4, frameSize: 2, afterSubmitLock: {
+            entered.fulfill()
+            release.wait()
+        }, beforeFinishLock: { finishStarted.fulfill() }) { values.append($0) }
+        let submit = Task.detached { worker.submit([1, 2]) }
+        await fulfillment(of: [entered], timeout: 2)
+        let finish = Task.detached { await worker.finish() }
+        await fulfillment(of: [finishStarted], timeout: 2)
+        release.signal()
+        let accepted = await submit.value
+        await finish.value
+        XCTAssertTrue(accepted)
+        XCTAssertEqual(values.frames, [[1, 2]])
+    }
+
+    func testConcurrentFinishNeverLosesAcceptedFrame() async {
+        for _ in 0..<200 {
+            let values = PCMTestCollector()
+            let worker = OfflineVADWorker(capacity: 4, frameSize: 2) { values.append($0) }
+            let submitted = Task.detached { worker.submit([1, 2]) }
+            await worker.finish()
+            let accepted = await submitted.value
+            if accepted { XCTAssertEqual(values.frames, [[1, 2]]) }
+        }
+    }
+    func testVADWorkerFinishWaitsForScheduledFrames() async {
+        let values = PCMTestCollector()
+        let worker = OfflineVADWorker(capacity: 16, frameSize: 2) { values.append($0) }
+        XCTAssertTrue(worker.submit([1, 2, 3, 4]))
+        await worker.finish()
+        XCTAssertEqual(values.frames, [[1, 2], [3, 4]])
+        XCTAssertFalse(worker.submit([5, 6]))
+    }
+    func testVADWorkerFinishDiscardsPartialAndRejectsMoreInput() async {
+        let values = PCMTestCollector()
+        let worker = OfflineVADWorker(capacity: 8, frameSize: 2) { values.append($0) }
+        XCTAssertTrue(worker.submit([1]))
+        await worker.finish()
+        XCTAssertEqual(values.frames, [])
+        XCTAssertFalse(worker.submit([2]))
+    }
+    func testVADWorkerBuffersIncompleteFrames() async {
+        let values = PCMTestCollector()
+        let worker = OfflineVADWorker(capacity: 8, frameSize: 2) { values.append($0) }
+        XCTAssertTrue(worker.submit([1]))
+        await worker.drain()
+        XCTAssertEqual(values.frames, [])
+        XCTAssertTrue(worker.submit([2, 3]))
+        await worker.drain()
+        XCTAssertEqual(values.frames, [[1, 2]])
+    }
+    func testVADWorkerFailureStopsConsumption() async {
+        let worker = OfflineVADWorker(capacity: 8, frameSize: 2) { _ in throw NSError(domain: "test", code: 1) }
+        XCTAssertTrue(worker.submit([1, 2]))
+        await worker.drain()
+        XCTAssertTrue(worker.failed)
+        XCTAssertFalse(worker.submit([3, 4]))
+    }
+    func testBoundedPCMQueueFailsClosedOnOverflow() {
+        let queue = BoundedPCMQueue(capacity: 3)
+        XCTAssertTrue(queue.append([1, 2]))
+        XCTAssertFalse(queue.append([3, 4]))
+        XCTAssertTrue(queue.failed)
+        XCTAssertNil(queue.take(maximum: 3))
+    }
+    func testBoundedPCMQueuePreservesOrderAcrossWrap() {
+        let queue = BoundedPCMQueue(capacity: 3)
+        XCTAssertTrue(queue.append([1, 2]))
+        XCTAssertEqual(queue.take(maximum: 1), [1])
+        XCTAssertTrue(queue.append([3, 4]))
+        XCTAssertEqual(queue.take(maximum: 3), [2, 3, 4])
+    }
+
+    func testStreamingResamplerMatchesWholeSignal() throws {
+        let source = (0..<48_000).map { Float(sin(Double($0) * 2 * .pi * 1_000 / 48_000)) }
+        let whole = try StreamingPCMResampler(sourceRate: 48_000).convert(source, final: true)
+        let stream = try StreamingPCMResampler(sourceRate: 48_000)
+        var chunked = [Float]()
+        for start in stride(from: 0, to: source.count, by: 4_800) {
+            chunked += try stream.convert(Array(source[start..<min(start + 4_800, source.count)]))
+        }
+        chunked += try stream.convert([], final: true)
+        XCTAssertEqual(chunked.count, whole.count)
+        let difference = zip(chunked, whole).reduce(0.0) { $0 + Double(abs($1.0 - $1.1)) } / Double(max(whole.count, 1))
+        XCTAssertLessThan(difference, 0.001)
+    }
+
+    func testStreamingResamplerPreservesLengthAcrossChunks() throws {
+        let converter = try StreamingPCMResampler(sourceRate: 48_000)
+        var result = [Float]()
+        for _ in 0..<10 { result += try converter.convert(Array(repeating: 0, count: 4_800)) }
+        result += try converter.convert([], final: true)
+        XCTAssertEqual(result.count, 16_000, accuracy: 32)
+        XCTAssertTrue(result.allSatisfy { $0.isFinite && abs($0) < 0.001 })
+        XCTAssertThrowsError(try converter.convert([0]))
+    }
+
+    func testOfflineResamplerConverts48kHzSilence() throws {
+        let result = try OfflinePCMResampler.convert(Array(repeating: 0, count: 48_000), sourceRate: 48_000)
+        XCTAssertEqual(result.count, 16_000, accuracy: 32)
+        XCTAssertTrue(result.allSatisfy { $0.isFinite && abs($0) < 0.001 })
+        XCTAssertThrowsError(try OfflinePCMResampler.convert([0], sourceRate: 0))
+    }
+
+    func testBundledVADModelIsValid() throws {
+        let url = try XCTUnwrap(OptionalVADAvailability.bundledModelURL)
+        XCTAssertEqual(OptionalVADAvailability.check(enabled: true, modelURL: url), .available)
+        let model = try SileroOfflineInference(modelURL: url)
+        XCTAssertTrue((0...1).contains(try model.probability(frame: Array(repeating: 0, count: 512))))
+    }
+
+    func testSileroModelProducesFiniteProbabilities() throws {
+        guard let path = ProcessInfo.processInfo.environment["JARVIS_TEST_VAD_MODEL"] else {
+            throw XCTSkip("Set JARVIS_TEST_VAD_MODEL to test the optional model")
+        }
+        let model = try SileroOfflineInference(modelURL: URL(fileURLWithPath: path))
+        for _ in 0..<3 {
+            let probability = try model.probability(frame: Array(repeating: 0, count: 512))
+            XCTAssertTrue((0...1).contains(probability))
+        }
+        XCTAssertThrowsError(try model.probability(frame: [0]))
+    }
+
+    func testOptionalVADIsDisabledByDefaultAndFallsBackForMissingModel() {
+        XCTAssertEqual(OptionalVADAvailability.check(enabled: false, modelURL: nil), .disabled)
+        XCTAssertEqual(OptionalVADAvailability.check(enabled: true, modelURL: nil), .fallback)
+    }
+
     func testSyntheticNoiseAndSlowSpeechExposeEnergyBaselineLimits() {
         func frame(_ value: Float, _ seconds: Int) -> VADFrame {
             VADFrame(samples: Array(repeating: value, count: 160 * seconds), sampleRate: 160)
