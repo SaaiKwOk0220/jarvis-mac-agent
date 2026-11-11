@@ -84,6 +84,21 @@ actor SafariClickCapture {
 #endif
 
 #if os(macOS)
+/// Lock linearizes revocation with the beginning of the synchronous AX call.
+/// An action already begun cannot be undone; a blocked AX call can delay cancel.
+private final class SafariClickRevocationGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var active = false
+    func activate() { lock.lock(); active = true; lock.unlock() }
+    func revoke() { lock.lock(); active = false; lock.unlock() }
+    func run(_ action: () -> AXError) -> AXError {
+        lock.lock(); defer { lock.unlock() }
+        guard active else { return .failure }
+        active = false
+        return action()
+    }
+}
+
 /// Testable approval coordinator. Not wired to any production tool or AX action.
 actor SafariClickApprovalPrototype {
     enum Failure: Error { case disabled, invalid, expired, changed }
@@ -96,6 +111,7 @@ actor SafariClickApprovalPrototype {
     private let enabled: Bool
     private let capture: SafariClickCapture
     private let action: @Sendable (AXUIElement, CFString) -> AXError
+    private let revocation = SafariClickRevocationGate()
     private let clock: @Sendable () -> TimeInterval
     private var lastReading: TimeInterval?
     private func readClock() throws -> TimeInterval {
@@ -120,6 +136,7 @@ actor SafariClickApprovalPrototype {
             guard current == generation else { throw Failure.invalid }
             let expires = try readClock() + 60
             let token = UUID()
+            revocation.activate()
             pending[token] = Pending(requestID: requestID, identity: identity, expires: expires, generation: current)
             return token
         } catch {
@@ -128,12 +145,13 @@ actor SafariClickApprovalPrototype {
         }
     }
     func cancel() async {
-        generation &+= 1; pending.removeAll(); cleaning += 1
+        generation &+= 1; pending.removeAll(); revocation.revoke(); cleaning += 1
         defer { cleaning -= 1 }
         await capture.clear()
     }
     func reject(token: UUID) async {
         if pending.removeValue(forKey: token) != nil {
+            revocation.revoke()
             cleaning += 1
             defer { cleaning -= 1 }
             await capture.clear()
@@ -143,6 +161,7 @@ actor SafariClickApprovalPrototype {
         guard let entry = pending.removeValue(forKey: token) else { throw Failure.invalid }
         guard entry.requestID == requestID, entry.identity.requestDigest == digest,
               entry.generation == generation else {
+            revocation.revoke()
             cleaning += 1
             defer { cleaning -= 1 }
             await capture.clear()
@@ -160,15 +179,17 @@ actor SafariClickApprovalPrototype {
             guard beforePress < entry.expires else { throw Failure.expired }
             let clock = self.clock
             let action = self.action
+            let revocation = self.revocation
             // The AX check and action are not atomic; cancellation cannot undo a started press.
             try await capture.press(expected: entry.identity) { element, operation in
                 let now = clock()
                 guard now.isFinite, now >= beforePress, now < entry.expires,
                       !Task.isCancelled else { return .failure }
-                return action(element, operation)
+                return revocation.run { action(element, operation) }
             }
             await capture.clear()
         } catch {
+            revocation.revoke()
             await capture.clear()
             throw error
         }

@@ -215,6 +215,30 @@ extension SafariClickTicketTests {
         XCTAssertEqual(count, 0)
     }
 
+    func testCancelDuringSecondVerificationBeforeDelayedClearPreventsPress() async throws {
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "digest")
+        let ref = AXUIElementCreateSystemWide()
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let verifyEntered = expectation(description: "second verification")
+        let clearEntered = expectation(description: "delayed clear")
+        let verifyGate = ClickVerifyGate(verifyEntered, blockAt: 3)
+        let clearGate = ClickVerifyGate(clearEntered, blockAt: 1)
+        let capture = SafariClickCapture(beforeClear: { await clearGate.visit() }) { await verifyGate.visit(); return [candidate] }
+        let counter = ClickActionCounter()
+        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: capture, clock: { 11 }) { _, _ in counter.increment(); return .success }
+        let id = UUID()
+        let token = try await coordinator.prepare(requestID: id, identity: identity)
+        let approval = Task { try await coordinator.approve(token: token, requestID: id, digest: "digest") }
+        await fulfillment(of: [verifyEntered], timeout: 2)
+        let cancellation = Task { await coordinator.cancel() }
+        await fulfillment(of: [clearEntered], timeout: 2)
+        await verifyGate.release()
+        await clearGate.release()
+        await cancellation.value
+        do { try await approval.value; XCTFail("cancelled approval") } catch { }
+        XCTAssertEqual(counter.value, 0)
+    }
+
     func testTaskCancelWhileVerifyingPreventsPerform() async throws {
         let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "digest")
         let ref = AXUIElementCreateSystemWide()
