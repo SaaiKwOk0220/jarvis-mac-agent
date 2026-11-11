@@ -277,7 +277,7 @@ final class VADTerminalState: @unchecked Sendable {
 
 /// Optional VAD runs off the tap; any loss or unsupported format fails closed.
 final class OptionalLiveVAD: @unchecked Sendable {
-    private static let initializationQueue = DispatchQueue(label: "jarvis.vad.model-initialization")
+    private static let initializationBusy = ManagedAtomic(false)
     private let queue: RealtimePCMBuffer
     private let channelCount: Int
     private let sampleRate: Double
@@ -286,8 +286,14 @@ final class OptionalLiveVAD: @unchecked Sendable {
     private let terminal = VADTerminalState()
     private let active = ManagedAtomic(true)
     private let producerBusy = ManagedAtomic(false)
+    private let acceptedFrames = ManagedAtomic<Int>(0)
+    private let consumedFrames = ManagedAtomic<Int>(0)
+    var testFrameCounts: (accepted: Int, consumed: Int) {
+        (acceptedFrames.load(ordering: .acquiring), consumedFrames.load(ordering: .acquiring))
+    }
     private let onProducerAcquired: (@Sendable () -> Void)?
     private let beforeInitialize: (@Sendable () -> Void)?
+    private let beforeInference: (@Sendable () -> Void)?
     private let onFailure: @MainActor @Sendable (String) -> Void
     private let onSilence: @MainActor @Sendable () -> Void
     private var converter: StreamingPCMResampler?
@@ -299,6 +305,7 @@ final class OptionalLiveVAD: @unchecked Sendable {
     init(format: AVAudioFormat, modelURL: URL, pause: Double,
          onProducerAcquired: (@Sendable () -> Void)? = nil,
          beforeInitialize: (@Sendable () -> Void)? = nil,
+         beforeInference: (@Sendable () -> Void)? = nil,
          onFailure: @escaping @MainActor @Sendable (String) -> Void,
          onSilence: @escaping @MainActor @Sendable () -> Void) throws {
         guard format.commonFormat == .pcmFormatFloat32, (1...8).contains(Int(format.channelCount)),
@@ -307,7 +314,7 @@ final class OptionalLiveVAD: @unchecked Sendable {
         queue = RealtimePCMBuffer(capacity: Int(format.sampleRate) * channelCount * 2)
         self.modelURL = modelURL
         detector = SpeechPauseDetector(pauseDuration: pause)
-        self.onProducerAcquired = onProducerAcquired; self.beforeInitialize = beforeInitialize
+        self.onProducerAcquired = onProducerAcquired; self.beforeInitialize = beforeInitialize; self.beforeInference = beforeInference
         self.onFailure = onFailure; self.onSilence = onSilence
     }
     func start() {
@@ -318,14 +325,14 @@ final class OptionalLiveVAD: @unchecked Sendable {
         worker.async { [weak self] in
             guard let self, self.active.load(ordering: .acquiring) else { return }
             do {
-                let prepared: (StreamingPCMResampler, SileroOfflineInference)? = try Self.initializationQueue.sync {
-                    guard self.active.load(ordering: .acquiring) else { return nil }
-                    self.beforeInitialize?()
-                    guard self.active.load(ordering: .acquiring) else { return nil }
-                    return (try StreamingPCMResampler(sourceRate: self.sampleRate), try SileroOfflineInference(modelURL: self.modelURL))
-                }
-                guard self.active.load(ordering: .acquiring), let prepared else { return }
-                self.converter = prepared.0; self.model = prepared.1
+                guard Self.initializationBusy.compareExchange(expected: false, desired: true, ordering: .acquiringAndReleasing).exchanged else { self.fail(); return }
+                defer { Self.initializationBusy.store(false, ordering: .releasing) }
+                self.beforeInitialize?()
+                guard self.active.load(ordering: .acquiring) else { return }
+                let converter = try StreamingPCMResampler(sourceRate: self.sampleRate)
+                let model = try SileroOfflineInference(modelURL: self.modelURL)
+                guard self.active.load(ordering: .acquiring) else { return }
+                self.converter = converter; self.model = model
             } catch { self.fail() }
         }
         timer.resume()
@@ -340,6 +347,7 @@ final class OptionalLiveVAD: @unchecked Sendable {
         onProducerAcquired?()
         guard Int(buffer.format.channelCount) == channelCount, buffer.format.sampleRate == sampleRate,
               queue.writePCM(buffer) else { markInvalid(); return }
+        _ = acceptedFrames.wrappingIncrementThenLoad(by: Int(buffer.frameLength), ordering: .relaxed)
     }
     func signalLoss() { if active.load(ordering: .acquiring) { markInvalid() } }
     private func markInvalid() {
@@ -356,12 +364,14 @@ final class OptionalLiveVAD: @unchecked Sendable {
         var raw = [Float](repeating: 0, count: framesPerTick * channelCount)
         let count = raw.withUnsafeMutableBufferPointer { queue.read(into: $0) }
         guard count > 0 else { return }
+        _ = consumedFrames.wrappingIncrementThenLoad(by: count / channelCount, ordering: .relaxed)
         do {
             guard count % channelCount == 0 else { throw NSError(domain: "JarvisVAD", code: 21) }
             let mono = try VADDownmix.mono(Array(raw.prefix(count)), channels: channelCount)
             pending += try converter.convert(mono)
             while pending.count >= 512 {
                 let frame = Array(pending.prefix(512)); pending.removeFirst(512)
+                beforeInference?()
                 let probability = try model.probability(frame: frame)
                 guard !invalid.load(ordering: .acquiring), active.load(ordering: .acquiring) else { fail(); return }
                 if detector.observe(level: probability >= 0.5 ? 0.03 : 0, duration: 512.0 / 16000) {
