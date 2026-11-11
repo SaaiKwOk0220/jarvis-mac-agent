@@ -230,7 +230,9 @@ public struct SafariPageReadExecutor: ToolExecutor, Sendable {
 }
 
 #if os(macOS)
-/// Shared bounded traversal, injectable for tests. Cycles fail closed at the node limit.
+/// Shared bounded traversal, injectable for tests. Individual AX calls and
+/// their returned arrays cannot be given a hard time or memory bound here.
+/// Cycles fail closed at the node limit.
 enum SafariClickTraversal {
     static func find<Node>(root: Node, maxNodes: Int = 3000, maxDepth: Int = 30,
         expired: () -> Bool, inspect: (Node, Bool) throws -> (role: String, match: Bool, children: [Node])) throws -> [Node] {
@@ -242,6 +244,9 @@ enum SafariClickTraversal {
             count += 1
             guard count <= maxNodes, depth <= maxDepth, !expired() else { throw SafariAXReadError.limitExceeded }
             let item = try inspect(node, inWeb)
+            guard !expired(), item.children.count <= maxNodes - count - stack.count else {
+                throw SafariAXReadError.limitExceeded
+            }
             if inWeb && item.match {
                 found.append(node)
                 guard found.count <= 1 else { throw SafariAXReadError.unavailable }

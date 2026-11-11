@@ -48,6 +48,23 @@ extension SafariClickTicketTests {
         XCTAssertEqual(matches, [1])
     }
 
+    func testTraversalRejectsWideTreeBeforeInspectingChildren() throws {
+        var inspections = 0
+        XCTAssertThrowsError(try SafariClickTraversal.find(root: 0, maxNodes: 4, expired: { false }) { _, _ in
+            inspections += 1
+            return ("AXWebArea", false, Array(1...100))
+        })
+        XCTAssertEqual(inspections, 1)
+    }
+
+    func testTraversalRejectsProviderReturningAfterDeadline() throws {
+        var expired = false
+        XCTAssertThrowsError(try SafariClickTraversal.find(root: 0, expired: { expired }) { _, _ in
+            expired = true
+            return ("AXWebArea", false, [Int]())
+        })
+    }
+
     func testCaptureRejectsMissingCandidates() async throws {
         let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "digest")
         let capture = SafariClickCapture { [] }
