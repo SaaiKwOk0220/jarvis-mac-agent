@@ -179,11 +179,14 @@ private final class Runtime {
                 }
             }
         } catch {
-            let alert = NSAlert()
-            alert.messageText = "无法安全打开 Jarvis 数据"
-            alert.informativeText = StartupFailure.message(for: error)
-            alert.alertStyle = .warning
-            alert.runModal()
+            let message = StartupFailure.message(for: error)
+            Task { @MainActor in
+                let alert = NSAlert()
+                alert.messageText = "无法安全打开 Jarvis 数据"
+                alert.informativeText = message
+                alert.alertStyle = .warning
+                alert.runModal()
+            }
         }
     }
 
