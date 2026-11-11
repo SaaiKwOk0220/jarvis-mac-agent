@@ -157,6 +157,23 @@ final class LoopbackServerTests: XCTestCase {
                        "POST /tasks/{id}/complete on a terminal task must return 409; got \(second.status)")
     }
 }
+private func openSlowSocket(port: UInt16, bytes: String) throws -> Int32 {
+    let fd = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+    guard fd >= 0 else { throw NSError(domain: "socket", code: Int(errno)) }
+    var address = sockaddr_in()
+    address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+    address.sin_family = sa_family_t(AF_INET)
+    address.sin_port = port.bigEndian
+    address.sin_addr = in_addr(s_addr: in_addr_t(0x0100007f))
+    let result = withUnsafePointer(to: &address) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) } }
+    guard result == 0 else { Darwin.close(fd); throw NSError(domain: "connect", code: Int(errno)) }
+    var timeout = timeval(tv_sec: 8, tv_usec: 0)
+    _ = withUnsafePointer(to: &timeout) { setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, $0, socklen_t(MemoryLayout<timeval>.size)) }
+    let data = Array(bytes.utf8)
+    guard data.withUnsafeBytes({ Darwin.send(fd, $0.baseAddress, $0.count, 0) }) == data.count else { Darwin.close(fd); throw NSError(domain: "send", code: Int(errno)) }
+    return fd
+}
+
 private func sendRawLoopback(port: UInt16, request: String) throws -> String {
     let descriptor = Darwin.socket(AF_INET, SOCK_STREAM, 0)
     guard descriptor >= 0 else { throw NSError(domain: "test socket", code: Int(errno)) }
@@ -192,6 +209,32 @@ extension LoopbackServerTests {
         defer { server.stop() }
         let response = try sendRawLoopback(port: port, request: "POST /tasks HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\nContent-Length: 100000\r\n\r\n")
         XCTAssertTrue(response.hasPrefix("HTTP/1.1 403"))
+    }
+
+    func testSlowConnectionsExpireAndCapacityRecovers() async throws {
+        let (service, _, _, _, _, _) = try makeService()
+        let server = LoopbackServer(service: service)
+        let port = try await server.start()
+        defer { server.stop() }
+        let token = try XCTUnwrap(server.authorizationToken)
+        var sockets: [Int32] = []
+        defer { sockets.forEach { Darwin.close($0) } }
+        for index in 0..<32 {
+            let request = index == 0
+                ? "POST /tasks HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\nAuthorization: Bearer \(token)\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{"
+                : "GET /tasks HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\n"
+            sockets.append(try openSlowSocket(port: port, bytes: request))
+        }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let excess = try openSlowSocket(port: port, bytes: "GET / HTTP/1.1\r\n")
+        defer { Darwin.close(excess) }
+        var buffer = [UInt8](repeating: 0, count: 16)
+        XCTAssertLessThanOrEqual(Darwin.recv(excess, &buffer, buffer.count, 0), 0)
+        for fd in sockets {
+            XCTAssertLessThanOrEqual(Darwin.recv(fd, &buffer, buffer.count, 0), 0)
+        }
+        let response = try sendRawLoopback(port: port, request: "GET /tasks HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\nAuthorization: Bearer \(token)\r\n\r\n")
+        XCTAssertTrue(response.hasPrefix("HTTP/1.1 200"))
     }
 
     func testAuthenticatedNetworkEnforcesHostOriginAndJSON() async throws {
