@@ -1219,7 +1219,7 @@ extension TaskServiceTests {
         XCTAssertTrue(started)
         try await service.cancel(taskID: task.id)
         await page.release()
-        try await Task.sleep(for: .milliseconds(100))
+        await service.waitForTrackedExecution(request.id)
         let result = try await service.takeEphemeralToolResult(taskID: task.id, requestID: request.id, digest: request.payloadDigest)
         XCTAssertNil(result)
         let events = try fixture.audit.events(for: task.id)

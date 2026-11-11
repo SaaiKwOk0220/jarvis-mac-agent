@@ -208,6 +208,12 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
         try await job.value
     }
 
+    /// Wait for an existing tracked execution to finish; returns immediately if already removed.
+    func waitForTrackedExecution(_ requestID: UUID) async {
+        let job = lock.withLock { executions[requestID] }
+        _ = try? await job?.value
+    }
+
     private func removeExecution(_ requestID: UUID) {
         _ = lock.withLock { executions.removeValue(forKey: requestID) }
     }

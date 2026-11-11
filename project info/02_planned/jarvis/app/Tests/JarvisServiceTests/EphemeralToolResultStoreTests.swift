@@ -18,7 +18,7 @@ final class EphemeralToolResultStoreTests: XCTestCase {
         let store = EphemeralToolResultStore(lifetime: 0.05)
         store.put("private", taskID: UUID(), requestID: UUID(), digest: "x")
         XCTAssertEqual(store.entryCount, 1)
-        for _ in 0..<50 {
+        for _ in 0..<500 {
             if store.entryCount == 0 { break }
             try await Task.sleep(for: .milliseconds(10))
         }

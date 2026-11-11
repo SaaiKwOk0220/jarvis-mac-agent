@@ -40,6 +40,8 @@ public struct Policy: PolicyEvaluator, Sendable {
 
     public func evaluate(_ request: ToolRequest, config: PolicyConfig) -> PolicyDecision {
         if request.name == "safari_read" {
+            // Before enabling: approval must disclose that page text is passed to
+            // the model and may persist in model context or subsequent answers.
             return .deny(reason: "Safari page reading is unavailable until page identity and privacy safeguards are verified")
         }
         if request.name == "browser_open" {
