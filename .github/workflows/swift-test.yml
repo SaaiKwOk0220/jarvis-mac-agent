@@ -14,7 +14,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_16.app
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app
 
       - name: Show toolchain
         run: |
@@ -32,5 +32,19 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-spm-
 
-      - name: Run swift test
-        run: swift test --package-path 'project info/02_planned/jarvis/app'
+      - name: Prepare pinned GRDB source
+        run: |
+          git init "$RUNNER_TEMP/grdb-upstream"
+          git -C "$RUNNER_TEMP/grdb-upstream" remote add origin https://github.com/groue/GRDB.swift.git
+          git -C "$RUNNER_TEMP/grdb-upstream" fetch --depth 1 origin b83108d10f42680d78f23fe4d4d80fc88dab3212
+      - name: Verify controlled dependency preparation
+        env:
+          JARVIS_GRDB_SOURCE_REPO: ${{ runner.temp }}/grdb-upstream
+        run: |
+          'project info/02_planned/jarvis/app/Tests/Packaging/test-controlled-grdb.sh'
+      - name: Run controlled swift test
+        run: |
+          'project info/02_planned/jarvis/app/scripts/with-controlled-grdb.sh' "$RUNNER_TEMP/grdb-upstream" "$RUNNER_TEMP/grdb-controlled" test
+      - name: Build and verify controlled app
+        run: |
+          'project info/02_planned/jarvis/app/scripts/with-controlled-grdb.sh' "$RUNNER_TEMP/grdb-upstream" "$RUNNER_TEMP/grdb-controlled" build "$RUNNER_TEMP/jarvis-app"
