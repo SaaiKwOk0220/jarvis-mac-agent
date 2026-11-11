@@ -15,6 +15,12 @@ struct JarvisMenuBarApp: App {
     private let instanceLock: SingleInstanceLock
 
     init() {
+        #if JARVIS_SAFARI_EXPERIMENT_BUILD
+        guard Bundle.main.bundleIdentifier == "local.jarvis.safari-experiment",
+              Bundle.main.object(forInfoDictionaryKey: "JarvisSafariExperiment") as? Bool == true else {
+            FileHandle.standardError.write(Data("Invalid experimental bundle identity.\n".utf8)); exit(EXIT_FAILURE)
+        }
+        #endif
         do { instanceLock = try SingleInstanceLock() }
         catch {
             let message = "Jarvis is already running, or its instance lock is unavailable. Close older Jarvis instances and try again."
@@ -33,6 +39,13 @@ struct JarvisMenuBarApp: App {
     }
 
     var body: some Scene {
+        #if JARVIS_SAFARI_EXPERIMENT_BUILD
+        Window("Ask Jarvis", id: "ask-jarvis") {
+            AskJarvisView(client: client, service: runtime.taskService, memoryContextProvider: runtime.memoryContextProvider)
+                .frame(minWidth: 520, minHeight: 460)
+        }
+        .defaultSize(width: 620, height: 560)
+        #endif
         Window("Welcome to Jarvis", id: "welcome") {
             WelcomeView()
                 .frame(minWidth: 540, minHeight: 460)
@@ -68,6 +81,7 @@ struct JarvisMenuBarApp: App {
                 .frame(minWidth: 420, minHeight: 360)
         }
         .defaultSize(width: 520, height: 460)
+        #if !JARVIS_SAFARI_EXPERIMENT_BUILD
         Window("Ask Jarvis", id: "ask-jarvis") {
             AskJarvisView(
                 client: client,
@@ -77,6 +91,7 @@ struct JarvisMenuBarApp: App {
             .frame(minWidth: 520, minHeight: 460)
         }
         .defaultSize(width: 620, height: 560)
+        #endif
         Window("Memory", id: "memory") {
             if let memory = runtime.memory {
                 MemoryView(memory: memory)
@@ -109,13 +124,18 @@ private final class Runtime {
     init(client: ServiceClient) {
         do {
             let appSupport = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
-                appropriateFor: nil, create: true).appendingPathComponent("Jarvis", isDirectory: true)
+                appropriateFor: nil, create: true).appendingPathComponent(AppStorageNamespace.current, isDirectory: true)
             try FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true)
             let database = try Database(path: appSupport.appendingPathComponent("jarvis.sqlite").path)
             try database.migrate()
             self.memory = try SQLiteMemoryStore(database: database)
+            #if JARVIS_SAFARI_EXPERIMENT_BUILD
+            let safariReadEnabled = AppStorageNamespace.safariReadEnabled(bundleID: Bundle.main.bundleIdentifier, flag: ProcessInfo.processInfo.environment["JARVIS_EXPERIMENTAL_SAFARI_READ"])
+            #else
+            let safariReadEnabled = false
+            #endif
             let service = try TaskService(taskRepository: SQLiteTaskRepository(database: database),
-                auditRepository: SQLiteAuditRepository(database: database), policy: Policy(),
+                auditRepository: SQLiteAuditRepository(database: database), policy: Policy(allowSafariRead: safariReadEnabled),
                 policyConfig: PolicyConfig(
                     approvedDirectories: [appSupport.path],
                     commandNames: ["shell", "swift", "xcodebuild"],
@@ -131,7 +151,7 @@ private final class Runtime {
                 terminal: TerminalToolExecutor(),
                 webFetch: WebFetchToolExecutor(),
                 screenshot: ScreenshotToolExecutor(),
-                accessibility: AccessibilityQueryToolExecutor())
+                accessibility: AccessibilityQueryToolExecutor(), enableSafariRead: safariReadEnabled)
             self.taskService = service
             let server = LoopbackServer(service: service)
             self.server = server
