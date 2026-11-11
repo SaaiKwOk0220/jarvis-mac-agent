@@ -70,7 +70,7 @@ final class ServiceClientTests: XCTestCase {
         let port = try await server.start()
         defer { server.stop() }
 
-        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: server.authorizationToken)
         let requests = try await client.loadApprovalRequests(taskID: task.id)
         XCTAssertEqual(requests.count, 1)
         XCTAssertEqual(requests[0].id, request.id)
@@ -91,7 +91,7 @@ final class ServiceClientTests: XCTestCase {
         let port = try await server.start()
         defer { server.stop() }
 
-        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: server.authorizationToken)
         let events = try await client.loadTimeline(taskID: task.id)
         XCTAssertEqual(events.map(\.summary), ["task created"])
         XCTAssertEqual(client.timelineEvents[task.id]?.count, 1)
@@ -106,7 +106,7 @@ final class ServiceClientTests: XCTestCase {
         let port = try await server.start()
         defer { server.stop() }
 
-        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: server.authorizationToken)
         let task = try await client.createTask(title: "Created from menu")
         XCTAssertEqual(task.title, "Created from menu")
         XCTAssertEqual(client.selectedTask?.id, task.id)
@@ -123,7 +123,7 @@ final class ServiceClientTests: XCTestCase {
         let port = try await server.start()
         defer { server.stop() }
 
-        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: server.authorizationToken)
         let task = try await client.createTask(title: "Conflict approve")
         try await client.startDemoApproval(taskID: task.id)
         let request = try XCTUnwrap(client.approvalRequests.values.first)
@@ -152,7 +152,7 @@ final class ServiceClientTests: XCTestCase {
         let port = try await server.start()
         defer { server.stop() }
 
-        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: server.authorizationToken)
         let task = try await client.createTask(title: "Conflict cancel")
 
         try await client.cancel(taskID: task.id)
@@ -179,7 +179,7 @@ final class ServiceClientTests: XCTestCase {
         let port = try await server.start()
         defer { server.stop() }
 
-        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: server.authorizationToken)
         let task = try await client.createTask(title: "Clear action error")
         try await client.cancel(taskID: task.id)
         do { try await client.cancel(taskID: task.id); XCTFail("Expected throw") } catch { }
@@ -199,7 +199,7 @@ final class ServiceClientTests: XCTestCase {
         let port = try await server.start()
         defer { server.stop() }
 
-        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: server.authorizationToken)
         let task = try await client.createTask(title: "Demo approval")
         try await client.startDemoApproval(taskID: task.id)
         let request = try XCTUnwrap(client.approvalRequests.values.first)
@@ -235,7 +235,7 @@ final class ServiceClientTests: XCTestCase {
         let server = LoopbackServer(service: service)
         let port = try await server.start()
         defer { server.stop() }
-        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: server.authorizationToken)
 
         _ = try await client.loadApprovalRequests(taskID: task.id)
         XCTAssertEqual(client.approvalRequests.count, 1)
@@ -273,7 +273,7 @@ final class ServiceClientTests: XCTestCase {
         let server = LoopbackServer(service: service)
         let port = try await server.start()
         defer { server.stop() }
-        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: server.authorizationToken)
 
         let fetched = try await client.loadApprovalRequests(taskID: task.id)
         XCTAssertEqual(fetched.count, 2, "Server should return both pending requests for the task")
@@ -297,7 +297,7 @@ final class ServiceClientTests: XCTestCase {
         let port = try await server.start()
         defer { server.stop() }
 
-        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: server.authorizationToken)
         // NewTaskView flow: just call createTask; do not call select.
         let task = try await client.createTask(title: "From new task view")
         XCTAssertEqual(client.selectedTask?.id, task.id,
@@ -321,7 +321,7 @@ final class ServiceClientTests: XCTestCase {
         let port = try await server.start()
         defer { server.stop() }
 
-        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: server.authorizationToken)
         let task = try await client.createTask(title: "Menu complete task")
 
         // Drive a .read request so the task lands in .running (the new
@@ -369,7 +369,7 @@ final class ServiceClientTests: XCTestCase {
         let port = try await server.start()
         defer { server.stop() }
 
-        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: server.authorizationToken)
         // Inject stale entries that no longer correspond to any task on the server.
         let stale1 = UUID()
         let stale2 = UUID()
@@ -414,7 +414,7 @@ final class ServiceClientTests: XCTestCase {
         let port = try await server.start()
         defer { server.stop() }
 
-        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: server.authorizationToken)
         let task = try await client.createTask(title: "Menu shell command")
 
         try await client.submitShellCommand(
@@ -478,7 +478,7 @@ final class ServiceClientTests: XCTestCase {
         let port = try await server.start()
         defer { server.stop() }
 
-        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: server.authorizationToken)
         let task = try await client.createTask(title: "Menu fetch URL")
 
         let targetURL = "https://example.com/page"
@@ -531,7 +531,7 @@ final class ServiceClientTests: XCTestCase {
         let port = try await server.start()
         defer { server.stop() }
 
-        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: server.authorizationToken)
         let task = try await client.createTask(title: "Menu screenshot")
 
         try await client.submitScreenshot(
@@ -620,7 +620,7 @@ final class ServiceClientTests: XCTestCase {
         let port = try await server.start()
         defer { server.stop() }
 
-        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: server.authorizationToken)
         let task = try await client.createTask(title: "Menu accessibility query")
 
         try await client.submitAccessibilityQuery(
