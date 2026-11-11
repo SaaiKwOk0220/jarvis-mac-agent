@@ -50,6 +50,12 @@ final class AgentRunLogTests: XCTestCase {
         XCTAssertEqual(log.entries.filter { $0.kind == .assistant }.count, 1)
         XCTAssertTrue(log.entries.contains { $0.kind == .error && $0.text.contains("iteration limit") })
     }
+    func testWideLayoutRequiresSufficientFiniteWidth() {
+        XCTAssertFalse(VoiceWorkspaceLayout.usesWideLayout(width: 620))
+        XCTAssertFalse(VoiceWorkspaceLayout.usesWideLayout(width: .infinity))
+        XCTAssertTrue(VoiceWorkspaceLayout.usesWideLayout(width: 950))
+    }
+
 }
 
 private struct ReplyProvider: LLMProvider {
