@@ -128,6 +128,12 @@ struct AskJarvisView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Ask Jarvis").font(.title2).bold()
+            #if JARVIS_EXACT_BROWSER_EXPERIMENT
+            Text(ExactBrowserExperiment.current
+                 ? "完整网址实验已启用；打开前仍需逐次审批。"
+                 : "完整网址实验未启用；仅支持域名。")
+                .font(.caption).foregroundStyle(.secondary)
+            #endif
             Text("Describe a goal. Jarvis plans tool calls and runs them through the same policy gate and approval flow as any other task.")
                 .font(.callout).foregroundStyle(.secondary)
             Text("开启语音对话后，回答朗读结束会再次打开麦克风。可随时点击“结束语音对话”停止。取消自动运行后编辑并手动运行，仍会继续本次语音对话。")
@@ -372,7 +378,7 @@ struct AskJarvisView: View {
             }
             runningTaskID = task.id
             log.append(AgentLogEntry(kind: .info, text: "Task \(task.id.uuidString.prefix(8)) created"))
-            let runner = TaskServiceToolRunner(service: service, taskID: task.id)
+            let runner = TaskServiceToolRunner(service: service, taskID: task.id, exactBrowserEnabled: ExactBrowserExperiment.current)
             let waiter = TaskServiceApprovalWaiter(service: service)
             let prompt = AgentLoop.defaultSystemPrompt + (token == nil ? "" : "\nFor voice conversation, answer naturally and concisely in the user's language. Preserve necessary safety, approval and error details; do not invent actions.")
             let session = AgentSession(provider: OllamaProvider(), runner: runner, approvalWaiter: waiter,

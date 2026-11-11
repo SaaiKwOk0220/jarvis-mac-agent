@@ -20,7 +20,7 @@ struct NewScreenshotView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Capture Screenshot").font(.title2).bold()
-            Text("Creates a task and captures the main display. The resulting PNG is saved under ~/Library/Application Support/Jarvis/screenshots/.")
+            Text("Creates a task and captures the main display. The PNG is saved under ~/Library/Application Support/\(ExactBrowserExperiment.directoryName)/screenshots/.")
                 .font(.callout).foregroundStyle(.secondary)
 
             VStack(alignment: .leading, spacing: 4) {

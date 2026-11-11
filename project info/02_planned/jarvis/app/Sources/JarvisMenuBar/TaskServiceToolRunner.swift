@@ -19,6 +19,7 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
     private let service: any TaskServiceAPI
     private let taskID: UUID
     private let appSupportDirectory: URL
+    private let exactBrowserEnabled: Bool
 
     /// Summary the service writes on the audit event that carries a finished
     /// tool's output; the runner matches observations on this plus the
@@ -40,7 +41,7 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
             appropriateFor: nil,
             create: false
         )) ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        return base.appendingPathComponent("Jarvis", isDirectory: true)
+        return base.appendingPathComponent(ExactBrowserExperiment.directoryName, isDirectory: true)
     }
 
     /// - Parameters:
@@ -52,11 +53,13 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
     public init(
         service: any TaskServiceAPI,
         taskID: UUID,
-        appSupportDirectory: URL = TaskServiceToolRunner.defaultAppSupportDirectory
+        appSupportDirectory: URL = TaskServiceToolRunner.defaultAppSupportDirectory,
+        exactBrowserEnabled: Bool = false
     ) {
         self.service = service
         self.taskID = taskID
         self.appSupportDirectory = appSupportDirectory
+        self.exactBrowserEnabled = exactBrowserEnabled
     }
 
     /// The catalog advertised to the model for this run. Descriptions name the
@@ -66,8 +69,8 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
         [
             LLMTool(
                 name: "browser_open",
-                description: "Open a user-requested HTTPS page in the default browser after approval. Approval covers opening the initial URL only; the browser may redirect, run scripts, or send network requests afterward. Does not read page contents. Only an origin is supported; paths, query strings, fragments, and credentials are rejected.",
-                parameters: ["url": LLMToolParameter(type: "string", description: "HTTPS origin only, without a path, query, fragment, or credentials.")]
+                description: exactBrowserEnabled ? "Open a user-requested HTTPS address after approval; the full address may contain sensitive values and will be shown for approval. Browser redirects and network activity may follow. Does not read page contents." : "Open a user-requested HTTPS origin after approval. Paths, query strings, fragments and credentials are rejected. The browser may redirect or send network requests afterward.",
+                parameters: ["url": LLMToolParameter(type: "string", description: exactBrowserEnabled ? "HTTPS address, including path or query; no credentials or fragment." : "HTTPS origin only, without a path, query, fragment, or credentials.")]
             ),
             LLMTool(
                 name: "shell",
