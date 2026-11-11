@@ -129,6 +129,8 @@ struct AskJarvisView: View {
     @State private var voiceWillAutoSubmit = false
     @State private var followLatest = false
     @State private var showVoiceDiagnostics = false
+    @State private var modelDiagnostic: OllamaDiagnostic?
+    @State private var checkingModel = false
     @State private var voiceDiagnostic: VoiceDiagnosticSnapshot?
     @State private var voiceDiagnosticReason: String?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -244,6 +246,17 @@ struct AskJarvisView: View {
                     .font(.caption).foregroundStyle(.secondary)
             } else if showVoiceDiagnostics {
                 Text("格式：\(voiceDiagnostic?.formatSupported.map { $0 ? "支持" : "不支持" } ?? "未知") · 超过阈值：\(voiceDiagnostic?.aboveThreshold.map { $0 ? "是" : "否" } ?? "未知") · 静音：\(voiceDiagnostic?.silenceSeconds ?? 0, specifier: "%.1f") 秒 · 结束：\(voiceDiagnosticReason ?? "尚未结束")").font(.caption)
+            }
+            DisclosureGroup("本地模型服务") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Button(checkingModel ? "正在检查…" : "检查 Ollama 和模型") {
+                        checkingModel = true
+                        Task { modelDiagnostic = await OllamaDiagnostic.check(); checkingModel = false }
+                    }.disabled(checkingModel)
+                    if let modelDiagnostic { Text(modelDiagnostic.message).font(.caption).textSelection(.enabled) }
+                    Text("仅检查本机服务和模型列表，不会自动安装或启动服务。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
             DisclosureGroup("语音设置") {
                 if VADBuildAccess.currentAllowed {
