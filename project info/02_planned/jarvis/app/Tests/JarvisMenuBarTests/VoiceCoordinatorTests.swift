@@ -269,13 +269,14 @@ private final class PCMTestCollector: @unchecked Sendable {
         XCTAssertThrowsError(try OfflinePCMResampler.convert([0], sourceRate: 0))
     }
 
-    func testVADTerminalFailureAndEndpointAreMutuallyExclusive() {
+    func testVADTerminalFailureCanSupersedeEndpointCandidate() {
         let failureFirst = VADTerminalState()
         XCTAssertTrue(failureFirst.fail())
         XCTAssertFalse(failureFirst.endpoint())
         let endpointFirst = VADTerminalState()
         XCTAssertTrue(endpointFirst.endpoint())
-        XCTAssertFalse(endpointFirst.fail())
+        XCTAssertTrue(endpointFirst.fail())
+        XCTAssertFalse(endpointFirst.confirmEndpoint())
     }
 
     func testLiveVADConcurrentProducerFailsClosed() async throws {
