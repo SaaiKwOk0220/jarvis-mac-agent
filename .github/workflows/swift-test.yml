@@ -2,7 +2,7 @@ name: swift-test
 
 on:
   pull_request:
-    branches: [main, feat/voice-conversation, feat/controlled-browser-open]
+    branches: [main, feat/voice-conversation, feat/controlled-browser-open, feat/browser-exact-url]
   push:
     branches: [main]
 

@@ -15,6 +15,12 @@ struct JarvisMenuBarApp: App {
     private let instanceLock: SingleInstanceLock
 
     init() {
+        #if JARVIS_EXACT_BROWSER_EXPERIMENT
+        guard Bundle.main.bundleIdentifier == ExactBrowserExperiment.bundleID,
+              Bundle.main.object(forInfoDictionaryKey: "JarvisBrowserExperiment") as? Bool == true else {
+            FileHandle.standardError.write(Data("Invalid experimental bundle identity.\n".utf8)); exit(EXIT_FAILURE)
+        }
+        #endif
         do { instanceLock = try SingleInstanceLock() }
         catch {
             let message = "Jarvis is already running, or its instance lock is unavailable. Close older Jarvis instances and try again."
@@ -109,7 +115,7 @@ private final class Runtime {
     init(client: ServiceClient) {
         do {
             let appSupport = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
-                appropriateFor: nil, create: true).appendingPathComponent("Jarvis", isDirectory: true)
+                appropriateFor: nil, create: true).appendingPathComponent(ExactBrowserExperiment.directoryName, isDirectory: true)
             try FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true)
             let database = try Database(path: appSupport.appendingPathComponent("jarvis.sqlite").path)
             try database.migrate()
@@ -132,13 +138,13 @@ private final class Runtime {
                 webFetch: WebFetchToolExecutor(),
                 screenshot: ScreenshotToolExecutor(),
                 accessibility: AccessibilityQueryToolExecutor(),
-                browserOpen: BrowserOpenExecutor())
+                browserOpen: BrowserOpenExecutor(), exactBrowserEnabled: ExactBrowserExperiment.current)
             self.taskService = service
             let server = LoopbackServer(service: service)
             self.server = server
             Task { @MainActor in
-                if let port = try? await server.start() {
-                    client.configure(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+                if let token = server.authorizationToken, let port = try? await server.start() {
+                    client.configure(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: token)
                     _ = try? await client.refresh()
                 }
             }
