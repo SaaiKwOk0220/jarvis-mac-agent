@@ -34,7 +34,12 @@ final class ScriptedTaskService: TaskServiceAPI, @unchecked Sendable {
     }
 
     func listTimelineEvents(taskID: UUID) async throws -> [TimelineEvent] {
-        lock.withLock { scriptedTimeline }
+        lock.withLock {
+            scriptedTimeline.map { event in
+                let requestID = recordedRequests.last(where: { $0.payloadDigest == event.actionDigest })?.id
+                return TimelineEvent(id: event.id, timestamp: event.timestamp, worker: event.worker, target: event.target, sideEffect: event.sideEffect, actionDigest: event.actionDigest, summary: event.summary, result: event.result, approvalID: event.approvalID, requestID: requestID)
+            }
+        }
     }
 
     // The runner only drives `submit` and `listTimelineEvents`; the remaining

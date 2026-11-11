@@ -48,7 +48,7 @@ public final class TaskServiceApprovalWaiter: ApprovalWaiter, @unchecked Sendabl
             // Reverse so the most recent matching event wins, in case the
             // timeline ever carries more than one terminal entry per digest.
             for event in events.reversed() {
-                guard event.actionDigest == payloadDigest else { continue }
+                guard event.actionDigest == payloadDigest, event.requestID == requestID else { continue }
                 switch event.summary {
                 case "ephemeral tool result":
                     guard event.result == requestID.uuidString else { continue }
@@ -61,6 +61,7 @@ public final class TaskServiceApprovalWaiter: ApprovalWaiter, @unchecked Sendabl
                 case Self.toolFailureSummary:
                     return .failed(reason: event.result)
                 case Self.approvalRejectedSummary:
+                    guard event.approvalID != nil else { continue }
                     return .rejected(reason: event.result)
                 default:
                     continue

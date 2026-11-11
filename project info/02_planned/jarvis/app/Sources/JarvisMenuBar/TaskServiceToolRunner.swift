@@ -217,7 +217,7 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
     private func observation(for request: ToolRequest) async throws -> String {
         let events = try await service.listTimelineEvents(taskID: taskID)
         let match = events.last {
-            $0.actionDigest == request.payloadDigest && $0.summary == Self.toolResultSummary
+            $0.actionDigest == request.payloadDigest && $0.requestID == request.id && $0.summary == Self.toolResultSummary
         }
         return match?.result ?? Self.missingObservationFallback
     }

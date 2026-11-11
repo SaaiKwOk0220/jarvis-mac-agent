@@ -13,6 +13,7 @@ public struct AuditEvent: Codable, Identifiable, Sendable, Equatable {
     public let summary: String
     public let result: String
     public let approvalID: UUID?
+    public let requestID: UUID?
 
     public init(
         id: UUID = UUID(),
@@ -24,7 +25,8 @@ public struct AuditEvent: Codable, Identifiable, Sendable, Equatable {
         actionDigest: String,
         summary: String,
         result: String,
-        approvalID: UUID?
+        approvalID: UUID?,
+        requestID: UUID? = nil
     ) {
         self.id = id
         self.timestamp = timestamp
@@ -36,6 +38,7 @@ public struct AuditEvent: Codable, Identifiable, Sendable, Equatable {
         self.summary = summary
         self.result = result
         self.approvalID = approvalID
+        self.requestID = requestID
     }
 }
 
@@ -313,7 +316,7 @@ private func insertApproval(_ approval: Approval, db: GRDB.Database) throws { tr
 private func nextAuditOrder(db: GRDB.Database) throws -> Int64 {
     try Int64.fetchOne(db, sql: "SELECT COALESCE(MAX(event_order), 0) + 1 FROM audit_events") ?? 1
 }
-private func insertAudit(_ event: AuditEvent, db: GRDB.Database) throws { try db.execute(sql: "INSERT INTO audit_events (id,timestamp,task_id,worker,target,side_effect,action_digest,summary,result,approval_id,event_order) VALUES (?,?,?,?,?,?,?,?,?,?,?)", arguments: [event.id.uuidString,event.timestamp,event.taskID.uuidString,redactSecrets(event.worker),redactSecrets(event.target),event.sideEffect.rawValue,redactSecrets(event.actionDigest),redactSecrets(event.summary),redactSecrets(event.result),event.approvalID?.uuidString,try nextAuditOrder(db: db)]) }
+private func insertAudit(_ event: AuditEvent, db: GRDB.Database) throws { try db.execute(sql: "INSERT INTO audit_events (id,timestamp,task_id,worker,target,side_effect,action_digest,summary,result,approval_id,event_order,request_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", arguments: [event.id.uuidString,event.timestamp,event.taskID.uuidString,redactSecrets(event.worker),redactSecrets(event.target),event.sideEffect.rawValue,redactSecrets(event.actionDigest),redactSecrets(event.summary),redactSecrets(event.result),event.approvalID?.uuidString,try nextAuditOrder(db: db),event.requestID?.uuidString]) }
 
 public final class SQLiteAuditRepository: AuditRepository, @unchecked Sendable {
     public let database: Database
@@ -327,8 +330,8 @@ public final class SQLiteAuditRepository: AuditRepository, @unchecked Sendable {
             try db.execute(
                 sql: """
                     INSERT INTO audit_events
-                    (id, timestamp, task_id, worker, target, side_effect, action_digest, summary, result, approval_id, event_order)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, timestamp, task_id, worker, target, side_effect, action_digest, summary, result, approval_id, event_order, request_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                 arguments: [
                     event.id.uuidString,
@@ -342,6 +345,7 @@ public final class SQLiteAuditRepository: AuditRepository, @unchecked Sendable {
                     redactSecrets(event.result),
                     event.approvalID?.uuidString,
                     try nextAuditOrder(db: db),
+                    event.requestID?.uuidString,
                 ]
             )
         }
@@ -500,7 +504,11 @@ private func auditEvent(from row: Row) throws -> AuditEvent {
             actionDigest: try row.decode(forColumn: "action_digest"),
             summary: try row.decode(forColumn: "summary"),
             result: try row.decode(forColumn: "result"),
-            approvalID: approvalID
+            approvalID: approvalID,
+            requestID: try (row.decode(String?.self, forColumn: "request_id")).map { text in
+                guard let id = UUID(uuidString: text) else { throw PersistenceError.invalidStoredAuditEvent }
+                return id
+            }
         )
     } catch {
         throw PersistenceError.invalidStoredAuditEvent

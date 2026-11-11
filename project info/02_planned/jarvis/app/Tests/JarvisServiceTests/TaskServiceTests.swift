@@ -1184,7 +1184,7 @@ extension TaskServiceTests {
         try await service.approve(requestID: request.id, digest: request.payloadDigest)
         try await fixture.waitForRequest(id: request.id, status: .completed)
         let audit = try fixture.audit.events(for: task.id)
-        XCTAssertTrue(audit.contains { $0.summary == "ephemeral tool result" && $0.result == request.id.uuidString })
+        XCTAssertTrue(audit.contains { $0.summary == "ephemeral tool result" && $0.result == request.id.uuidString && $0.requestID == request.id })
         XCTAssertTrue(audit.allSatisfy { !$0.result.contains(secret) && !$0.target.contains(secret) })
         let wrong = try await service.takeEphemeralToolResult(taskID: task.id, requestID: request.id, digest: "wrong")
         XCTAssertNil(wrong)

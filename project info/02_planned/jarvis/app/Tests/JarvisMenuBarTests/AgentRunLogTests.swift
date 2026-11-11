@@ -12,6 +12,12 @@ final class AgentRunLogTests: XCTestCase {
         XCTAssertFalse(line.text.contains("secret"))
     }
 
+    func testSafariResultDoesNotRenderPrivatePageText() {
+        let entry = AgentLogEntry(event: .toolCallSucceeded(name: "safari_read", observation: "private-page-text"))
+        XCTAssertFalse(entry.text.contains("private-page-text"))
+        XCTAssertTrue(entry.text.contains("provided to the model"))
+    }
+
     func testCompletedAssistantEventIsShownOnce() {
         let log = AgentRunLog()
         log.append(AgentLogEntry(event: .assistantText("Hello")))

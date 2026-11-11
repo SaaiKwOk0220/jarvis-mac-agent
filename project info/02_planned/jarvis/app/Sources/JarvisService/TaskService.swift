@@ -78,7 +78,7 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
                 TimelineEvent(id: event.id, timestamp: event.timestamp, worker: event.worker,
                     target: redactSecrets(event.target), sideEffect: event.sideEffect,
                     actionDigest: event.actionDigest, summary: event.summary, result: event.result,
-                    approvalID: event.approvalID)
+                    approvalID: event.approvalID, requestID: event.requestID)
             }
         }
     }
@@ -281,12 +281,12 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     private func requiredTask(_ id: UUID) throws -> JarvisTask { guard let task = try tasks.fetch(id: id) else { throw TaskServiceError.taskNotFound }; return task }
     private func transition(_ task: JarvisTask, to: TaskStatus) throws { do { try TaskStateMachine.validate(from: task.status, to: to) } catch { throw TaskServiceError.illegalTransition(from: task.status, to: to) }; try uow.transition(taskID: task.id, from: task.status, to: to, audits: [event(taskID: task.id, summary: "task transitioned", result: "\(task.status.rawValue) -> \(to.rawValue)")]) }
     private func bounded(_ summary: String) -> String { String(redactSecrets(summary).prefix(512)) }
-    private func event(_ request: ToolRequest, summary: String, result: String, approvalID: UUID? = nil) -> AuditEvent { event(taskID: request.taskID, sideEffect: request.sideEffect, digest: request.payloadDigest, summary: summary, result: result, approvalID: approvalID, target: (request.name == "browser_open" || request.name == "safari_read") ? Self.browserAuditTarget(request.target) : request.target) }
+    private func event(_ request: ToolRequest, summary: String, result: String, approvalID: UUID? = nil) -> AuditEvent { event(taskID: request.taskID, sideEffect: request.sideEffect, digest: request.payloadDigest, summary: summary, result: result, approvalID: approvalID, requestID: request.id, target: (request.name == "browser_open" || request.name == "safari_read") ? Self.browserAuditTarget(request.target) : request.target) }
     private static func browserAuditTarget(_ target: String) -> String {
         guard let parts = URLComponents(string: target), parts.scheme == "https", let host = parts.host else { return "[REDACTED]" }
         return "https://\(host)" + (parts.port.map { ":\($0)" } ?? "")
     }
-    private func event(taskID: UUID, sideEffect: SideEffect = .read, digest: String = "", summary: String, result: String, approvalID: UUID? = nil, target: String = "local task service") -> AuditEvent { AuditEvent(taskID: taskID, worker: "task-service", target: target, sideEffect: sideEffect, actionDigest: digest, summary: summary, result: result, approvalID: approvalID) }
+    private func event(taskID: UUID, sideEffect: SideEffect = .read, digest: String = "", summary: String, result: String, approvalID: UUID? = nil, requestID: UUID? = nil, target: String = "local task service") -> AuditEvent { AuditEvent(taskID: taskID, worker: "task-service", target: target, sideEffect: sideEffect, actionDigest: digest, summary: summary, result: result, approvalID: approvalID, requestID: requestID) }
 }
 
 private final class ExecutionGate: @unchecked Sendable {
