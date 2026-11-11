@@ -44,7 +44,7 @@ public enum SafariAXReadError: LocalizedError {
     case permissionDenied, unavailable, targetChanged, limitExceeded, notFocused, focusTimedOut
     public var errorDescription: String? {
         switch self {
-        case .permissionDenied: return "Accessibility permission is required to read Safari."
+        case .permissionDenied: return "需要辅助功能权限才能读取 Safari。请打开系统设置 → 隐私与安全性 → 辅助功能，允许 Jarvis Safari Experiment（local.jarvis.safari-experiment）；如列表中没有该应用，请用 + 添加当前实验包。授权后返回 Jarvis，重新提交原请求并切换到目标 Safari 页面。Jarvis 不会自动更改权限。"
         case .unavailable: return "The Safari page could not be inspected safely."
         case .targetChanged: return "The Safari window or page changed; start the request again."
         case .limitExceeded: return "The Safari page exceeded the safe read limit."

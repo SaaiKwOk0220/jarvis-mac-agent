@@ -4,6 +4,14 @@ import XCTest
 @testable import JarvisService
 
 final class SafariVisiblePageTests: XCTestCase {
+    func testPermissionDenialExplainsSettingsAndRetry() {
+        let text = SafariAXReadError.permissionDenied.localizedDescription
+        XCTAssertTrue(text.contains("隐私与安全性"))
+        XCTAssertTrue(text.contains("辅助功能"))
+        XCTAssertTrue(text.contains("local.jarvis.safari-experiment"))
+        XCTAssertTrue(text.contains("重新提交"))
+    }
+
     func testRejectsChangedTargetBeforeReturningPage() async throws {
         let reader = SafariVisiblePageReader { _ in SafariPageSnapshot(bundleID: "com.apple.Safari", url: "https://other.example/", text: "private") }
         do {
