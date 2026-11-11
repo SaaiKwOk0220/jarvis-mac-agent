@@ -823,6 +823,23 @@ private final class PCMTestCollector: @unchecked Sendable {
         XCTAssertEqual(sent, ["第一句", "第二句"])
     }
 
+    func testExperimentalAppUsesDistinctDataDirectory() {
+        XCTAssertEqual(AppStorageScope.directory(experimental: false), "Jarvis")
+        XCTAssertEqual(AppStorageScope.directory(experimental: true), "Jarvis-VAD-Experiment")
+    }
+
+    func testConfirmationOnlyEndpointPreservesPartialWithoutFailureOrAutoSubmit() async {
+        let backend = FakeVoiceBackend(); let voice = VoiceCoordinator(backend: backend)
+        var submissions = 0
+        await voice.start(autoSubmit: { _ in submissions += 1 })
+        backend.handler?("测试文字")
+        backend.finishHandler?(false)
+        XCTAssertTrue(voice.needsConfirmation)
+        XCTAssertEqual(voice.transcript, "测试文字")
+        XCTAssertNil(voice.errorMessage)
+        XCTAssertEqual(submissions, 0)
+    }
+
     func testOldFailureCannotStopNewRecording() async {
         let backend = FakeVoiceBackend(); let voice = VoiceCoordinator(backend: backend)
         await voice.start()

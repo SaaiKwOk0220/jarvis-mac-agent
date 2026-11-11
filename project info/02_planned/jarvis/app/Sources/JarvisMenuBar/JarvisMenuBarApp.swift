@@ -112,7 +112,7 @@ private final class Runtime {
         do {
             let supportParent = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
                 appropriateFor: nil, create: true)
-            let appSupport = try PrivateAppStorage.prepare(parent: supportParent)
+            let appSupport = try PrivateAppStorage.prepare(parent: supportParent, directoryName: AppStorageScope.currentDirectory)
             let database = try Database(path: appSupport.appendingPathComponent("jarvis.sqlite").path)
             try database.migrate()
             self.voiceDraftStore = try VoiceDraftStore(database: database)

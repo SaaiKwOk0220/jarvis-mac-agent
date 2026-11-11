@@ -7,7 +7,12 @@ import OnnxRuntimeBindings
 /// Experimental model availability; never drives automatic execution.
 enum OptionalVADAvailability: Equatable {
     case disabled, fallback, available
-    static var bundledModelURL: URL? { Bundle.module.url(forResource: "silero-v6.2.3", withExtension: "onnx") }
+    static var bundledModelURL: URL? {
+        if let path = Bundle.main.resourceURL?.appendingPathComponent("Jarvis_JarvisMenuBar.bundle"),
+           let bundle = Bundle(url: path), let url = bundle.url(forResource: "silero-v6.2.3", withExtension: "onnx") { return url }
+        if Bundle.main.bundleURL.pathExtension == "app" { return nil }
+        return Bundle.module.url(forResource: "silero-v6.2.3", withExtension: "onnx")
+    }
     static let expectedHash = "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3"
     static func check(enabled: Bool, modelURL: URL?) -> Self {
         guard enabled else { return .disabled }
