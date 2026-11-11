@@ -46,7 +46,7 @@ struct AgentLogEntry: Identifiable, Equatable {
                 .joined(separator: ", ")
             self.init(kind: .toolCall, text: "Tool call: \(call.name)({\(arguments)})")
         case .toolCallSucceeded(let name, _) where name == "safari_read":
-            self.init(kind: .result, text: "Safari page text will be provided to the model on continuation; content is not shown here.")
+            self.init(kind: .result, text: "Safari page text will be provided to the model on continuation and may remain in conversation history; content is not shown here.")
         case .toolCallSucceeded(let name, let observation):
             self.init(kind: .result, text: "Result (\(name)): \(Self.abbreviated(observation))")
         case .toolCallDenied(let name, let reason):

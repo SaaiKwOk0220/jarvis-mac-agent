@@ -14,6 +14,17 @@ final class EphemeralToolResultStoreTests: XCTestCase {
         XCTAssertNil(store.take(taskID: task, requestID: request, digest: "a", now: now + 11))
     }
 
+    func testTimerRemovesExpiredValueWithoutARead() async throws {
+        let store = EphemeralToolResultStore(lifetime: 0.05)
+        store.put("private", taskID: UUID(), requestID: UUID(), digest: "x")
+        XCTAssertEqual(store.entryCount, 1)
+        for _ in 0..<50 {
+            if store.entryCount == 0 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(store.entryCount, 0)
+    }
+
     func testClearRemovesOnlyMatchingTask() {
         let store = EphemeralToolResultStore(lifetime: 10)
         let first = UUID(), second = UUID(), one = UUID(), two = UUID(), now = ProcessInfo.processInfo.systemUptime

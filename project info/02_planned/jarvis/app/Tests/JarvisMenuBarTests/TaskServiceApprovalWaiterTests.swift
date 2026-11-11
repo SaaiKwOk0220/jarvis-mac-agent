@@ -113,6 +113,14 @@ final class TaskServiceApprovalWaiterTests: XCTestCase {
         XCTAssertEqual(result, .approved(observation: "current result"))
     }
 
+    func testLegacyUnboundTerminalEventCannotResolvePendingRequest() async throws {
+        let event = terminalEvent(actionDigest: "same", summary: "tool result", result: "old value", requestID: nil)
+        let service = StaticTimelineService(timeline: [event])
+        let waiter = TaskServiceApprovalWaiter(service: service, pollInterval: 0.01, timeout: 0.04)
+        let result = try await waiter.waitForResolution(requestID: UUID(), payloadDigest: "same", taskID: UUID())
+        XCTAssertEqual(result, .timedOut)
+    }
+
     /// A "tool result" audit event whose `actionDigest` matches the request
     /// the waiter was told to follow is the approval-then-success case.
     func testWaiterReturnsApprovedOnToolResultEvent() async throws {

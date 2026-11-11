@@ -39,6 +39,11 @@ final class EphemeralToolResultStore: @unchecked Sendable {
         return entry.value
     }
 
+    var entryCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return entries.count
+    }
+
     func clear(taskID: UUID) {
         lock.lock(); defer { lock.unlock() }
         entries = entries.filter { $0.value.taskID != taskID }

@@ -1194,3 +1194,35 @@ extension TaskServiceTests {
         XCTAssertNil(again)
     }
 }
+
+private actor DelayedPage {
+    private var continuation: CheckedContinuation<Void, Never>?
+    func wait() async { await withCheckedContinuation { continuation = $0 } }
+    func hasStarted() -> Bool { continuation != nil }
+    func release() { continuation?.resume(); continuation = nil }
+}
+
+extension TaskServiceTests {
+    func testCancellationWhileSafariResultPendingDoesNotStoreOrPublishIt() async throws {
+        let fixture = try Fixture(), page = DelayedPage()
+        let reader = SafariVisiblePageReader { expected in
+            await page.wait()
+            return SafariPageSnapshot(bundleID: "com.apple.Safari", url: expected, text: "private-cancelled-page")
+        }
+        let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: AllowTestSafariPolicy(), safariRead: SafariPageReadExecutor(reader: reader), requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
+        let task = try await service.createTask(title: "read page")
+        let request = ToolRequest(taskID: task.id, name: "safari_read", sideEffect: .read, target: "https://example.com/", payload: "Read Safari accessibility text")
+        _ = try await service.submit(request: request)
+        try await service.approve(requestID: request.id, digest: request.payloadDigest)
+        for _ in 0..<100 { if await page.hasStarted() { break }; try await Task.sleep(for: .milliseconds(10)) }
+        let started = await page.hasStarted()
+        XCTAssertTrue(started)
+        try await service.cancel(taskID: task.id)
+        await page.release()
+        try await Task.sleep(for: .milliseconds(100))
+        let result = try await service.takeEphemeralToolResult(taskID: task.id, requestID: request.id, digest: request.payloadDigest)
+        XCTAssertNil(result)
+        let events = try fixture.audit.events(for: task.id)
+        XCTAssertFalse(events.contains { $0.summary == "ephemeral tool result" || $0.result.contains("private-cancelled-page") })
+    }
+}
