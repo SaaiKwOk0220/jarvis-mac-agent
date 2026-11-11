@@ -192,12 +192,25 @@ struct AskJarvisView: View {
                     .font(.caption).foregroundStyle(.secondary)
                 Text("提交的语音任务以明文保存在本机，成功后清除其记录，恢复的原记录需手动删除；未提交转写关闭窗口会丢失。删除不保证安全擦除。")
                     .font(.caption)
-                ForEach(savedVoiceDrafts, id: \.id) { draft in
-                    HStack {
-                        Text(draft.text).lineLimit(2).textSelection(.enabled)
-                        Button("恢复") { if goal.isEmpty { goal = draft.text; restoredVoiceDraftID = draft.id } }.disabled(!goal.isEmpty || isRunning)
-                        Button("删除") { deleteVoiceDraft(draft.id); if restoredVoiceDraftID == draft.id { restoredVoiceDraftID = nil } }.disabled(isRunning)
+                if !savedVoiceDrafts.isEmpty {
+                    Text("已保存的语音草稿").font(.caption.weight(.semibold))
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 8) {
+                            ForEach(savedVoiceDrafts, id: \.id) { draft in
+                                HStack {
+                                    Text(draft.text).lineLimit(2).textSelection(.enabled)
+                                    Button("恢复") { if goal.isEmpty { goal = draft.text; restoredVoiceDraftID = draft.id } }
+                                        .accessibilityLabel("恢复草稿：\(draft.text)")
+                                        .disabled(!goal.isEmpty || isRunning)
+                                    Button("删除") { deleteVoiceDraft(draft.id); if restoredVoiceDraftID == draft.id { restoredVoiceDraftID = nil } }
+                                        .accessibilityLabel("删除草稿：\(draft.text)")
+                                        .disabled(isRunning)
+                                }
+                            }
+                        }
                     }
+                    .frame(maxHeight: 140)
+                    .accessibilityLabel("已保存的语音草稿列表")
                 }
                 if let draftStoreError { Text(draftStoreError).foregroundStyle(.red) }
                 if let error = voice.errorMessage { Text(error).foregroundStyle(.red).font(.caption) }
