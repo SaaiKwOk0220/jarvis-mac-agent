@@ -64,7 +64,6 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
     /// actually be approved instead of discovering the gate by failing.
     public func tools() -> [LLMTool] {
         [
-            LLMTool(name: "safari_read", description: "Read accessibility text from the focused Safari page after explicit approval. Requires exact HTTPS origin with no path, query, or fragment; text may include off-screen and sensitive content. No page actions are performed.", parameters: ["url": LLMToolParameter(type: "string", description: "Exact HTTPS origin of the focused Safari page, including trailing slash.")]),
             LLMTool(
                 name: "browser_open",
                 description: "Open a user-requested HTTPS page in the default browser after approval. Approval covers opening the initial URL only; the browser may redirect, run scripts, or send network requests afterward. Does not read page contents. Only an origin is supported; paths, query strings, fragments, and credentials are rejected.",
