@@ -157,9 +157,28 @@ final class LoopbackServerTests: XCTestCase {
                        "POST /tasks/{id}/complete on a terminal task must return 409; got \(second.status)")
     }
 }
+private actor MutationBarrier {
+    private var entered = false
+    private var released = false
+    private var completed = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private func notify() { let pending = waiters; waiters.removeAll(); pending.forEach { $0.resume() } }
+    func enter() async { entered = true; notify(); while !released { await withCheckedContinuation { waiters.append($0) } } }
+    func release() { released = true; notify() }
+    func finish() { completed = true; notify() }
+    func waitForEntry() async { while !entered { await withCheckedContinuation { waiters.append($0) } } }
+    func waitForCompletion() async { while !completed { await withCheckedContinuation { waiters.append($0) } } }
+}
+
 private struct SlowListService: TaskServiceAPI {
     let underlying: TaskService
-    func createTask(title: String) async throws -> JarvisTask { try await Task.sleep(nanoseconds: 1_000_000_000); return try await underlying.createTask(title: title) }
+    var barrier: MutationBarrier? = nil
+    func createTask(title: String) async throws -> JarvisTask {
+        if let barrier { await barrier.enter() }
+        let result = try await underlying.createTask(title: title)
+        if let barrier { await barrier.finish() }
+        return result
+    }
     func getTask(id: UUID) async throws -> JarvisTask? { try await underlying.getTask(id: id) }
     func listTasks() async throws -> [JarvisTask] { try await Task.sleep(nanoseconds: 6_000_000_000); return try await underlying.listTasks() }
     func submit(request: ToolRequest) async throws -> PolicyDecision { try await underlying.submit(request: request) }
@@ -227,17 +246,37 @@ extension LoopbackServerTests {
 
     func testClientDisconnectDoesNotCancelAcceptedMutation() async throws {
         let (service, _, _, _, _, _) = try makeService()
-        let server = LoopbackServer(service: SlowListService(underlying: service))
+        let barrier = MutationBarrier()
+        let server = LoopbackServer(service: SlowListService(underlying: service, barrier: barrier))
         let port = try await server.start()
         defer { server.stop() }
         let token = try XCTUnwrap(server.authorizationToken)
         let body = "{\"title\":\"disconnect mutation\"}"
         let fd = try openSlowSocket(port: port, bytes: "POST /tasks HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\nAuthorization: Bearer \(token)\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)")
-        try await Task.sleep(nanoseconds: 300_000_000)
+        await barrier.waitForEntry()
         Darwin.close(fd)
-        try await Task.sleep(nanoseconds: 1_300_000_000)
+        await barrier.release()
+        await barrier.waitForCompletion()
         let tasks = try await service.listTasks()
         XCTAssertEqual(tasks.filter { $0.title == "disconnect mutation" }.count, 1)
+    }
+
+    func testStopDuringStartDoesNotReturnStalePort() async throws {
+        let (service, _, _, _, _, _) = try makeService()
+        let server = LoopbackServer(service: service)
+        let barrier = MutationBarrier()
+        server.afterListenerInstalled = { await barrier.enter() }
+        let starting = Task { try await server.start() }
+        await barrier.waitForEntry()
+        server.stop()
+        await barrier.release()
+        do { _ = try await starting.value; XCTFail("stopped start returned a port") }
+        catch is CancellationError { }
+        catch { XCTFail("unexpected error: \(error)") }
+        server.afterListenerInstalled = nil
+        let port = try await server.start()
+        defer { server.stop() }
+        XCTAssertNotEqual(port, 0)
     }
 
     func testConcurrentStartsPermitOnlyOneListener() async throws {

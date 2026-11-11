@@ -25,6 +25,7 @@ public final class LoopbackServer: @unchecked Sendable {
     private var connections: [ObjectIdentifier: NWConnection] = [:]
     private var receiving: Set<ObjectIdentifier> = []
     private let connectionLimit = 32
+    var afterListenerInstalled: (@Sendable () async -> Void)?
     /// Process-local secret; never include in URLs, logs, or persisted state.
     public let authorizationToken: String?
     private let expectedAuthenticationCode: HMAC<SHA256>.MAC?
@@ -168,6 +169,7 @@ public final class LoopbackServer: @unchecked Sendable {
             return true
         }
         guard installed else { listener.cancel(); throw NSError(domain: "JarvisService", code: 3, userInfo: [NSLocalizedDescriptionKey: "listener already running"]) }
+        await afterListenerInstalled?()
         for _ in 0..<100 {
             let state = connectionQueue.sync { (self.listener === listener, listener.port?.rawValue) }
             guard state.0 else { throw CancellationError() }
