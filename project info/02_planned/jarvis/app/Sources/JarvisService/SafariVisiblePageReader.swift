@@ -228,3 +228,58 @@ public struct SafariPageReadExecutor: ToolExecutor, Sendable {
         }
     }
 }
+
+#if os(macOS)
+/// Captures an AX reference only; it never performs an action. AX snapshots
+/// are not atomic and a same-URL document replacement cannot be ruled out.
+enum SafariClickCandidateProvider {
+    static func candidates(expected: SafariClickIdentity) async throws -> [SafariClickCandidate] {
+        guard AXIsProcessTrusted(), !expected.title.isEmpty, expected.enabled else { throw SafariAXReadError.permissionDenied }
+        let pid = await MainActor.run { () -> pid_t? in
+            guard let app = NSWorkspace.shared.frontmostApplication, app.bundleIdentifier == "com.apple.Safari" else { return nil }
+            return app.processIdentifier
+        }
+        guard let pid, pid == expected.pid else { throw SafariAXReadError.notFocused }
+        let app = AXUIElementCreateApplication(pid)
+        let window = try SafariFocusedPageAdapter.element(app, kAXFocusedWindowAttribute as String)
+        let page = try SafariFocusedPageAdapter.readPage(window, includeText: false)
+        guard page.url == expected.url else { throw SafariAXReadError.targetChanged }
+        var stack: [(AXUIElement, Int, Bool)] = [(window, 0, false)]
+        var results: [SafariClickCandidate] = []
+        var count = 0
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while let (node, depth, inWeb) = stack.popLast() {
+            try Task.checkCancellation()
+            count += 1
+            guard count <= 3000, depth <= 30, ContinuousClock.now < deadline,
+                  AXUIElementSetMessagingTimeout(node, 0.25) == .success else { throw SafariAXReadError.limitExceeded }
+            var rawRole: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(node, kAXRoleAttribute as CFString, &rawRole) == .success,
+                  let role = rawRole as? String else { throw SafariAXReadError.unavailable }
+            if inWeb && role == expected.role {
+                var rawTitle: CFTypeRef?
+                var rawEnabled: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(node, kAXTitleAttribute as CFString, &rawTitle) == .success,
+                      let title = rawTitle as? String,
+                      AXUIElementCopyAttributeValue(node, kAXEnabledAttribute as CFString, &rawEnabled) == .success,
+                      let enabled = rawEnabled as? Bool else { throw SafariAXReadError.unavailable }
+                if title == expected.title && enabled {
+                    results.append(SafariClickCandidate(element: node, window: window, identity: expected))
+                    guard results.count <= 1 else { throw SafariAXReadError.unavailable }
+                }
+            }
+            var rawChildren: CFTypeRef?
+            let status = AXUIElementCopyAttributeValue(node, kAXChildrenAttribute as CFString, &rawChildren)
+            if status == .success {
+                guard let children = rawChildren as? [AXUIElement] else { throw SafariAXReadError.unavailable }
+                for child in children { stack.append((child, depth + 1, inWeb || role == "AXWebArea")) }
+            } else if status != .noValue && status != .attributeUnsupported { throw SafariAXReadError.unavailable }
+        }
+        let currentPID = await MainActor.run { NSWorkspace.shared.frontmostApplication?.processIdentifier }
+        guard currentPID == pid,
+              CFEqual(window, try SafariFocusedPageAdapter.element(app, kAXFocusedWindowAttribute as String)),
+              try SafariFocusedPageAdapter.readPage(window, includeText: false).url == expected.url else { throw SafariAXReadError.targetChanged }
+        return results
+    }
+}
+#endif

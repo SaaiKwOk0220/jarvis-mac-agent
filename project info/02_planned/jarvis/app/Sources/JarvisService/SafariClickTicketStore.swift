@@ -32,6 +32,7 @@ import ApplicationServices
 /// Safari window and return only candidates belonging to its current web area.
 struct SafariClickCandidate: @unchecked Sendable {
     let element: AXUIElement
+    let window: AXUIElement
     let identity: SafariClickIdentity
 }
 
@@ -53,7 +54,8 @@ actor SafariClickCapture {
     func verify(expected: SafariClickIdentity) async throws {
         guard let original = captured, original.identity == expected else { throw CaptureError.changed }
         let matches = try await provider().filter { $0.identity == expected && $0.identity.enabled }
-        guard matches.count == 1, CFEqual(original.element, matches[0].element) else {
+        guard matches.count == 1, CFEqual(original.window, matches[0].window),
+              CFEqual(original.element, matches[0].element) else {
             captured = nil
             throw CaptureError.changed
         }

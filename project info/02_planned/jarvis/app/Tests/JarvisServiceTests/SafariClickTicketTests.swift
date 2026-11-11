@@ -19,9 +19,16 @@ final class SafariClickTicketTests: XCTestCase {
 import ApplicationServices
 
 extension SafariClickTicketTests {
+    func testCaptureRejectsMissingCandidates() async throws {
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "digest")
+        let capture = SafariClickCapture { [] }
+        do { try await capture.capture(expected: identity); XCTFail("missing target must be rejected") }
+        catch SafariClickCapture.CaptureError.ambiguousOrMissing { }
+    }
+
     func testCaptureRejectsAmbiguousCandidates() async throws {
         let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "digest")
-        let candidate = SafariClickCandidate(element: AXUIElementCreateSystemWide(), identity: identity)
+        let candidate = SafariClickCandidate(element: AXUIElementCreateSystemWide(), window: AXUIElementCreateSystemWide(), identity: identity)
         let capture = SafariClickCapture { [candidate, candidate] }
         do {
             try await capture.capture(expected: identity)
