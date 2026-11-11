@@ -56,9 +56,10 @@ enum SpeechCallbackBridge {
         }
     }
 
-    nonisolated static func tap(gate: AudioRequestGate, monitor: AudioPauseMonitor? = nil) -> @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void {
+    nonisolated static func tap(gate: AudioRequestGate, monitor: AudioPauseMonitor? = nil, vad: OptionalLiveVAD? = nil) -> @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void {
         return { @Sendable buffer, _ in
-            if gate.append(buffer) { monitor?.observe(buffer) }
+            if gate.append(buffer) { monitor?.observe(buffer); vad?.submit(buffer) }
+            else { vad?.signalLoss() }
         }
     }
 
@@ -232,6 +233,7 @@ final class AudioPauseMonitor: @unchecked Sendable {
     private var recognitionTask: SFSpeechRecognitionTask?
     private var hasTap = false
     private var monitor: AudioPauseMonitor?
+    private var optionalVAD: OptionalLiveVAD?
     private var diagnosticsEnabled = false
     func setDiagnosticsEnabled(_ enabled: Bool) { diagnosticsEnabled = enabled; monitor?.setDiagnosticsEnabled(enabled) }
     func diagnosticSnapshot() -> VoiceDiagnosticSnapshot? { monitor?.diagnosticSnapshot() }
@@ -268,10 +270,21 @@ final class AudioPauseMonitor: @unchecked Sendable {
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else { throw SpeechError.unavailable }
-        let monitor = AudioPauseMonitor(pauseDuration: VoiceEndpointSettings.pauseSeconds(), onSilence: onSilence)
-        self.monitor = monitor
-        monitor.setDiagnosticsEnabled(diagnosticsEnabled)
-        input.installTap(onBus: 0, bufferSize: 1024, format: format, block: SpeechCallbackBridge.tap(gate: gate, monitor: monitor))
+        let vadEnabled = UserDefaults.standard.bool(forKey: "jarvis.voice.optionalVAD")
+        if vadEnabled {
+            guard let modelURL = OptionalVADAvailability.bundledModelURL else { throw SpeechError.unavailable }
+            let vad = try OptionalLiveVAD(format: format, modelURL: modelURL, pause: VoiceEndpointSettings.pauseSeconds(),
+                onFailure: onFailure,
+                onSilence: { onFailure("检测到停顿，请检查转写并手动运行。") })
+            optionalVAD = vad
+            vad.start()
+            input.installTap(onBus: 0, bufferSize: 1024, format: format, block: SpeechCallbackBridge.tap(gate: gate, vad: vad))
+        } else {
+            let monitor = AudioPauseMonitor(pauseDuration: VoiceEndpointSettings.pauseSeconds(), onSilence: onSilence)
+            self.monitor = monitor
+            monitor.setDiagnosticsEnabled(diagnosticsEnabled)
+            input.installTap(onBus: 0, bufferSize: 1024, format: format, block: SpeechCallbackBridge.tap(gate: gate, monitor: monitor))
+        }
         hasTap = true
         recognitionTask = recognizer.recognitionTask(with: request, resultHandler: SpeechCallbackBridge.recognition(onText: onText, onFailure: onFailure, onFinish: onFinish))
         engine.prepare()
@@ -280,6 +293,8 @@ final class AudioPauseMonitor: @unchecked Sendable {
 
     func finish() {
         engine.stop()
+        optionalVAD?.stop()
+        optionalVAD = nil
         if hasTap { engine.inputNode.removeTap(onBus: 0); hasTap = false }
         audioGate?.finish()
     }

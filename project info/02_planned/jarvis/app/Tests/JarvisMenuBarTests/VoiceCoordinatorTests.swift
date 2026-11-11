@@ -79,6 +79,77 @@ private final class PCMTestCollector: @unchecked Sendable {
     var frames: [[Float]] { lock.lock(); defer { lock.unlock() }; return stored }
 }
 @MainActor final class VoiceCoordinatorTests: XCTestCase {
+    func testRealtimePCMBufferConcurrentProducerConsumer() async {
+        let queue = RealtimePCMBuffer(capacity: 64)
+        let producer = Task.detached {
+            for index in 0..<10_000 {
+                let value = [Float(index)]
+                while !value.withUnsafeBufferPointer({ queue.write($0) }) { await Task.yield() }
+            }
+        }
+        let consumer = Task.detached {
+            var result = [Float]()
+            var scratch = [Float](repeating: 0, count: 16)
+            while result.count < 10_000 {
+                let count = scratch.withUnsafeMutableBufferPointer { queue.read(into: $0) }
+                if count == 0 { await Task.yield() } else { result.append(contentsOf: scratch.prefix(count)) }
+            }
+            return result
+        }
+        await producer.value
+        let result = await consumer.value
+        XCTAssertEqual(result, (0..<10_000).map(Float.init))
+    }
+
+    func testRealtimePCMBufferCopiesInterleavedStereoAndRejectsOverflow() throws {
+        let format = try XCTUnwrap(AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 44_100, channels: 2, interleaved: true))
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 2))
+        buffer.frameLength = 2
+        let channels = try XCTUnwrap(buffer.floatChannelData)
+        channels[0][0] = 1; channels[0][2] = 2
+        channels[1][0] = 3; channels[1][2] = 4
+        let queue = RealtimePCMBuffer(capacity: 4)
+        XCTAssertTrue(queue.writePCM(buffer))
+        XCTAssertFalse(queue.writePCM(buffer))
+        var output = [Float](repeating: 0, count: 4)
+        XCTAssertEqual(output.withUnsafeMutableBufferPointer { queue.read(into: $0) }, 4)
+        XCTAssertEqual(output, [1, 3, 2, 4])
+    }
+
+    func testVADDownmixPreservesFramesAndRejectsIncompleteInput() throws {
+        XCTAssertEqual(try VADDownmix.mono([1, -1, 0.5, 0.5], channels: 2), [0, 0.5])
+        XCTAssertEqual(try VADDownmix.mono([0.2, -0.3], channels: 1), [0.2, -0.3])
+        XCTAssertThrowsError(try VADDownmix.mono([0, 1, 2], channels: 2))
+        XCTAssertThrowsError(try VADDownmix.mono([Float.nan], channels: 1))
+    }
+
+    func testRealtimePCMBufferCopiesPlanarStereo() throws {
+        let format = try XCTUnwrap(AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48_000, channels: 2, interleaved: false))
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 2))
+        buffer.frameLength = 2
+        let channels = try XCTUnwrap(buffer.floatChannelData)
+        channels[0][0] = 1; channels[0][1] = 2
+        channels[1][0] = 3; channels[1][1] = 4
+        let queue = RealtimePCMBuffer(capacity: 4)
+        XCTAssertTrue(queue.writePCM(buffer))
+        var output = [Float](repeating: 0, count: 4)
+        XCTAssertEqual(output.withUnsafeMutableBufferPointer { queue.read(into: $0) }, 4)
+        XCTAssertEqual(output, [1, 3, 2, 4])
+    }
+
+    func testRealtimePCMBufferPreservesOrderAndRejectsOverflow() {
+        let queue = RealtimePCMBuffer(capacity: 4)
+        XCTAssertTrue([Float(1), 2, 3].withUnsafeBufferPointer { queue.write($0) })
+        XCTAssertFalse([Float(4), 5].withUnsafeBufferPointer { queue.write($0) })
+        var first = [Float](repeating: 0, count: 2)
+        XCTAssertEqual(first.withUnsafeMutableBufferPointer { queue.read(into: $0) }, 2)
+        XCTAssertEqual(first, [1, 2])
+        XCTAssertTrue([Float(4), 5].withUnsafeBufferPointer { queue.write($0) })
+        var rest = [Float](repeating: 0, count: 4)
+        XCTAssertEqual(rest.withUnsafeMutableBufferPointer { queue.read(into: $0) }, 3)
+        XCTAssertEqual(Array(rest.prefix(3)), [3, 4, 5])
+    }
+
     func testBoundedPCMQueueConcurrentOverflowIsTerminal() async {
         let queue = BoundedPCMQueue(capacity: 1)
         XCTAssertTrue(queue.append([1]))
@@ -195,6 +266,21 @@ private final class PCMTestCollector: @unchecked Sendable {
         XCTAssertEqual(result.count, 16_000, accuracy: 32)
         XCTAssertTrue(result.allSatisfy { $0.isFinite && abs($0) < 0.001 })
         XCTAssertThrowsError(try OfflinePCMResampler.convert([0], sourceRate: 0))
+    }
+
+    func testLiveVADRejectsUnexpectedFormatWithoutSilence() throws {
+        let url = try XCTUnwrap(OptionalVADAvailability.bundledModelURL)
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
+        let other = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 1))
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: other, frameCapacity: 32))
+        buffer.frameLength = 32
+        let failed = expectation(description: "failure")
+        let silence = expectation(description: "no silence")
+        silence.isInverted = true
+        let vad = try OptionalLiveVAD(format: format, modelURL: url, pause: 2, onFailure: { _ in failed.fulfill() }, onSilence: { silence.fulfill() })
+        vad.start(); vad.submit(buffer)
+        wait(for: [failed, silence], timeout: 0.3)
+        vad.stop()
     }
 
     func testBundledVADModelIsValid() throws {
