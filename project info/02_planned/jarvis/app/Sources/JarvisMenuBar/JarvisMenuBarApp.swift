@@ -17,7 +17,7 @@ struct JarvisMenuBarApp: App {
     init() {
         do { instanceLock = try SingleInstanceLock() }
         catch {
-            let message = (error as? PrivateAppStorage.StorageError)?.localizedDescription ?? "Jarvis is already running, or its instance lock is unavailable. Close older Jarvis instances and try again."
+            let message = StartupFailure.message(for: error)
             FileHandle.standardError.write(Data("\(message)\n".utf8))
             let alert = NSAlert()
             alert.messageText = "Jarvis could not start"
@@ -145,13 +145,11 @@ private final class Runtime {
                 }
             }
         } catch {
-            if let storageError = error as? PrivateAppStorage.StorageError {
-                let alert = NSAlert()
-                alert.messageText = "无法安全打开 Jarvis 数据"
-                alert.informativeText = storageError.localizedDescription
-                alert.alertStyle = .warning
-                alert.runModal()
-            }
+            let alert = NSAlert()
+            alert.messageText = "无法安全打开 Jarvis 数据"
+            alert.informativeText = StartupFailure.message(for: error)
+            alert.alertStyle = .warning
+            alert.runModal()
         }
     }
 
