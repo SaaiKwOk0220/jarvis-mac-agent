@@ -268,6 +268,43 @@ private final class PCMTestCollector: @unchecked Sendable {
         XCTAssertThrowsError(try OfflinePCMResampler.convert([0], sourceRate: 0))
     }
 
+    func testLiveVADConcurrentProducerFailsClosed() async throws {
+        let url = try XCTUnwrap(OptionalVADAvailability.bundledModelURL)
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 16))
+        buffer.frameLength = 16
+        let entered = expectation(description: "producer acquired")
+        let failed = expectation(description: "concurrent producer fails")
+        let release = DispatchSemaphore(value: 0)
+        let vad = try OptionalLiveVAD(format: format, modelURL: url, pause: 2, onProducerAcquired: {
+            entered.fulfill(); release.wait()
+        }, onFailure: { _ in failed.fulfill() }, onSilence: {})
+        vad.start()
+        let first = Task.detached { vad.submit(buffer) }
+        await fulfillment(of: [entered], timeout: 2)
+        vad.submit(buffer)
+        release.signal()
+        await first.value
+        await fulfillment(of: [failed], timeout: 3)
+        vad.stop()
+    }
+
+    func testLiveVADHandlesHighRateSilence() async throws {
+        let url = try XCTUnwrap(OptionalVADAvailability.bundledModelURL)
+        for rate in [96_000.0, 192_000.0] {
+            let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1))
+            let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(rate * 0.02)))
+            buffer.frameLength = buffer.frameCapacity
+            let failed = expectation(description: "no failure at \(rate)")
+            failed.isInverted = true
+            let vad = try OptionalLiveVAD(format: format, modelURL: url, pause: 2, onFailure: { _ in failed.fulfill() }, onSilence: {})
+            vad.start()
+            for _ in 0..<12 { vad.submit(buffer); try await Task.sleep(for: .milliseconds(20)) }
+            await fulfillment(of: [failed], timeout: 0.2)
+            vad.stop()
+        }
+    }
+
     func testLiveVADRejectsUnexpectedFormatWithoutSilence() throws {
         let url = try XCTUnwrap(OptionalVADAvailability.bundledModelURL)
         let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
@@ -690,6 +727,19 @@ private final class PCMTestCollector: @unchecked Sendable {
             backend.finishHandler?(true)
         }
         XCTAssertEqual(sent, ["第一句", "第二句"])
+    }
+
+    func testOldFailureCannotStopNewRecording() async {
+        let backend = FakeVoiceBackend(); let voice = VoiceCoordinator(backend: backend)
+        await voice.start()
+        let oldFailure = backend.failureHandler
+        voice.stop()
+        await voice.start()
+        XCTAssertTrue(voice.isRecording)
+        oldFailure?("旧会话错误")
+        XCTAssertTrue(voice.isRecording)
+        XCTAssertNil(voice.errorMessage)
+        voice.stop()
     }
 
     func testDraftUpdatePrecedesAutoSubmitAndLateTextIsIgnored() async {
