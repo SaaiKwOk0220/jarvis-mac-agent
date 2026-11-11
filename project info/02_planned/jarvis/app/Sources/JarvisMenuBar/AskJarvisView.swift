@@ -237,12 +237,12 @@ struct AskJarvisView: View {
 
             DisclosureGroup("本地模型服务") {
                 VStack(alignment: .leading, spacing: 8) {
-                    Button(checkingModel ? "正在检查…" : "检查 Ollama 和模型") {
+                    Button(checkingModel ? "正在检查…" : "检查默认 Ollama 和模型") {
                         checkingModel = true
                         Task { modelDiagnostic = await OllamaDiagnostic.check(); checkingModel = false }
                     }.disabled(checkingModel)
                     if let modelDiagnostic { Text(modelDiagnostic.message).font(.caption).textSelection(.enabled) }
-                    Text("仅检查本机服务和模型列表，不会自动安装或启动服务。")
+                    Text("检查默认地址 127.0.0.1:11434 和模型 qwen3:4b-instruct，不会自动安装或启动服务。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }

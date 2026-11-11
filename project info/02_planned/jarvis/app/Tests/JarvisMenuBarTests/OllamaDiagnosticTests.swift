@@ -2,6 +2,12 @@ import XCTest
 @testable import JarvisMenuBar
 
 final class OllamaDiagnosticTests: XCTestCase {
+    func testMessagesIdentifyDefaultScope() {
+        for result in [OllamaDiagnostic.ready, .modelMissing, .unavailable, .unexpectedResponse] {
+            XCTAssertTrue(result.message.contains("默认"))
+        }
+    }
+
     func testModelListDistinguishesMissingAndPresent() {
         let data = Data(#"{"models":[{"name":"qwen3:4b-instruct"}]}"#.utf8)
         XCTAssertEqual(OllamaDiagnostic.classify(status: 200, data: data, model: "qwen3:4b-instruct"), .ready)

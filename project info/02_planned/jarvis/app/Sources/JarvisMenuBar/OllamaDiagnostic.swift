@@ -1,4 +1,5 @@
 import Foundation
+import JarvisLLM
 
 private final class RejectRedirects: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
@@ -27,11 +28,11 @@ enum OllamaDiagnostic: Equatable {
     static func check() async -> Self {
         let session = localSession()
         defer { session.invalidateAndCancel() }
-        guard let url = URL(string: "http://127.0.0.1:11434/api/tags") else { return .unexpectedResponse }
-        return await check(url: url, session: session)
+        let provider = OllamaProvider()
+        return await check(url: provider.baseURL.appendingPathComponent("api/tags"), session: session, model: provider.model)
     }
 
-    static func check(url: URL, session: URLSession, timeout: Duration = .seconds(4), limit: Int = 262_144) async -> Self {
+    static func check(url: URL, session: URLSession, timeout: Duration = .seconds(4), limit: Int = 262_144, model: String = "qwen3:4b-instruct") async -> Self {
         guard limit > 0 else { return .unexpectedResponse }
         // This is a cooperative deadline: task-group teardown waits for URLSession
         // cancellation to complete, so scheduler/transport delays can extend it.
@@ -45,7 +46,7 @@ enum OllamaDiagnostic: Equatable {
                         guard data.count < limit else { return .unexpectedResponse }
                         data.append(byte)
                     }
-                    return classify(status: http.statusCode, data: data, model: "qwen3:4b-instruct")
+                    return classify(status: http.statusCode, data: data, model: model)
                 } catch { return Task.isCancelled ? .cancelled : .unavailable }
             }
             group.addTask {
@@ -61,10 +62,10 @@ enum OllamaDiagnostic: Equatable {
     var message: String {
         switch self {
         case .cancelled: return "检查已取消。"
-        case .ready: return "本机模型服务可连接，已找到 qwen3:4b-instruct。若仍无法回答，请查看任务错误。"
-        case .modelMissing: return "服务可连接，但未找到 qwen3:4b-instruct。可在终端运行 ollama pull qwen3:4b-instruct，完成后重新检查。"
-        case .unavailable: return "无法连接本机 Ollama（127.0.0.1:11434）。请打开 Ollama 应用；若使用终端，可运行 ollama serve，再点击重新检查。"
-        case .unexpectedResponse: return "本机模型服务返回无法识别的结果。请检查 Ollama 是否正常运行后重试。"
+        case .ready: return "默认本机模型服务可连接，已找到 qwen3:4b-instruct。若仍无法回答，请查看任务错误。"
+        case .modelMissing: return "默认服务可连接，但未找到 qwen3:4b-instruct。可在终端运行 ollama pull qwen3:4b-instruct，完成后重新检查。"
+        case .unavailable: return "无法连接默认本机 Ollama（127.0.0.1:11434）。请打开 Ollama 应用；若使用终端，可运行 ollama serve，再点击重新检查。"
+        case .unexpectedResponse: return "默认本机模型服务返回无法识别的结果。请检查 Ollama 是否正常运行后重试。"
         }
     }
 }
