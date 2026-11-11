@@ -25,7 +25,7 @@ public final class LoopbackServer: @unchecked Sendable {
     private var connections: [ObjectIdentifier: NWConnection] = [:]
     private var receiving: Set<ObjectIdentifier> = []
     private let connectionLimit = 32
-    var afterListenerInstalled: (@Sendable () async -> Void)?
+    let afterListenerInstalled: (@Sendable () async -> Void)?
     /// Process-local secret; never include in URLs, logs, or persisted state.
     public let authorizationToken: String?
     private let expectedAuthenticationCode: HMAC<SHA256>.MAC?
@@ -36,8 +36,9 @@ public final class LoopbackServer: @unchecked Sendable {
     }
 
     // The injectable provider is internal so tests can verify entropy failure is fail-closed.
-    init(service: any TaskServiceAPI, tokenProvider: () -> String?) {
+    init(service: any TaskServiceAPI, tokenProvider: () -> String?, afterListenerInstalled: (@Sendable () async -> Void)? = nil) {
         self.service = service
+        self.afterListenerInstalled = afterListenerInstalled
         let candidate = tokenProvider()
         let token = candidate.flatMap { value -> String? in
             guard value.utf8.count == 64, value.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else { return nil }
@@ -169,11 +170,20 @@ public final class LoopbackServer: @unchecked Sendable {
             return true
         }
         guard installed else { listener.cancel(); throw NSError(domain: "JarvisService", code: 3, userInfo: [NSLocalizedDescriptionKey: "listener already running"]) }
+        var succeeded = false
+        defer {
+            if !succeeded {
+                connectionQueue.sync {
+                    if self.listener === listener { self.listener = nil; listener.cancel() }
+                }
+            }
+        }
         await afterListenerInstalled?()
+        try Task.checkCancellation()
         for _ in 0..<100 {
             let state = connectionQueue.sync { (self.listener === listener, listener.port?.rawValue) }
             guard state.0 else { throw CancellationError() }
-            if let port = state.1, port != 0 { return port }
+            if let port = state.1, port != 0 { succeeded = true; return port }
             try await Task.sleep(nanoseconds: 10_000_000)
         }
         connectionQueue.sync {

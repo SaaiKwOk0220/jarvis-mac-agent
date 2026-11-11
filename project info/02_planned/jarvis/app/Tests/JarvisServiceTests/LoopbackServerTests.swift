@@ -161,13 +161,27 @@ private actor MutationBarrier {
     private var entered = false
     private var released = false
     private var completed = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-    private func notify() { let pending = waiters; waiters.removeAll(); pending.forEach { $0.resume() } }
-    func enter() async { entered = true; notify(); while !released { await withCheckedContinuation { waiters.append($0) } } }
-    func release() { released = true; notify() }
-    func finish() { completed = true; notify() }
-    func waitForEntry() async { while !entered { await withCheckedContinuation { waiters.append($0) } } }
-    func waitForCompletion() async { while !completed { await withCheckedContinuation { waiters.append($0) } } }
+    func enter() async {
+        entered = true
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !released && ContinuousClock.now < deadline { try? await Task.sleep(for: .milliseconds(10)) }
+    }
+    func release() { released = true }
+    func finish() { completed = true }
+    func waitForEntry() async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !entered {
+            guard ContinuousClock.now < deadline else { throw NSError(domain: "barrier entry timeout", code: 1) }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+    func waitForCompletion() async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !completed {
+            guard ContinuousClock.now < deadline else { throw NSError(domain: "barrier completion timeout", code: 1) }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
 }
 
 private struct SlowListService: TaskServiceAPI {
@@ -253,30 +267,44 @@ extension LoopbackServerTests {
         let token = try XCTUnwrap(server.authorizationToken)
         let body = "{\"title\":\"disconnect mutation\"}"
         let fd = try openSlowSocket(port: port, bytes: "POST /tasks HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\nAuthorization: Bearer \(token)\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)")
-        await barrier.waitForEntry()
+        try await barrier.waitForEntry()
         Darwin.close(fd)
         await barrier.release()
-        await barrier.waitForCompletion()
+        try await barrier.waitForCompletion()
         let tasks = try await service.listTasks()
         XCTAssertEqual(tasks.filter { $0.title == "disconnect mutation" }.count, 1)
     }
 
     func testStopDuringStartDoesNotReturnStalePort() async throws {
         let (service, _, _, _, _, _) = try makeService()
-        let server = LoopbackServer(service: service)
         let barrier = MutationBarrier()
-        server.afterListenerInstalled = { await barrier.enter() }
+        let server = LoopbackServer(service: service, tokenProvider: { String(repeating: "a", count: 64) }, afterListenerInstalled: { await barrier.enter() })
         let starting = Task { try await server.start() }
-        await barrier.waitForEntry()
+        try await barrier.waitForEntry()
         server.stop()
         await barrier.release()
         do { _ = try await starting.value; XCTFail("stopped start returned a port") }
         catch is CancellationError { }
         catch { XCTFail("unexpected error: \(error)") }
-        server.afterListenerInstalled = nil
         let port = try await server.start()
         defer { server.stop() }
         XCTAssertNotEqual(port, 0)
+    }
+
+    func testCancelledStartCleansUpListener() async throws {
+        let (service, _, _, _, _, _) = try makeService()
+        let barrier = MutationBarrier()
+        let server = LoopbackServer(service: service, tokenProvider: { String(repeating: "a", count: 64) }, afterListenerInstalled: { await barrier.enter() })
+        let starting = Task { try await server.start() }
+        try await barrier.waitForEntry()
+        starting.cancel()
+        await barrier.release()
+        do { _ = try await starting.value; XCTFail("cancelled start succeeded") }
+        catch is CancellationError { }
+        catch { XCTFail("unexpected error: \(error)") }
+        let port = try await server.start()
+        XCTAssertNotEqual(port, 0)
+        server.stop()
     }
 
     func testConcurrentStartsPermitOnlyOneListener() async throws {
