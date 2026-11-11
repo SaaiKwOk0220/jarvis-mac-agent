@@ -17,6 +17,9 @@ struct TaskListView: View {
             Button { openWindow(id: "ask-jarvis") } label: {
                 Label("Ask Jarvis…", systemImage: "sparkles")
             }
+            Button { openWindow(id: "welcome") } label: {
+                Label("Permissions and introduction…", systemImage: "info.circle")
+            }
             Button { openWindow(id: "memory") } label: {
                 Label("Memory…", systemImage: "brain")
             }
@@ -69,9 +72,11 @@ struct TaskListView: View {
             // install. The "welcomed" flag is set inside WelcomeView when
             // the user taps "Get started", so we only ever open it when
             // the flag is absent.
+            #if !JARVIS_SAFARI_EXPERIMENT_BUILD
             if !UserDefaults.standard.bool(forKey: WelcomeView.welcomedDefaultsKey) {
                 openWindow(id: "welcome")
             }
+            #endif
         }
     }
 

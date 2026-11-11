@@ -50,13 +50,12 @@ struct JarvisMenuBarApp: App {
             .frame(minWidth: 520, minHeight: 460)
         }
         .defaultSize(width: 620, height: 560)
-        #else
+        #endif
         Window("Welcome to Jarvis", id: "welcome") {
             WelcomeView()
                 .frame(minWidth: 540, minHeight: 460)
         }
         .defaultSize(width: 600, height: 520)
-        #endif
         Window("New Jarvis Task", id: "new-task") {
             NewTaskView(client: client)
                 .frame(minWidth: 420, minHeight: 190)
