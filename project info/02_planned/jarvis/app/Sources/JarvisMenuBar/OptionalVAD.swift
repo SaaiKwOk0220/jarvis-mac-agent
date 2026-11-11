@@ -19,7 +19,7 @@ enum VADBuildAccess {
         }
     }
     static var currentAllowed: Bool {
-        allowed(experimentalBuild: experimentalBuild, bundleID: Bundle.main.bundleIdentifier,
+        CombinedExperimentAccess.current || allowed(experimentalBuild: experimentalBuild, bundleID: Bundle.main.bundleIdentifier,
                 isolation: Bundle.main.object(forInfoDictionaryKey: "JarvisExperimentalIsolation") as? Bool == true)
     }
 }

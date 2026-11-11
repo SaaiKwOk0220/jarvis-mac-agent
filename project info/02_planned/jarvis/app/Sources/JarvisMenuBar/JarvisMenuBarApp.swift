@@ -15,6 +15,11 @@ struct JarvisMenuBarApp: App {
     private let instanceLock: SingleInstanceLock
 
     init() {
+        #if JARVIS_COMBINED_EXPERIMENT
+        guard CombinedExperimentAccess.current else {
+            FileHandle.standardError.write(Data("Invalid combined experimental identity.\n".utf8)); exit(EXIT_FAILURE)
+        }
+        #endif
         do {
             try VADBuildAccess.validateStartup(
                 experimentalBuild: VADBuildAccess.experimentalBuild,
@@ -56,7 +61,7 @@ struct JarvisMenuBarApp: App {
     }
 
     var body: some Scene {
-        #if JARVIS_SAFARI_EXPERIMENT_BUILD
+        #if JARVIS_SAFARI_EXPERIMENT_BUILD || JARVIS_COMBINED_EXPERIMENT
         Window("Ask Jarvis", id: "ask-jarvis") {
             AskJarvisView(
                 client: client,
@@ -102,7 +107,7 @@ struct JarvisMenuBarApp: App {
                 .frame(minWidth: 420, minHeight: 360)
         }
         .defaultSize(width: 520, height: 460)
-        #if !JARVIS_SAFARI_EXPERIMENT_BUILD
+        #if !JARVIS_SAFARI_EXPERIMENT_BUILD && !JARVIS_COMBINED_EXPERIMENT
         Window("Ask Jarvis", id: "ask-jarvis") {
             AskJarvisView(
                 client: client,

@@ -275,7 +275,7 @@ final class AudioPauseMonitor: @unchecked Sendable {
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else { throw SpeechError.unavailable }
-        #if JARVIS_VAD_EXPERIMENT
+        #if JARVIS_VAD_EXPERIMENT || JARVIS_COMBINED_EXPERIMENT
         let vadEnabled = UserDefaults.standard.bool(forKey: "jarvis.voice.optionalVAD")
         if vadEnabled && !VADBuildAccess.currentAllowed { throw VADSessionError.invalidIdentity }
         #else

@@ -6,7 +6,9 @@ enum ExactBrowserExperiment {
         experimentalBuild && bundleID == Self.bundleID && marker && optIn == "1"
     }
     static var current: Bool {
-        #if JARVIS_EXACT_BROWSER_EXPERIMENT
+        #if JARVIS_COMBINED_EXPERIMENT
+        return CombinedExperimentAccess.enabled(identity: CombinedExperimentAccess.current, optIn: ProcessInfo.processInfo.environment["JARVIS_EXACT_BROWSER_OPT_IN"])
+        #elseif JARVIS_EXACT_BROWSER_EXPERIMENT
         return enabled(experimentalBuild: true, bundleID: Bundle.main.bundleIdentifier,
                        marker: Bundle.main.object(forInfoDictionaryKey: "JarvisBrowserExperiment") as? Bool == true,
                        optIn: ProcessInfo.processInfo.environment["JARVIS_EXACT_BROWSER_OPT_IN"])

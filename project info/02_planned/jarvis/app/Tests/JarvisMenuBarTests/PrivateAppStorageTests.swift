@@ -17,7 +17,7 @@ final class PrivateAppStorageTests: XCTestCase {
     }
     func testExperimentNamespacesRemainPrivateAndRejectUnknownPaths() throws {
         let parent = try temporaryParent()
-        for name in ["Jarvis", "Jarvis-VAD-Experiment", "Jarvis-Safari-Experiment", "Jarvis-Browser-Experiment"] {
+        for name in ["Jarvis", "Jarvis-VAD-Experiment", "Jarvis-Safari-Experiment", "Jarvis-Browser-Experiment", "Jarvis-Combined-Experiment"] {
             let directory = try PrivateAppStorage.prepare(parent: parent, directoryName: name)
             XCTAssertEqual(directory.lastPathComponent, name)
             XCTAssertEqual(try mode(directory), 0o700)

@@ -9,7 +9,9 @@ enum AppStorageNamespace {
         bundleID == "local.jarvis.safari-experiment" && flag == "1"
     }
     static func safariReadEnabledInCurrentBuild(bundleID: String?, flag: String?) -> Bool {
-        #if JARVIS_SAFARI_EXPERIMENT_BUILD
+        #if JARVIS_COMBINED_EXPERIMENT
+        return CombinedExperimentAccess.enabled(identity: CombinedExperimentAccess.current, optIn: flag) && bundleID == CombinedExperimentAccess.bundleID
+        #elseif JARVIS_SAFARI_EXPERIMENT_BUILD
         return safariReadEnabled(bundleID: bundleID, flag: flag)
         #else
         return false

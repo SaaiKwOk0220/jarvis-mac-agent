@@ -24,7 +24,7 @@ enum PrivateAppStorage {
         throw POSIXError(.EACCES)
     }
     static func prepareDirectory(parent: URL, directoryName: String = "Jarvis") throws -> URL {
-        guard ["Jarvis", "Jarvis-VAD-Experiment", "Jarvis-Safari-Experiment", "Jarvis-Browser-Experiment"].contains(directoryName) else { throw POSIXError(.EINVAL) }
+        guard ["Jarvis", "Jarvis-VAD-Experiment", "Jarvis-Safari-Experiment", "Jarvis-Browser-Experiment", "Jarvis-Combined-Experiment"].contains(directoryName) else { throw POSIXError(.EINVAL) }
         let parentFD = open(parent.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard parentFD >= 0 else { throw POSIXError(.EACCES) }
         defer { close(parentFD) }

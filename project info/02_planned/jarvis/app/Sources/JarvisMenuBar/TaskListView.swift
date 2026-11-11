@@ -88,7 +88,7 @@ struct TaskListView: View {
             // install. The "welcomed" flag is set inside WelcomeView when
             // the user taps "Get started", so we only ever open it when
             // the flag is absent.
-            #if !JARVIS_SAFARI_EXPERIMENT_BUILD
+            #if !JARVIS_SAFARI_EXPERIMENT_BUILD && !JARVIS_COMBINED_EXPERIMENT
             if !UserDefaults.standard.bool(forKey: WelcomeView.welcomedDefaultsKey) {
                 openWindow(id: "welcome")
             }

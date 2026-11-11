@@ -153,7 +153,7 @@ struct AskJarvisView: View {
     @AppStorage(VoiceEndpointSettings.pauseKey) private var pauseSeconds = VoiceEndpointSettings.defaultPause
     @AppStorage(VoiceEndpointSettings.maxRecordingKey) private var maxRecordingSeconds = VoiceEndpointSettings.defaultMaximum
     @AppStorage("jarvis.voice.optionalVAD") private var optionalVADEnabled = false
-    #if JARVIS_SAFARI_EXPERIMENT_BUILD
+    #if JARVIS_SAFARI_EXPERIMENT_BUILD || JARVIS_COMBINED_EXPERIMENT
     @State private var accessibilityRequestResult: Bool?
     @State private var accessibilityTrusted = AccessibilityPermissionRequest.isTrusted()
     #endif
@@ -295,11 +295,11 @@ struct AskJarvisView: View {
 
     private var conversationPanel: some View {
         VStack(alignment: .leading, spacing: 10) {
-            #if JARVIS_EXACT_BROWSER_EXPERIMENT
+            #if JARVIS_EXACT_BROWSER_EXPERIMENT || JARVIS_COMBINED_EXPERIMENT
             Text(ExactBrowserExperiment.current ? "实验模式：打开完整网址前需要逐次审批；浏览器可能重定向或发送网络请求。" : "完整网址实验未启用。")
                 .font(.caption).foregroundStyle(.secondary)
             #endif
-            #if JARVIS_SAFARI_EXPERIMENT_BUILD
+            #if JARVIS_SAFARI_EXPERIMENT_BUILD || JARVIS_COMBINED_EXPERIMENT
             HStack {
                 Button("请求辅助功能权限") {
                     accessibilityRequestResult = AccessibilityPermissionRequest.request()
