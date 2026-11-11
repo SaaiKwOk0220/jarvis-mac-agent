@@ -23,6 +23,7 @@ public final class LoopbackServer: @unchecked Sendable {
     private var listener: NWListener?
     private let connectionQueue = DispatchQueue(label: "jarvis.loopback.connections")
     private var connections: [ObjectIdentifier: NWConnection] = [:]
+    private var receiving: Set<ObjectIdentifier> = []
     private let connectionLimit = 32
     /// Process-local secret; never include in URLs, logs, or persisted state.
     public let authorizationToken: String?
@@ -173,10 +174,10 @@ public final class LoopbackServer: @unchecked Sendable {
     public func stop() {
         listener?.cancel()
         listener = nil
-        connectionQueue.async { [weak self] in
-            guard let self else { return }
-            self.connections.values.forEach { $0.cancel() }
-            self.connections.removeAll()
+        connectionQueue.sync {
+            connections.values.forEach { $0.cancel() }
+            connections.removeAll()
+            receiving.removeAll()
         }
     }
 
@@ -184,11 +185,13 @@ public final class LoopbackServer: @unchecked Sendable {
         guard connections.count < connectionLimit else { connection.cancel(); return }
         let id = ObjectIdentifier(connection)
         connections[id] = connection
+        receiving.insert(id)
         connection.stateUpdateHandler = { [weak self, weak connection] state in
             guard let self, let connection else { return }
             switch state {
             case .cancelled, .failed:
                 self.connections.removeValue(forKey: id)
+                self.receiving.remove(id)
             case .ready:
                 let peer = connection.currentPath?.remoteEndpoint.flatMap { endpoint -> String? in
                     if case let .hostPort(host, _) = endpoint { return "\(host)" }
@@ -201,7 +204,7 @@ public final class LoopbackServer: @unchecked Sendable {
         }
         connection.start(queue: connectionQueue)
         connectionQueue.asyncAfter(deadline: .now() + 5) { [weak self, weak connection] in
-            guard let self, let connection, self.connections[id] != nil else { return }
+            guard let self, let connection, self.receiving.contains(id) else { return }
             connection.cancel()
         }
     }
@@ -234,6 +237,7 @@ public final class LoopbackServer: @unchecked Sendable {
                 self.receive(connection: connection, peerHost: peerHost, buffer: accumulated)
                 return
             }
+            self.receiving.remove(ObjectIdentifier(connection))
             Task {
                 let response = await self.handleHTTP(data: accumulated, peerHost: peerHost)
                 connection.send(content: response, completion: .contentProcessed { _ in connection.cancel() })

@@ -157,6 +157,20 @@ final class LoopbackServerTests: XCTestCase {
                        "POST /tasks/{id}/complete on a terminal task must return 409; got \(second.status)")
     }
 }
+private struct SlowListService: TaskServiceAPI {
+    let underlying: TaskService
+    func createTask(title: String) async throws -> JarvisTask { try await underlying.createTask(title: title) }
+    func getTask(id: UUID) async throws -> JarvisTask? { try await underlying.getTask(id: id) }
+    func listTasks() async throws -> [JarvisTask] { try await Task.sleep(nanoseconds: 6_000_000_000); return try await underlying.listTasks() }
+    func submit(request: ToolRequest) async throws -> PolicyDecision { try await underlying.submit(request: request) }
+    func approve(requestID: UUID, digest: String) async throws { try await underlying.approve(requestID: requestID, digest: digest) }
+    func reject(requestID: UUID) async throws { try await underlying.reject(requestID: requestID) }
+    func cancel(taskID: UUID) async throws { try await underlying.cancel(taskID: taskID) }
+    func complete(taskID: UUID) async throws { try await underlying.complete(taskID: taskID) }
+    func listPendingApprovalRequests(taskID: UUID) async throws -> [PendingApprovalRequest] { try await underlying.listPendingApprovalRequests(taskID: taskID) }
+    func listTimelineEvents(taskID: UUID) async throws -> [TimelineEvent] { try await underlying.listTimelineEvents(taskID: taskID) }
+}
+
 private func openSlowSocket(port: UInt16, bytes: String) throws -> Int32 {
     let fd = Darwin.socket(AF_INET, SOCK_STREAM, 0)
     guard fd >= 0 else { throw NSError(domain: "socket", code: Int(errno)) }
@@ -211,6 +225,20 @@ extension LoopbackServerTests {
         XCTAssertTrue(response.hasPrefix("HTTP/1.1 403"))
     }
 
+    func testCompletedRequestAllowsSlowHandlerAndRestart() async throws {
+        let (service, _, _, _, _, _) = try makeService()
+        let server = LoopbackServer(service: SlowListService(underlying: service))
+        var port = try await server.start()
+        server.stop()
+        port = try await server.start()
+        defer { server.stop() }
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/tasks")!)
+        request.timeoutInterval = 10
+        request.setValue("Bearer \(try XCTUnwrap(server.authorizationToken))", forHTTPHeaderField: "Authorization")
+        let (_, response) = try await URLSession.shared.data(for: request)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+    }
+
     func testSlowConnectionsExpireAndCapacityRecovers() async throws {
         let (service, _, _, _, _, _) = try makeService()
         let server = LoopbackServer(service: service)
@@ -229,9 +257,11 @@ extension LoopbackServerTests {
         let excess = try openSlowSocket(port: port, bytes: "GET / HTTP/1.1\r\n")
         defer { Darwin.close(excess) }
         var buffer = [UInt8](repeating: 0, count: 16)
-        XCTAssertLessThanOrEqual(Darwin.recv(excess, &buffer, buffer.count, 0), 0)
+        let excessRead = Darwin.recv(excess, &buffer, buffer.count, 0)
+        XCTAssertTrue(excessRead == 0 || (excessRead == -1 && errno == ECONNRESET))
         for fd in sockets {
-            XCTAssertLessThanOrEqual(Darwin.recv(fd, &buffer, buffer.count, 0), 0)
+            let count = Darwin.recv(fd, &buffer, buffer.count, 0)
+            XCTAssertTrue(count == 0 || (count == -1 && errno == ECONNRESET))
         }
         let response = try sendRawLoopback(port: port, request: "GET /tasks HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\nAuthorization: Bearer \(token)\r\n\r\n")
         XCTAssertTrue(response.hasPrefix("HTTP/1.1 200"))
