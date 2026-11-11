@@ -1,0 +1,5 @@
+# VAD experiment packaging
+
+Use `scripts/build-dev-app.sh --experimental <output-directory>` to create the isolated experiment. The flag builds with `JARVIS_VAD_EXPERIMENT` in a separate SwiftPM scratch directory and gives the app the `local.jarvis.vad-experiment` identifier and isolation marker. Without the flag the VAD path is disabled, even if an old preference enables it. The experimental path checks both identity and marker before starting VAD.
+
+The currently generated SwiftPM accessor checks the app bundle root and a build-time absolute path; it does not check `Contents/Resources`. The app's model lookup explicitly checks `Contents/Resources/Jarvis_JarvisMenuBar.bundle` and does not fall back to the build directory when running as an app. GRDB's production sources currently do not use its generated accessor; its privacy resource bundle is packaged in `Contents/Resources`. Recheck this assumption when updating GRDB or the Swift toolchain. `Tests/Packaging/test-resource-resolution.sh` runs a standalone resource probe, not the production executable.

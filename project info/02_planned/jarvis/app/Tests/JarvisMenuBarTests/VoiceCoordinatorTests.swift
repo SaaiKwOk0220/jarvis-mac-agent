@@ -823,6 +823,13 @@ private final class PCMTestCollector: @unchecked Sendable {
         XCTAssertEqual(sent, ["第一句", "第二句"])
     }
 
+    func testVADBuildAccessRequiresBuildFlagAndExactIsolatedIdentity() {
+        XCTAssertFalse(VADBuildAccess.allowed(experimentalBuild: false, bundleID: "local.jarvis.vad-experiment", isolation: true))
+        XCTAssertFalse(VADBuildAccess.allowed(experimentalBuild: true, bundleID: "local.jarvis.dev", isolation: true))
+        XCTAssertFalse(VADBuildAccess.allowed(experimentalBuild: true, bundleID: "local.jarvis.vad-experiment", isolation: false))
+        XCTAssertTrue(VADBuildAccess.allowed(experimentalBuild: true, bundleID: "local.jarvis.vad-experiment", isolation: true))
+    }
+
     func testExperimentalAppUsesDistinctDataDirectory() {
         XCTAssertEqual(AppStorageScope.directory(experimental: false), "Jarvis")
         XCTAssertEqual(AppStorageScope.directory(experimental: true), "Jarvis-VAD-Experiment")
