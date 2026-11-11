@@ -19,6 +19,7 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
     private let service: any TaskServiceAPI
     private let taskID: UUID
     private let appSupportDirectory: URL
+    private let enableSafariRead: Bool
 
     /// Summary the service writes on the audit event that carries a finished
     /// tool's output; the runner matches observations on this plus the
@@ -52,18 +53,25 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
     public init(
         service: any TaskServiceAPI,
         taskID: UUID,
-        appSupportDirectory: URL = TaskServiceToolRunner.defaultAppSupportDirectory
+        appSupportDirectory: URL = TaskServiceToolRunner.defaultAppSupportDirectory,
+        enableSafariRead: Bool = false
     ) {
         self.service = service
         self.taskID = taskID
         self.appSupportDirectory = appSupportDirectory
+        self.enableSafariRead = enableSafariRead
     }
 
     /// The catalog advertised to the model for this run. Descriptions name the
     /// allowlists the policy enforces, so the model plans requests that can
     /// actually be approved instead of discovering the gate by failing.
     public func tools() -> [LLMTool] {
-        [
+        var catalog: [LLMTool] = [
+            LLMTool(
+                name: "browser_open",
+                description: "Open a user-requested HTTPS page in the default browser after approval. Approval covers opening the initial URL only; the browser may redirect, run scripts, or send network requests afterward. Does not read page contents. Only an origin is supported; paths, query strings, fragments, and credentials are rejected.",
+                parameters: ["url": LLMToolParameter(type: "string", description: "HTTPS origin only, without a path, query, fragment, or credentials.")]
+            ),
             LLMTool(
                 name: "shell",
                 description: """
@@ -123,6 +131,10 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
                 ]
             ),
         ]
+        if enableSafariRead {
+            catalog.insert(LLMTool(name: "safari_read", description: "Capture the user's current focused Safari window and request approval to read its accessibility text. Ask the user to switch to the intended Safari page. The full captured URL is shown only for approval; content is sent to the model after approval. Dynamic pages are not atomic snapshots.", parameters: [:]), at: 0)
+        }
+        return catalog
     }
 
     /// Submits one tool call as a `ToolRequest` and translates the policy
@@ -132,8 +144,13 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
     /// output is read back out of the audit timeline. Unknown tool names never
     /// reach the service: they come back as `.denied` so the model can re-plan.
     public func perform(_ call: LLMToolCall) async throws -> AgentToolOutcome {
-        guard let request = makeRequest(for: call) else {
-            return .denied("unknown tool")
+        let request: ToolRequest
+        if call.name == "safari_read" {
+            guard enableSafariRead else { return .denied("Safari reading is unavailable") }
+            request = try await service.prepareSafariRead(taskID: taskID)
+        } else {
+            guard let mapped = makeRequest(for: call) else { return .denied("unknown tool") }
+            request = mapped
         }
 
         switch try await service.submit(request: request) {
@@ -152,6 +169,9 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
     /// entry points hit the same allowlists.
     private func makeRequest(for call: LLMToolCall) -> ToolRequest? {
         switch call.name {
+        case "browser_open":
+            let url = call.arguments["url"] ?? ""
+            return ToolRequest(taskID: taskID, name: "browser_open", sideEffect: .externalSend, target: url, payload: "Open in browser")
         case "shell":
             let workingDirectory = resolvedWorkingDirectory(call.arguments["workingDirectory"])
             return ToolRequest(
@@ -206,7 +226,7 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
     private func observation(for request: ToolRequest) async throws -> String {
         let events = try await service.listTimelineEvents(taskID: taskID)
         let match = events.last {
-            $0.actionDigest == request.payloadDigest && $0.summary == Self.toolResultSummary
+            $0.actionDigest == request.payloadDigest && $0.requestID == request.id && $0.summary == Self.toolResultSummary
         }
         return match?.result ?? Self.missingObservationFallback
     }

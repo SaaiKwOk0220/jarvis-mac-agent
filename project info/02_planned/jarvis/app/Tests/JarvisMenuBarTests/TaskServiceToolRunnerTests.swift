@@ -26,6 +26,10 @@ final class ScriptedTaskService: TaskServiceAPI, @unchecked Sendable {
     func setDecision(_ decision: PolicyDecision) { lock.withLock { scriptedDecision = decision } }
     func setTimeline(_ timeline: [TimelineEvent]) { lock.withLock { scriptedTimeline = timeline } }
 
+    func prepareSafariRead(taskID: UUID) async throws -> ToolRequest {
+        ToolRequest(taskID: taskID, name: "safari_read", sideEffect: .read, target: "https://example.com", payload: UUID().uuidString)
+    }
+
     func submit(request: ToolRequest) async throws -> PolicyDecision {
         lock.withLock {
             recordedRequests.append(request)
@@ -34,7 +38,12 @@ final class ScriptedTaskService: TaskServiceAPI, @unchecked Sendable {
     }
 
     func listTimelineEvents(taskID: UUID) async throws -> [TimelineEvent] {
-        lock.withLock { scriptedTimeline }
+        lock.withLock {
+            scriptedTimeline.map { event in
+                let requestID = recordedRequests.last(where: { $0.payloadDigest == event.actionDigest })?.id
+                return TimelineEvent(id: event.id, timestamp: event.timestamp, worker: event.worker, target: event.target, sideEffect: event.sideEffect, actionDigest: event.actionDigest, summary: event.summary, result: event.result, approvalID: event.approvalID, requestID: requestID)
+            }
+        }
     }
 
     // The runner only drives `submit` and `listTimelineEvents`; the remaining
@@ -71,12 +80,29 @@ private func shellCall() -> LLMToolCall {
 
 final class TaskServiceToolRunnerTests: XCTestCase {
 
+    func testSafariToolIsOptInAndUsesCapturedTicket() async throws {
+        let service = ScriptedTaskService(decision: .requireApproval(reason: "verify target"))
+        let disabled = TaskServiceToolRunner(service: service, taskID: UUID())
+        XCTAssertFalse(disabled.tools().contains { $0.name == "safari_read" })
+        let disabledOutcome = try await disabled.perform(LLMToolCall(id: "x", name: "safari_read", arguments: [:]))
+        XCTAssertEqual(disabledOutcome, .denied("Safari reading is unavailable"))
+        let enabled = TaskServiceToolRunner(service: service, taskID: UUID(), enableSafariRead: true)
+        XCTAssertTrue(enabled.tools().contains { $0.name == "safari_read" })
+        let outcome = try await enabled.perform(LLMToolCall(id: "y", name: "safari_read", arguments: ["url": "https://evil.example/"]))
+        guard case .awaitingApproval(let id, let digest, _) = outcome else { return XCTFail("expected approval") }
+        let submitted = try XCTUnwrap(service.submittedRequests.last)
+        XCTAssertEqual(submitted.id, id)
+        XCTAssertEqual(submitted.payloadDigest, digest)
+        XCTAssertEqual(submitted.target, "https://example.com")
+        XCTAssertFalse(submitted.target.contains("evil"))
+    }
+
     /// The catalog advertised to the model is exactly Jarvis's four workers,
     /// so the LLM can only plan against capabilities the policy gate knows.
     func testToolsAdvertiseFourWorkers() {
         let runner = TaskServiceToolRunner(service: ScriptedTaskService(), taskID: UUID())
 
-        XCTAssertEqual(runner.tools().map(\.name), ["shell", "fetch", "screenshot", "ax_query"])
+        XCTAssertEqual(runner.tools().map(\.name), ["browser_open", "shell", "fetch", "screenshot", "ax_query"])
     }
 
     /// A shell call becomes a `.localExecute` request carrying the command as

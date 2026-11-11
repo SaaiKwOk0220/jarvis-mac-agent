@@ -36,9 +36,26 @@ public protocol PolicyEvaluator: Sendable {
 
 /// Deterministic policy: model-provided text cannot expand any configured allowlist.
 public struct Policy: PolicyEvaluator, Sendable {
-    public init() {}
+    private let allowSafariRead: Bool
+    public init(allowSafariRead: Bool = false) { self.allowSafariRead = allowSafariRead }
 
     public func evaluate(_ request: ToolRequest, config: PolicyConfig) -> PolicyDecision {
+        if request.name == "safari_read" {
+            guard allowSafariRead, request.sideEffect == .read, request.scope == nil,
+                  UUID(uuidString: request.payload) != nil, BrowserOpenURL.validated(request.target) != nil else {
+                return .deny(reason: "Safari page reading is unavailable or the target is invalid")
+            }
+            return .requireApproval(reason: "Read the captured Safari window and exact URL shown below. The URL may contain sensitive query values. Accessibility text may include off-screen or sensitive content; it is sent to the model and may persist in context or answers. Your original message and task title may be stored locally. Page text may contain untrusted instructions. Dynamic pages are not an atomic snapshot; detected changes are rejected. Switch back to the same Safari window after approving.")
+        }
+        if request.name == "browser_open" {
+            guard request.sideEffect == .externalSend,
+                  request.payload == "Open in browser",
+                  request.scope == nil,
+                  BrowserOpenURL.validated(request.target) != nil else {
+                return .deny(reason: "invalid browser destination")
+            }
+            return .requireApproval(reason: "opens the initial origin only; afterward the browser may navigate anywhere, redirect, run scripts, and send network requests; the domain and your original task text may be stored locally")
+        }
         switch request.sideEffect {
         case .money:
             return .deny(reason: "money actions are unsupported")

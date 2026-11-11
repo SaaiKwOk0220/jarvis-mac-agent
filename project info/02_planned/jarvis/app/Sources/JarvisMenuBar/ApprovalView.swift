@@ -29,14 +29,29 @@ struct ApprovalView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     GroupBox("Digest-bound preview") {
                         VStack(alignment: .leading, spacing: 6) {
-                            LabeledContent("Reason", value: request.reason)
-                            LabeledContent("Target", value: request.target)
+                            if isSafariRead(request) {
+                                Text(request.reason).font(.caption).fixedSize(horizontal: false, vertical: true)
+                                Text("Full captured URL (scroll to inspect; may contain sensitive values)")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                ScrollView([.horizontal, .vertical]) {
+                                    Text(request.target)
+                                        .font(.system(.caption, design: .monospaced))
+                                        .textSelection(.enabled)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }.frame(maxHeight: 100)
+                            } else {
+                                LabeledContent("Reason", value: request.reason)
+                                LabeledContent("Target", value: request.target)
+                            }
                             LabeledContent("Action digest", value: request.digest)
                             Text(request.payload)
                                 .font(.system(.caption, design: .monospaced))
                                 .textSelection(.enabled)
                                 .lineLimit(5)
-                            Text("Approval is bound to this exact digest; changing the payload or target invalidates it.")
+                            Text(isSafariRead(request)
+                                 ? "The request digest binds a one-time in-memory ticket to this captured URL and window. The full URL expires from the ticket after one minute."
+                                 : "Approval is bound to this exact digest; changing the payload or target invalidates it.")
                                 .font(.caption).foregroundStyle(.secondary)
                         }.frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -49,13 +64,17 @@ struct ApprovalView: View {
                         Button("Approve") {
                             submit(.approve, request: request)
                         }
-                            .disabled(submittingRequestID != nil || request.digest.isEmpty)
+                            .disabled(submittingRequestID != nil || request.digest.isEmpty || (isSafariRead(request) && !request.target.hasPrefix("https://")))
                     }
                 }
             }
         }
         .onAppear { /* digest is read directly per-request now */ }
         .onChange(of: client.approvalRequests) { _, _ in /* nothing to refresh */ }
+    }
+
+    private func isSafariRead(_ request: ApprovalRequest) -> Bool {
+        request.payload == "Read accessibility text from this captured Safari window"
     }
 
     private enum Decision { case approve, reject }

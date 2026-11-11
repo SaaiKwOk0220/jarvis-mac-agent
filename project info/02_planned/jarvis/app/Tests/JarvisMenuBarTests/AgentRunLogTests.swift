@@ -4,6 +4,27 @@ import JarvisLLM
 
 @MainActor
 final class AgentRunLogTests: XCTestCase {
+    func testBrowserToolLogContainsOnlyOrigin() {
+        let call = LLMToolCall(id: "1", name: "browser_open", arguments: ["url": "https://example.com/private-path?secret=abc"])
+        let line = AgentLogEntry(event: .toolCallRequested(call))
+        XCTAssertTrue(line.text.contains("https://example.com"))
+        XCTAssertFalse(line.text.contains("private-path"))
+        XCTAssertFalse(line.text.contains("secret"))
+    }
+
+    func testSafariResultDoesNotRenderPrivatePageText() {
+        let entry = AgentLogEntry(event: .toolCallSucceeded(name: "safari_read", observation: "private-page-text"))
+        XCTAssertFalse(entry.text.contains("private-page-text"))
+        XCTAssertTrue(entry.text.contains("provided to the model"))
+    }
+
+    func testSafariCaptureTellsUserToSwitchWindows() {
+        let call = LLMToolCall(id: "s", name: "safari_read", arguments: [:])
+        let entry = AgentLogEntry(event: .toolCallRequested(call))
+        XCTAssertTrue(entry.text.contains("Switch to the intended Safari window"))
+        XCTAssertTrue(entry.text.contains("before approval"))
+    }
+
     func testCompletedAssistantEventIsShownOnce() {
         let log = AgentRunLog()
         log.append(AgentLogEntry(event: .assistantText("Hello")))

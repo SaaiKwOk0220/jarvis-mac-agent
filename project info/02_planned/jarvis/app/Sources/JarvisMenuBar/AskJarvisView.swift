@@ -32,12 +32,23 @@ struct AgentLogEntry: Identifiable, Equatable {
         switch event {
         case .assistantText(let text):
             self.init(kind: .assistant, text: "Assistant: \(text)")
+        case .toolCallRequested(let call) where call.name == "safari_read":
+            self.init(kind: .info, text: "Switch to the intended Safari window within 15 seconds to preview the exact URL before approval.")
+        case .toolCallRequested(let call) where call.name == "browser_open":
+            let parts = call.arguments["url"].flatMap { URLComponents(string: $0) }
+            let origin = parts.flatMap { component -> String? in
+                guard component.scheme == "https", let host = component.host else { return nil }
+                return "https://\(host)" + (component.port.map { ":\($0)" } ?? "")
+            } ?? "[REDACTED]"
+            self.init(kind: .toolCall, text: "Tool call: browser_open(\(origin))")
         case .toolCallRequested(let call):
             let arguments = call.arguments
                 .sorted { $0.key < $1.key }
                 .map { "\"\($0.key)\": \"\($0.value)\"" }
                 .joined(separator: ", ")
             self.init(kind: .toolCall, text: "Tool call: \(call.name)({\(arguments)})")
+        case .toolCallSucceeded(let name, _) where name == "safari_read":
+            self.init(kind: .result, text: "Safari page text will be provided to the model on continuation and may remain in conversation history; content is not shown here.")
         case .toolCallSucceeded(let name, let observation):
             self.init(kind: .result, text: "Result (\(name)): \(Self.abbreviated(observation))")
         case .toolCallDenied(let name, let reason):
@@ -138,6 +149,10 @@ struct AskJarvisView: View {
     @AppStorage(VoiceEndpointSettings.pauseKey) private var pauseSeconds = VoiceEndpointSettings.defaultPause
     @AppStorage(VoiceEndpointSettings.maxRecordingKey) private var maxRecordingSeconds = VoiceEndpointSettings.defaultMaximum
     @AppStorage("jarvis.voice.optionalVAD") private var optionalVADEnabled = false
+    #if JARVIS_SAFARI_EXPERIMENT_BUILD
+    @State private var accessibilityRequestResult: Bool?
+    @State private var accessibilityTrusted = AccessibilityPermissionRequest.isTrusted()
+    #endif
     @AppStorage(VoicePlaybackSettings.voiceKey) private var selectedVoiceID = ""
     @AppStorage(VoicePlaybackSettings.rateKey) private var voiceRate = 0.5
 
@@ -172,6 +187,26 @@ struct AskJarvisView: View {
             .padding(16)
             .background(RoundedRectangle(cornerRadius: 18).fill(.cyan.opacity(0.045)))
             .overlay(RoundedRectangle(cornerRadius: 18).stroke(.cyan.opacity(0.2)))
+            Text("Ask Jarvis").font(.title2).bold()
+            #if JARVIS_SAFARI_EXPERIMENT_BUILD
+            HStack {
+                Button("请求辅助功能权限") {
+                    accessibilityRequestResult = AccessibilityPermissionRequest.request()
+                    accessibilityTrusted = AccessibilityPermissionRequest.isTrusted()
+                }
+                    .accessibilityIdentifier("safari-accessibility-permission-request")
+                Text("授权后返回并重新提交请求。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text("应用标识：\(Bundle.main.bundleIdentifier ?? "无")")
+                Text("应用路径：\(Bundle.main.bundleURL.path)").textSelection(.enabled)
+                Text("请求返回：\(accessibilityRequestResult.map { $0 ? "已信任" : "未信任" } ?? "未请求")；当前信任：\(accessibilityTrusted ? "是" : "否")")
+                Button("刷新信任状态") { accessibilityTrusted = AccessibilityPermissionRequest.isTrusted() }
+            }.font(.caption).accessibilityIdentifier("safari-accessibility-diagnostics")
+            #endif
+            Text("Describe a goal. Jarvis plans tool calls and runs them through the same policy gate and approval flow as any other task.")
+                .font(.callout).foregroundStyle(.secondary)
             Text("开启语音对话后，回答朗读结束会再次打开麦克风。可随时点击“结束语音对话”停止。取消自动运行后编辑并手动运行，仍会继续本次语音对话。")
                 .font(.caption).foregroundStyle(.secondary)
 
@@ -519,7 +554,8 @@ struct AskJarvisView: View {
             }
             runningTaskID = task.id
             log.append(AgentLogEntry(kind: .info, text: "Task \(task.id.uuidString.prefix(8)) created"))
-            let runner = TaskServiceToolRunner(service: service, taskID: task.id)
+            let safariReadEnabled = await service.isSafariReadAvailable()
+            let runner = TaskServiceToolRunner(service: service, taskID: task.id, enableSafariRead: safariReadEnabled)
             let waiter = TaskServiceApprovalWaiter(service: service)
             let prompt = AgentLoop.defaultSystemPrompt + (token == nil ? "" : "\nFor voice conversation, answer naturally and concisely in the user's language. Preserve necessary safety, approval and error details; do not invent actions.")
             let session = AgentSession(provider: OllamaProvider(), runner: runner, approvalWaiter: waiter,

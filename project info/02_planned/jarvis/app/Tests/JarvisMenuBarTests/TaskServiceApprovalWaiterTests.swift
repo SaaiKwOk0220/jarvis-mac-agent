@@ -9,6 +9,7 @@ final class StaticTimelineService: TaskServiceAPI, @unchecked Sendable {
     private let lock = NSLock()
     private var timeline: [TimelineEvent]
     private var listCallCount = 0
+    var ephemeralValue: String?
 
     init(timeline: [TimelineEvent] = []) { self.timeline = timeline }
 
@@ -22,7 +23,11 @@ final class StaticTimelineService: TaskServiceAPI, @unchecked Sendable {
         }
     }
 
-    // The waiter only touches `listTimelineEvents`; everything below exists
+    func takeEphemeralToolResult(taskID: UUID, requestID: UUID, digest: String) async throws -> String? {
+        lock.withLock { let value = ephemeralValue; ephemeralValue = nil; return value }
+    }
+
+    // The waiter also consumes temporary results; everything below exists
     // solely to satisfy `TaskServiceAPI`.
     func createTask(title: String) async throws -> JarvisTask { JarvisTask(title: title) }
     func getTask(id: UUID) async throws -> JarvisTask? { nil }
@@ -43,11 +48,13 @@ private extension NSLock {
 
 /// Builds a timeline event for one terminal outcome so each test only spells
 /// out the bits it actually cares about.
+private let waiterTestRequestID = UUID()
 private func terminalEvent(
     actionDigest: String,
     summary: String,
     result: String,
-    timestamp: Date = Date()
+    timestamp: Date = Date(),
+    requestID: UUID? = waiterTestRequestID
 ) -> TimelineEvent {
     TimelineEvent(
         id: UUID(),
@@ -58,11 +65,61 @@ private func terminalEvent(
         actionDigest: actionDigest,
         summary: summary,
         result: result,
-        approvalID: UUID()
+        approvalID: UUID(), requestID: requestID
     )
 }
 
 final class TaskServiceApprovalWaiterTests: XCTestCase {
+
+    func testWaiterConsumesOnlyMatchingEphemeralResult() async throws {
+        let requestID = UUID(), otherID = UUID(), digest = "digest"
+        let service = StaticTimelineService(timeline: [
+            terminalEvent(actionDigest: digest, summary: "ephemeral tool result", result: otherID.uuidString, requestID: otherID),
+            terminalEvent(actionDigest: digest, summary: "ephemeral tool result", result: requestID.uuidString, requestID: requestID)
+        ])
+        service.ephemeralValue = "private"
+        let waiter = TaskServiceApprovalWaiter(service: service, pollInterval: 0.01, timeout: 1)
+        let resolution = try await waiter.waitForResolution(requestID: requestID, payloadDigest: digest, taskID: UUID())
+        XCTAssertEqual(resolution, .approved(observation: "private"))
+    }
+
+    func testWaiterFailsClosedWhenEphemeralResultUnavailable() async throws {
+        let requestID = UUID(), digest = "digest"
+        let service = StaticTimelineService(timeline: [terminalEvent(actionDigest: digest, summary: "ephemeral tool result", result: requestID.uuidString, requestID: requestID)])
+        let waiter = TaskServiceApprovalWaiter(service: service, pollInterval: 0.01, timeout: 1)
+        let resolution = try await waiter.waitForResolution(requestID: requestID, payloadDigest: digest, taskID: UUID())
+        XCTAssertEqual(resolution, .failed(reason: "Temporary tool result expired or is unavailable."))
+    }
+
+    func testIdenticalDigestOtherRequestCannotResolveCurrentRequest() async throws {
+        let current = UUID(), previous = UUID(), digest = "same-action"
+        for summary in ["tool result", "tool failure", "approval rejected", "ephemeral tool result"] {
+            let event = terminalEvent(actionDigest: digest, summary: summary, result: previous.uuidString, requestID: previous)
+            let service = StaticTimelineService(timeline: [event])
+            let waiter = TaskServiceApprovalWaiter(service: service, pollInterval: 0.01, timeout: 0.04)
+            let result = try await waiter.waitForResolution(requestID: current, payloadDigest: digest, taskID: UUID())
+            XCTAssertEqual(result, .timedOut, "\(summary) must not resolve another request")
+        }
+    }
+
+    func testRetryWithIdenticalDigestIgnoresPreviousRejection() async throws {
+        let previous = UUID(), current = UUID(), digest = "same-action"
+        let service = StaticTimelineService(timeline: [
+            terminalEvent(actionDigest: digest, summary: "tool result", result: "current result", requestID: current),
+            terminalEvent(actionDigest: digest, summary: "approval rejected", result: "old rejection", requestID: previous)
+        ])
+        let waiter = TaskServiceApprovalWaiter(service: service, pollInterval: 0.01, timeout: 1)
+        let result = try await waiter.waitForResolution(requestID: current, payloadDigest: digest, taskID: UUID())
+        XCTAssertEqual(result, .approved(observation: "current result"))
+    }
+
+    func testLegacyUnboundTerminalEventCannotResolvePendingRequest() async throws {
+        let event = terminalEvent(actionDigest: "same", summary: "tool result", result: "old value", requestID: nil)
+        let service = StaticTimelineService(timeline: [event])
+        let waiter = TaskServiceApprovalWaiter(service: service, pollInterval: 0.01, timeout: 0.04)
+        let result = try await waiter.waitForResolution(requestID: UUID(), payloadDigest: "same", taskID: UUID())
+        XCTAssertEqual(result, .timedOut)
+    }
 
     /// A "tool result" audit event whose `actionDigest` matches the request
     /// the waiter was told to follow is the approval-then-success case.
@@ -79,7 +136,7 @@ final class TaskServiceApprovalWaiterTests: XCTestCase {
         )
 
         let resolution = try await waiter.waitForResolution(
-            requestID: UUID(),
+            requestID: waiterTestRequestID,
             payloadDigest: payloadDigest,
             taskID: UUID()
         )
@@ -102,7 +159,7 @@ final class TaskServiceApprovalWaiterTests: XCTestCase {
         )
 
         let resolution = try await waiter.waitForResolution(
-            requestID: UUID(),
+            requestID: waiterTestRequestID,
             payloadDigest: payloadDigest,
             taskID: UUID()
         )
@@ -125,7 +182,7 @@ final class TaskServiceApprovalWaiterTests: XCTestCase {
         )
 
         let resolution = try await waiter.waitForResolution(
-            requestID: UUID(),
+            requestID: waiterTestRequestID,
             payloadDigest: payloadDigest,
             taskID: UUID()
         )
@@ -146,7 +203,7 @@ final class TaskServiceApprovalWaiterTests: XCTestCase {
         )
 
         let resolution = try await waiter.waitForResolution(
-            requestID: UUID(),
+            requestID: waiterTestRequestID,
             payloadDigest: "digest-missing",
             taskID: UUID()
         )
