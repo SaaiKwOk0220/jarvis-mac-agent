@@ -59,3 +59,38 @@ extension OllamaDiagnosticTests {
         XCTAssertEqual(result, .cancelled)
     }
 }
+
+extension OllamaDiagnosticTests {
+    /// Uses a separate loopback server, so timeout and redirect tests exercise URLSession's real socket stack.
+    func testRealTCPSlowStreamAndRedirect() async throws {
+        let script = #"""
+import socket, time, sys
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(('127.0.0.1',0)); s.listen(4)
+print(s.getsockname()[1],flush=True)
+for _ in range(2):
+ c,_=s.accept(); req=c.recv(4096)
+ if b'/redirect' in req:
+  c.sendall(b'HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/leak\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
+ else:
+  c.sendall(b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n')
+  try:
+   for _ in range(100): c.sendall(b' '); time.sleep(.02)
+  except OSError: pass
+ c.close()
+"""#
+        let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = ["-u", "-c", script]
+        let pipe = Pipe(); process.standardOutput = pipe
+        try process.run()
+        defer { if process.isRunning { process.terminate() } }
+        let portData = pipe.fileHandleForReading.availableData
+        let port = try XCTUnwrap(Int(String(decoding: portData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)))
+        let session = OllamaDiagnostic.localSession(); defer { session.invalidateAndCancel() }
+        let redirect = await OllamaDiagnostic.check(url: URL(string: "http://127.0.0.1:\(port)/redirect")!, session: session, timeout: .seconds(1))
+        XCTAssertEqual(redirect, .unexpectedResponse)
+        let start = ContinuousClock.now
+        let slow = await OllamaDiagnostic.check(url: URL(string: "http://127.0.0.1:\(port)/slow")!, session: session, timeout: .milliseconds(150))
+        XCTAssertEqual(slow, .unavailable)
+        XCTAssertLessThan(start.duration(to: .now), .seconds(1))
+    }
+}

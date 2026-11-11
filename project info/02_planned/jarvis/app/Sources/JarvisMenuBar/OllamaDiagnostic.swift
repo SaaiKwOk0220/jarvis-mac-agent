@@ -1,5 +1,12 @@
 import Foundation
 
+private final class RejectRedirects: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+        completionHandler(nil)
+    }
+}
+
 enum OllamaDiagnostic: Equatable {
     case ready, modelMissing, unavailable, unexpectedResponse, cancelled
 
@@ -9,12 +16,16 @@ enum OllamaDiagnostic: Equatable {
         return list.models.contains { $0.name == model } ? .ready : .modelMissing
     }
 
-    static func check() async -> Self {
+    static func localSession() -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 3
         configuration.timeoutIntervalForResource = 4
         configuration.connectionProxyDictionary = [:]
-        let session = URLSession(configuration: configuration)
+        return URLSession(configuration: configuration, delegate: RejectRedirects(), delegateQueue: nil)
+    }
+
+    static func check() async -> Self {
+        let session = localSession()
         defer { session.invalidateAndCancel() }
         guard let url = URL(string: "http://127.0.0.1:11434/api/tags") else { return .unexpectedResponse }
         return await check(url: url, session: session)
@@ -22,6 +33,8 @@ enum OllamaDiagnostic: Equatable {
 
     static func check(url: URL, session: URLSession, timeout: Duration = .seconds(4), limit: Int = 262_144) async -> Self {
         guard limit > 0 else { return .unexpectedResponse }
+        // This is a cooperative deadline: task-group teardown waits for URLSession
+        // cancellation to complete, so scheduler/transport delays can extend it.
         return await withTaskGroup(of: Self.self) { group in
             group.addTask {
                 do {
