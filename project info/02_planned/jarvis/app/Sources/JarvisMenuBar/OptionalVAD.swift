@@ -193,3 +193,145 @@ final class StreamingPCMResampler {
         return converted
     }
 }
+
+/// Preallocated single-producer/single-consumer float ring; callers must enforce one producer and consumer.
+final class RealtimePCMBuffer: @unchecked Sendable {
+    private let capacity: Int
+    private let storage: UnsafeMutablePointer<Float>
+    private let writeIndex = ManagedAtomic<UInt64>(0)
+    private let readIndex = ManagedAtomic<UInt64>(0)
+    init(capacity: Int) {
+        precondition(capacity > 0)
+        self.capacity = capacity
+        storage = .allocate(capacity: capacity)
+        storage.initialize(repeating: 0, count: capacity)
+    }
+    deinit { storage.deinitialize(count: capacity); storage.deallocate() }
+    /// Producer only. Never blocks or partially writes on overflow.
+    func write(_ input: UnsafeBufferPointer<Float>) -> Bool {
+        let head = writeIndex.load(ordering: .relaxed)
+        let tail = readIndex.load(ordering: .acquiring)
+        let used = head &- tail
+        guard used <= UInt64(capacity), UInt64(input.count) <= UInt64(capacity) - used else { return false }
+        for index in 0..<input.count { storage[Int((head &+ UInt64(index)) % UInt64(capacity))] = input[index] }
+        writeIndex.store(head &+ UInt64(input.count), ordering: .releasing)
+        return true
+    }
+    /// Copies Float32 channels in frame-major order; no allocation or partial write.
+    func writePCM(_ buffer: AVAudioPCMBuffer) -> Bool {
+        let channels = Int(buffer.format.channelCount)
+        let frames = Int(buffer.frameLength)
+        guard buffer.format.commonFormat == .pcmFormatFloat32, (1...8).contains(channels),
+              frames > 0, frames <= capacity / channels, buffer.stride > 0,
+              let input = buffer.floatChannelData else { return false }
+        let count = frames * channels
+        let head = writeIndex.load(ordering: .relaxed)
+        let tail = readIndex.load(ordering: .acquiring)
+        let used = head &- tail
+        guard used <= UInt64(capacity), UInt64(count) <= UInt64(capacity) - used else { return false }
+        for frame in 0..<frames {
+            for channel in 0..<channels {
+                let offset = frame * channels + channel
+                storage[Int((head &+ UInt64(offset)) % UInt64(capacity))] = input[channel][frame * Int(buffer.stride)]
+            }
+        }
+        writeIndex.store(head &+ UInt64(count), ordering: .releasing)
+        return true
+    }
+    /// Consumer only. Returns the number copied into the caller's buffer.
+    func read(into output: UnsafeMutableBufferPointer<Float>) -> Int {
+        let tail = readIndex.load(ordering: .relaxed)
+        let head = writeIndex.load(ordering: .acquiring)
+        let available = min(head &- tail, UInt64(capacity))
+        let count = min(Int(available), output.count)
+        for index in 0..<count { output[index] = storage[Int((tail &+ UInt64(index)) % UInt64(capacity))] }
+        readIndex.store(tail &+ UInt64(count), ordering: .releasing)
+        return count
+    }
+}
+
+/// Converts complete interleaved frames on a background worker.
+enum VADDownmix {
+    static func mono(_ samples: [Float], channels: Int) throws -> [Float] {
+        guard (1...8).contains(channels), samples.count % channels == 0,
+              samples.allSatisfy(\.isFinite) else { throw NSError(domain: "JarvisVAD", code: 16) }
+        var output = [Float](); output.reserveCapacity(samples.count / channels)
+        for frame in stride(from: 0, to: samples.count, by: channels) {
+            var sum = 0.0
+            for channel in 0..<channels { sum += Double(samples[frame + channel]) }
+            let value = Float(sum / Double(channels))
+            guard value.isFinite else { throw NSError(domain: "JarvisVAD", code: 17) }
+            output.append(value)
+        }
+        return output
+    }
+}
+
+/// Optional VAD runs off the tap; any loss or unsupported format fails closed.
+final class OptionalLiveVAD: @unchecked Sendable {
+    private let queue: RealtimePCMBuffer
+    private let channelCount: Int
+    private let sampleRate: Double
+    private let worker = DispatchQueue(label: "jarvis.vad.live", qos: .userInitiated)
+    private let invalid = ManagedAtomic(false)
+    private let active = ManagedAtomic(true)
+    private let onFailure: @MainActor @Sendable (String) -> Void
+    private let onSilence: @MainActor @Sendable () -> Void
+    private let converter: StreamingPCMResampler
+    private let model: SileroOfflineInference
+    private var timer: DispatchSourceTimer?
+    private var pending = [Float]()
+    private var detector: SpeechPauseDetector
+    init(format: AVAudioFormat, modelURL: URL, pause: Double,
+         onFailure: @escaping @MainActor @Sendable (String) -> Void,
+         onSilence: @escaping @MainActor @Sendable () -> Void) throws {
+        guard format.commonFormat == .pcmFormatFloat32, (1...8).contains(Int(format.channelCount)),
+              format.sampleRate.isFinite, (16_000...192_000).contains(format.sampleRate) else { throw NSError(domain: "JarvisVAD", code: 20) }
+        channelCount = Int(format.channelCount); sampleRate = format.sampleRate
+        queue = RealtimePCMBuffer(capacity: Int(format.sampleRate) * channelCount * 2)
+        converter = try StreamingPCMResampler(sourceRate: format.sampleRate)
+        model = try SileroOfflineInference(modelURL: modelURL)
+        detector = SpeechPauseDetector(pauseDuration: pause)
+        self.onFailure = onFailure; self.onSilence = onSilence
+    }
+    func start() {
+        let timer = DispatchSource.makeTimerSource(queue: worker)
+        timer.schedule(deadline: .now(), repeating: .milliseconds(20))
+        timer.setEventHandler { [weak self] in self?.consume() }
+        self.timer = timer; timer.resume()
+    }
+    /// Called by one audio producer. Copies only; never waits or schedules work.
+    func submit(_ buffer: AVAudioPCMBuffer) {
+        guard active.load(ordering: .acquiring) else { return }
+        guard Int(buffer.format.channelCount) == channelCount, buffer.format.sampleRate == sampleRate,
+              queue.writePCM(buffer) else { invalid.store(true, ordering: .releasing); return }
+    }
+    func signalLoss() { if active.load(ordering: .acquiring) { invalid.store(true, ordering: .releasing) } }
+    func stop() { active.store(false, ordering: .releasing); timer?.cancel(); timer = nil }
+    private func consume() {
+        guard active.load(ordering: .acquiring) else { return }
+        guard !invalid.load(ordering: .acquiring) else { fail(); return }
+        var raw = [Float](repeating: 0, count: 1024 * channelCount)
+        let count = raw.withUnsafeMutableBufferPointer { queue.read(into: $0) }
+        guard count > 0 else { return }
+        do {
+            guard count % channelCount == 0 else { throw NSError(domain: "JarvisVAD", code: 21) }
+            let mono = try VADDownmix.mono(Array(raw.prefix(count)), channels: channelCount)
+            pending += try converter.convert(mono)
+            while pending.count >= 512 {
+                let frame = Array(pending.prefix(512)); pending.removeFirst(512)
+                let probability = try model.probability(frame: frame)
+                guard !invalid.load(ordering: .acquiring), active.load(ordering: .acquiring) else { fail(); return }
+                if detector.observe(level: probability >= 0.5 ? 0.03 : 0, duration: 512.0 / 16000) {
+                    active.store(false, ordering: .releasing)
+                    DispatchQueue.main.async { [onSilence] in onSilence() }
+                    return
+                }
+            }
+        } catch { fail() }
+    }
+    private func fail() {
+        guard active.exchange(false, ordering: .acquiringAndReleasing) else { return }
+        DispatchQueue.main.async { [onFailure] in onFailure("语音检测中断，请检查转写并手动运行。") }
+    }
+}
