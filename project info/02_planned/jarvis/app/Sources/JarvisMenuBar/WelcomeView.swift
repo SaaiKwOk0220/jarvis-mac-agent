@@ -100,9 +100,11 @@ struct WelcomeView: View {
 }
 
 enum AccessibilityPermissionRequest {
+    @discardableResult
     static func request(prompt: ([String: Bool]) -> Bool = { options in
         AXIsProcessTrustedWithOptions(options as CFDictionary)
-    }) {
-        _ = prompt([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true])
+    }) -> Bool {
+        prompt([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true])
     }
+    static func isTrusted() -> Bool { AXIsProcessTrusted() }
 }

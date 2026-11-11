@@ -126,6 +126,10 @@ struct AskJarvisView: View {
     @State private var activeSubmittedGoal: String?
     @State private var isVisible = false
     @State private var voiceWillAutoSubmit = false
+    #if JARVIS_SAFARI_EXPERIMENT_BUILD
+    @State private var accessibilityRequestResult: Bool?
+    @State private var accessibilityTrusted = AccessibilityPermissionRequest.isTrusted()
+    #endif
     @AppStorage(VoicePlaybackSettings.voiceKey) private var selectedVoiceID = ""
     @AppStorage(VoicePlaybackSettings.rateKey) private var voiceRate = 0.5
 
@@ -134,11 +138,20 @@ struct AskJarvisView: View {
             Text("Ask Jarvis").font(.title2).bold()
             #if JARVIS_SAFARI_EXPERIMENT_BUILD
             HStack {
-                Button("请求辅助功能权限") { AccessibilityPermissionRequest.request() }
+                Button("请求辅助功能权限") {
+                    accessibilityRequestResult = AccessibilityPermissionRequest.request()
+                    accessibilityTrusted = AccessibilityPermissionRequest.isTrusted()
+                }
                     .accessibilityIdentifier("safari-accessibility-permission-request")
                 Text("授权后返回并重新提交请求。")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            VStack(alignment: .leading, spacing: 2) {
+                Text("应用标识：\(Bundle.main.bundleIdentifier ?? "无")")
+                Text("应用路径：\(Bundle.main.bundleURL.path)").textSelection(.enabled)
+                Text("请求返回：\(accessibilityRequestResult.map { $0 ? "已信任" : "未信任" } ?? "未请求")；当前信任：\(accessibilityTrusted ? "是" : "否")")
+                Button("刷新信任状态") { accessibilityTrusted = AccessibilityPermissionRequest.isTrusted() }
+            }.font(.caption).accessibilityIdentifier("safari-accessibility-diagnostics")
             #endif
             Text("Describe a goal. Jarvis plans tool calls and runs them through the same policy gate and approval flow as any other task.")
                 .font(.callout).foregroundStyle(.secondary)
