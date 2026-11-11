@@ -12,6 +12,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.8.0"),
+        .package(url: "https://github.com/apple/swift-atomics.git", exact: "1.2.0"),
     ],
     targets: [
         .target(name: "JarvisDomain"),
@@ -26,7 +27,7 @@ let package = Package(
         .target(name: "JarvisLLM", dependencies: ["JarvisDomain"]),
         .target(
             name: "JarvisService",
-            dependencies: ["JarvisDomain", "JarvisPersistence", "JarvisPolicy"]
+            dependencies: ["JarvisDomain", "JarvisPersistence", "JarvisPolicy", .product(name: "Atomics", package: "swift-atomics")]
         ),
         .executableTarget(
             name: "JarvisMenuBar",

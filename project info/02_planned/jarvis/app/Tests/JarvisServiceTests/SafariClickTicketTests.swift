@@ -25,6 +25,13 @@ private final class ClickTestClock: @unchecked Sendable {
     func set(_ next: TimeInterval) { lock.lock(); defer { lock.unlock() }; value = next }
 }
 
+private final class BlockingClickAction: @unchecked Sendable {
+    let entered: XCTestExpectation
+    let release = DispatchSemaphore(value: 0)
+    init(_ entered: XCTestExpectation) { self.entered = entered }
+    func run() { entered.fulfill(); _ = release.wait(timeout: .now() + 5) }
+}
+
 private final class ClickActionCounter: @unchecked Sendable {
     private let lock = NSLock()
     private var count = 0
@@ -213,6 +220,26 @@ extension SafariClickTicketTests {
         do { try await coordinator.approve(token: changed, requestID: id, digest: "digest"); XCTFail("changed") } catch { }
         let count = counter.value
         XCTAssertEqual(count, 0)
+    }
+
+    func testCancelReturnsWhenActionAlreadyStarted() async throws {
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "digest")
+        let ref = AXUIElementCreateSystemWide()
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "action started")
+        let blocking = BlockingClickAction(entered)
+        let capture = SafariClickCapture { [candidate] }
+        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: capture, clock: { 11 }) { _, _ in blocking.run(); return .success }
+        let id = UUID()
+        let token = try await coordinator.prepare(requestID: id, identity: identity)
+        let approval = Task { try await coordinator.approve(token: token, requestID: id, digest: "digest") }
+        await fulfillment(of: [entered], timeout: 2)
+        let cancelReturned = expectation(description: "cancel returned without waiting for action")
+        let cancellation = Task { let result = await coordinator.cancel(); XCTAssertEqual(result, .alreadyStarted); cancelReturned.fulfill() }
+        await fulfillment(of: [cancelReturned], timeout: 2)
+        blocking.release.signal()
+        await cancellation.value
+        try await approval.value
     }
 
     func testCancelDuringSecondVerificationBeforeDelayedClearPreventsPress() async throws {

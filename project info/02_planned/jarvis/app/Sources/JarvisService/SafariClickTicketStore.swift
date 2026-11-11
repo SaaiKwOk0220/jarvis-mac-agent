@@ -1,4 +1,5 @@
 import Foundation
+import Atomics
 
 /// Identifying metadata for a future captured AX element; not itself an AX identity.
 struct SafariClickIdentity: Equatable, Sendable {
@@ -84,17 +85,19 @@ actor SafariClickCapture {
 #endif
 
 #if os(macOS)
-/// Lock linearizes revocation with the beginning of the synchronous AX call.
-/// An action already begun cannot be undone; a blocked AX call can delay cancel.
+/// CAS linearizes revocation and the start of AXPress. Once started,
+/// cancellation returns immediately and cannot undo the action.
 private final class SafariClickRevocationGate: @unchecked Sendable {
-    private let lock = NSLock()
-    private var active = false
-    func activate() { lock.lock(); active = true; lock.unlock() }
-    func revoke() { lock.lock(); active = false; lock.unlock() }
+    enum Result { case revoked, alreadyStarted, idle }
+    private let state = ManagedAtomic<Int>(0) // idle, pending, started, revoked
+    func activate() { state.store(1, ordering: .releasing) }
+    func revoke() -> Result {
+        if state.compareExchange(expected: 1, desired: 3, ordering: .acquiringAndReleasing).exchanged { return .revoked }
+        return state.load(ordering: .acquiring) == 2 ? .alreadyStarted : .idle
+    }
     func run(_ action: () -> AXError) -> AXError {
-        lock.lock(); defer { lock.unlock() }
-        guard active else { return .failure }
-        active = false
+        guard state.compareExchange(expected: 1, desired: 2, ordering: .acquiringAndReleasing).exchanged else { return .failure }
+        defer { _ = state.compareExchange(expected: 2, desired: 0, ordering: .acquiringAndReleasing) }
         return action()
     }
 }
@@ -144,14 +147,19 @@ actor SafariClickApprovalPrototype {
             throw error
         }
     }
-    func cancel() async {
-        generation &+= 1; pending.removeAll(); revocation.revoke(); cleaning += 1
+    enum CancellationResult { case revoked, alreadyStarted, idle }
+    @discardableResult func cancel() async -> CancellationResult {
+        generation &+= 1; pending.removeAll()
+        let result = revocation.revoke()
+        if result == .alreadyStarted { return .alreadyStarted }
+        cleaning += 1
         defer { cleaning -= 1 }
         await capture.clear()
+        return result == .revoked ? .revoked : .idle
     }
     func reject(token: UUID) async {
         if pending.removeValue(forKey: token) != nil {
-            revocation.revoke()
+            _ = revocation.revoke()
             cleaning += 1
             defer { cleaning -= 1 }
             await capture.clear()
@@ -161,7 +169,7 @@ actor SafariClickApprovalPrototype {
         guard let entry = pending.removeValue(forKey: token) else { throw Failure.invalid }
         guard entry.requestID == requestID, entry.identity.requestDigest == digest,
               entry.generation == generation else {
-            revocation.revoke()
+            _ = revocation.revoke()
             cleaning += 1
             defer { cleaning -= 1 }
             await capture.clear()
@@ -189,7 +197,7 @@ actor SafariClickApprovalPrototype {
             }
             await capture.clear()
         } catch {
-            revocation.revoke()
+            _ = revocation.revoke()
             await capture.clear()
             throw error
         }
