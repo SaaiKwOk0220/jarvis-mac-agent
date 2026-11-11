@@ -128,6 +128,8 @@ struct AskJarvisView: View {
     @State private var isVisible = false
     @State private var voiceWillAutoSubmit = false
     @State private var followLatest = false
+    @State private var modelDiagnostic: OllamaDiagnostic?
+    @State private var checkingModel = false
     @AppStorage(VoiceEndpointSettings.pauseKey) private var pauseSeconds = VoiceEndpointSettings.defaultPause
     @AppStorage(VoiceEndpointSettings.maxRecordingKey) private var maxRecordingSeconds = VoiceEndpointSettings.defaultMaximum
     @AppStorage(VoicePlaybackSettings.voiceKey) private var selectedVoiceID = ""
@@ -232,6 +234,18 @@ struct AskJarvisView: View {
             }
 
             progressLog
+
+            DisclosureGroup("本地模型服务") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Button(checkingModel ? "正在检查…" : "检查 Ollama 和模型") {
+                        checkingModel = true
+                        Task { modelDiagnostic = await OllamaDiagnostic.check(); checkingModel = false }
+                    }.disabled(checkingModel)
+                    if let modelDiagnostic { Text(modelDiagnostic.message).font(.caption).textSelection(.enabled) }
+                    Text("仅检查本机服务和模型列表，不会自动安装或启动服务。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
 
             DisclosureGroup("语音设置") {
                 HStack {
