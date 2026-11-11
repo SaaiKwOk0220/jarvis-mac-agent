@@ -4,6 +4,21 @@ import CryptoKit
 import Atomics
 import OnnxRuntimeBindings
 
+enum VADBuildAccess {
+    #if JARVIS_VAD_EXPERIMENT
+    static let experimentalBuild = true
+    #else
+    static let experimentalBuild = false
+    #endif
+    static func allowed(experimentalBuild: Bool, bundleID: String?, isolation: Bool) -> Bool {
+        experimentalBuild && bundleID == "local.jarvis.vad-experiment" && isolation
+    }
+    static var currentAllowed: Bool {
+        allowed(experimentalBuild: experimentalBuild, bundleID: Bundle.main.bundleIdentifier,
+                isolation: Bundle.main.object(forInfoDictionaryKey: "JarvisExperimentalIsolation") as? Bool == true)
+    }
+}
+
 /// Experimental model availability; never drives automatic execution.
 enum OptionalVADAvailability: Equatable {
     case disabled, fallback, available
@@ -295,8 +310,13 @@ final class VADTerminalState: @unchecked Sendable {
 }
 
 enum VADSessionError: LocalizedError {
-    case busy
-    var errorDescription: String? { "上一次语音检测仍在结束，请稍后重试，或关闭实验性检测。" }
+    case busy, invalidIdentity
+    var errorDescription: String? {
+        switch self {
+        case .busy: return "上一次语音检测仍在结束，请稍后重试，或关闭实验性检测。"
+        case .invalidIdentity: return "实验性语音检测身份或数据隔离配置无效，请使用隔离实验包。"
+        }
+    }
 }
 
 /// Held until the last worker reference has exited, not merely until stop is requested.

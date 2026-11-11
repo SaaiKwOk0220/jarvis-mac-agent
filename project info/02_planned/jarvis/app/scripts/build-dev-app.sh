@@ -12,8 +12,13 @@ if (( $# > 1 )); then printf 'Usage: %s [--experimental] [output-dir]\n' "$0" >&
 output_dir="${1:-$package_dir/.build/dev-app}"
 mkdir -p "$output_dir"
 output_dir="$(cd "$output_dir" && pwd)"
-swift build --package-path "$package_dir" --product JarvisMenuBar >&2
-bin_dir="$(swift build --package-path "$package_dir" --show-bin-path)"
+if "$experimental"; then
+  swift build --package-path "$package_dir" --scratch-path "$package_dir/.build/vad-experiment" -Xswiftc -DJARVIS_VAD_EXPERIMENT --product JarvisMenuBar >&2
+  bin_dir="$(swift build --package-path "$package_dir" --scratch-path "$package_dir/.build/vad-experiment" --show-bin-path)"
+else
+  swift build --package-path "$package_dir" --product JarvisMenuBar >&2
+  bin_dir="$(swift build --package-path "$package_dir" --show-bin-path)"
+fi
 bundle_dir="$(mktemp -d "$output_dir/Jarvis.XXXXXX")"
 app_dir="$bundle_dir/Jarvis.app"
 mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"

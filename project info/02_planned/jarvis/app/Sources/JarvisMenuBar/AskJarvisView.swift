@@ -239,19 +239,21 @@ struct AskJarvisView: View {
             }
 
             Toggle("显示语音诊断（仅此窗口）", isOn: $showVoiceDiagnostics).font(.caption)
-            if showVoiceDiagnostics && optionalVADEnabled {
+            if showVoiceDiagnostics && VADBuildAccess.currentAllowed && optionalVADEnabled {
                 Text("实验性语音检测不提供能量诊断；切换将在下次录音时生效。")
                     .font(.caption).foregroundStyle(.secondary)
             } else if showVoiceDiagnostics {
                 Text("格式：\(voiceDiagnostic?.formatSupported.map { $0 ? "支持" : "不支持" } ?? "未知") · 超过阈值：\(voiceDiagnostic?.aboveThreshold.map { $0 ? "是" : "否" } ?? "未知") · 静音：\(voiceDiagnostic?.silenceSeconds ?? 0, specifier: "%.1f") 秒 · 结束：\(voiceDiagnosticReason ?? "尚未结束")").font(.caption)
             }
             DisclosureGroup("语音设置") {
+                if VADBuildAccess.currentAllowed {
                 Toggle("实验性语音停顿检测", isOn: $optionalVADEnabled)
                     .disabled(voice.isRecording || voice.isStarting || voice.isFinishing)
                 Text(optionalVADEnabled
                      ? "下次录音将使用本机语音检测。检测到停顿或发生错误时，请确认转写并手动发送。"
                      : "当前使用现有停顿检测方式；实验性检测默认关闭。")
                     .font(.caption).foregroundStyle(.secondary)
+                }
                 HStack {
                     Text("说完后的停顿")
                     Slider(value: Binding(get: { VoiceEndpointSettings.safePause(pauseSeconds) }, set: { pauseSeconds = VoiceEndpointSettings.safePause($0) }), in: VoiceEndpointSettings.pauseRange, step: 0.5).accessibilityLabel("说完后的停顿秒数")
