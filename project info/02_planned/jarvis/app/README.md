@@ -50,3 +50,5 @@ state transition, policy decision, approval, and result.
 The bundled `NoOpToolExecutor` is a demo executor used to exercise the complete
 state and approval flow. Terminal workers, browser workers, and Accessibility or
 ScreenCaptureKit GUI workers are intentionally not included yet.
+
+实验性精确网址审批默认关闭。启用时，工具请求与审计只记录网站 origin 和票据元数据，不代表网址完全不会保存在本机：用户原始任务文字可能包含完整网址并被持久化，浏览器历史也可能保存网址。摘要不应视为加密或可防猜测的匿名化。打开后浏览器可能重定向、加载脚本并向其他网站发送请求。批准事务失败或票据失效后，请拒绝旧请求并重新发起。

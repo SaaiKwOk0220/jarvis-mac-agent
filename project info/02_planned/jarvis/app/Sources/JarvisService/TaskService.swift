@@ -70,7 +70,7 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
                 let redactedPayload = redactSecrets(request.payload)
                 let target: String
                 if let ticket = BrowserURLTicketStore.Ticket(payload: request.payload), request.name == "browser_open" {
-                    target = browserTickets.peekBound(ticket, taskID: request.taskID, requestID: request.id) ?? "[目标已过期，请重新请求]"
+                    target = browserTickets.peekBound(ticket, taskID: request.taskID, requestID: request.id) ?? "[目标已失效，请拒绝此请求后重新请求]"
                 } else { target = request.target }
                 return PendingApprovalRequest(id: request.id, taskID: request.taskID, reason: reason,
                     target: target, payload: redactedPayload == request.payload ? redactedPayload : "[REDACTED]", digest: request.payloadDigest)

@@ -6,6 +6,23 @@ import JarvisPolicy
 @testable import JarvisService
 
 final class TaskServiceTests: XCTestCase {
+    func testExactBrowserApprovalTransactionFailureShowsExpiredTarget() async throws {
+        let recorder = BrowserRecorder()
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in await recorder.record(url); return true }), exactBrowserEnabled: true)
+        let task = try await fixture.service.createTask(title: "Open")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private", payload: "Open in browser")
+        _ = try await fixture.service.submit(request: request)
+        let before = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        let digest = try XCTUnwrap(before.first?.digest)
+        try fixture.database.write { db in
+            try db.execute(sql: "CREATE TRIGGER fail_approval BEFORE INSERT ON approvals BEGIN SELECT RAISE(ABORT, 'test failure'); END")
+        }
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approve(requestID: request.id, digest: digest))
+        let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        XCTAssertEqual(pending.first?.target, "[目标已失效，请拒绝此请求后重新请求]")
+        let count = await recorder.count
+        XCTAssertEqual(count, 0)
+    }
     func testExactBrowserExpiredTicketCannotExecute() async throws {
         let recorder = BrowserRecorder()
         let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in await recorder.record(url); return true }), exactBrowserEnabled: true, browserTicketLifetime: 0.05)
