@@ -14,7 +14,10 @@ public struct SafariPageSnapshot: Sendable {
     }
 }
 
-public enum SafariVisiblePageError: Error { case targetChanged }
+public enum SafariVisiblePageError: LocalizedError {
+    case targetChanged
+    public var errorDescription: String? { "The Safari page changed; start the request again." }
+}
 
 /// Validates snapshots before returning visible page text; no platform adapter is provided.
 public struct SafariVisiblePageReader: Sendable {
@@ -37,7 +40,19 @@ public struct SafariVisiblePageReader: Sendable {
 import AppKit
 import ApplicationServices
 
-public enum SafariAXReadError: Error { case permissionDenied, unavailable, targetChanged, limitExceeded, notFocused, focusTimedOut }
+public enum SafariAXReadError: LocalizedError {
+    case permissionDenied, unavailable, targetChanged, limitExceeded, notFocused, focusTimedOut
+    public var errorDescription: String? {
+        switch self {
+        case .permissionDenied: return "Accessibility permission is required to read Safari."
+        case .unavailable: return "The Safari page could not be inspected safely."
+        case .targetChanged: return "The Safari window or page changed; start the request again."
+        case .limitExceeded: return "The Safari page exceeded the safe read limit."
+        case .notFocused: return "Switch to the intended Safari window."
+        case .focusTimedOut: return "Safari did not return to the foreground in time; start the request again."
+        }
+    }
+}
 
 /// Reads only Safari's focused window and verifies the same window and URL after traversal.
 public enum SafariFocusedPageAdapter {
@@ -66,14 +81,14 @@ public enum SafariFocusedPageAdapter {
         return SafariPageSnapshot(bundleID: "com.apple.Safari", url: first.url, text: first.text)
     }
 
-    private static func element(_ element: AXUIElement, _ key: String) throws -> AXUIElement {
+    fileprivate static func element(_ element: AXUIElement, _ key: String) throws -> AXUIElement {
         var raw: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, key as CFString, &raw) == .success,
               let raw, CFGetTypeID(raw) == AXUIElementGetTypeID() else { throw SafariAXReadError.unavailable }
         return unsafeDowncast(raw, to: AXUIElement.self)
     }
 
-    private static func readPage(_ window: AXUIElement, includeText: Bool) throws -> (url: String, text: String) {
+    fileprivate static func readPage(_ window: AXUIElement, includeText: Bool) throws -> (url: String, text: String) {
         var stack: [(AXUIElement, Int, Bool)] = [(window, 0, false)]
         var count = 0
         let deadline = ContinuousClock.now.advanced(by: .seconds(5))
@@ -116,6 +131,72 @@ public enum SafariFocusedPageAdapter {
         return (pageURL, text.joined(separator: "\n"))
     }
 }
+
+/// One capture keeps the actual AX window reference in an actor, never in storage.
+/// AX cannot guarantee a document-atomic snapshot or rule out same-URL ABA.
+actor SafariAXTargetCapture: SafariTargetCapturing {
+    private var window: AXUIElement?
+    private var processID: pid_t?
+    private var launchDate: Date?
+    private var expectedURL: String?
+    private var captureInProgress = false
+    private let identity = UUID()
+
+    func capture() async throws -> SafariCapturedTarget {
+        guard window == nil, !captureInProgress else { throw SafariAXReadError.unavailable }
+        captureInProgress = true
+        defer { captureInProgress = false }
+        guard AXIsProcessTrusted() else { throw SafariAXReadError.permissionDenied }
+        let front = await Self.frontmostSafari()
+        guard let front else { throw SafariAXReadError.notFocused }
+        let application = AXUIElementCreateApplication(front.pid)
+        let candidate = try SafariFocusedPageAdapter.element(application, kAXFocusedWindowAttribute as String)
+        let page = try SafariFocusedPageAdapter.readPage(candidate, includeText: false)
+        guard let components = URLComponents(string: page.url), components.scheme == "https",
+              components.user == nil, components.password == nil, components.fragment == nil,
+              page.url.utf8.count <= 4096 else { throw SafariAXReadError.unavailable }
+        let after = await Self.frontmostSafari()
+        guard after?.pid == front.pid, after?.launched == front.launched,
+              CFEqual(candidate, try SafariFocusedPageAdapter.element(application, kAXFocusedWindowAttribute as String)),
+              try SafariFocusedPageAdapter.readPage(candidate, includeText: false).url == page.url else { throw SafariAXReadError.targetChanged }
+        self.window = candidate
+        self.processID = front.pid
+        self.launchDate = front.launched
+        self.expectedURL = page.url
+        return SafariCapturedTarget(url: page.url, processID: front.pid, windowIdentity: identity)
+    }
+
+    /// Fails closed if the captured process, focused AX window or exact URL differs.
+    func verify(_ target: SafariCapturedTarget) async throws {
+        guard target.windowIdentity == identity, let window, let pid = processID,
+              let launchDate, target.processID == pid, target.url == expectedURL else { throw SafariAXReadError.targetChanged }
+        let front = await Self.frontmostSafari()
+        guard let front else { throw SafariAXReadError.notFocused }
+        guard front.pid == pid, front.launched == launchDate else { throw SafariAXReadError.targetChanged }
+        let application = AXUIElementCreateApplication(pid)
+        guard CFEqual(window, try SafariFocusedPageAdapter.element(application, kAXFocusedWindowAttribute as String)),
+              try SafariFocusedPageAdapter.readPage(window, includeText: false).url == target.url else { throw SafariAXReadError.targetChanged }
+    }
+
+    /// Call only after exact-target approval. AX reads are not atomic; same-URL ABA remains possible.
+    func read(_ target: SafariCapturedTarget) async throws -> String {
+        try await verify(target)
+        guard let window else { throw SafariAXReadError.targetChanged }
+        let result = try SafariFocusedPageAdapter.readPage(window, includeText: true)
+        guard result.url == target.url else { throw SafariAXReadError.targetChanged }
+        try Task.checkCancellation()
+        try await verify(target)
+        return result.text
+    }
+
+    private static func frontmostSafari() async -> (pid: pid_t, launched: Date)? {
+        await MainActor.run {
+            guard let app = NSWorkspace.shared.frontmostApplication, app.bundleIdentifier == "com.apple.Safari", let date = app.launchDate else { return nil }
+            return (app.processIdentifier, date)
+        }
+    }
+}
+
 #endif
 
 /// Reads accessibility text after an explicitly approved exact HTTPS origin.

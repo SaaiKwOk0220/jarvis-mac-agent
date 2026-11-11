@@ -64,9 +64,9 @@ final class PolicyTests: XCTestCase {
 
     func testSafariReadRequiresApprovalAndExactOrigin() {
         let valid = ToolRequest(taskID: taskID, name: "safari_read", sideEffect: .read, target: "https://example.com/", payload: "Read Safari accessibility text")
-        XCTAssertEqual(Policy().evaluate(valid, config: config), .deny(reason: "Safari page reading is unavailable until page identity and privacy safeguards are verified"))
+        XCTAssertEqual(Policy().evaluate(valid, config: config), .deny(reason: "Safari page reading is unavailable or the target is invalid"))
         let invalid = ToolRequest(taskID: taskID, name: "safari_read", sideEffect: .read, target: "https://example.com/private?secret=x", payload: "Read Safari accessibility text")
-        XCTAssertEqual(Policy().evaluate(invalid, config: config), .deny(reason: "Safari page reading is unavailable until page identity and privacy safeguards are verified"))
+        XCTAssertEqual(Policy().evaluate(invalid, config: config), .deny(reason: "Safari page reading is unavailable or the target is invalid"))
     }
 
     func testLocalWriteAlwaysRequiresApproval() {

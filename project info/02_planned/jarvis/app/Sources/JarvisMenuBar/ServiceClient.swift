@@ -80,6 +80,7 @@ public final class ServiceClient: ObservableObject {
     @Published public private(set) var actionError: String?
 
     private var baseURL: URL
+    private var authorizationToken: String?
     private let session: URLSession
     /// Tracks the last-known status for every task returned by `refresh`, so
     /// `notifyTransitions` can diff and emit notifications. Exposed as
@@ -88,8 +89,8 @@ public final class ServiceClient: ObservableObject {
     /// public observable surface.
     var previousStatuses: [UUID: TaskStatus] = [:]
 
-    public init(baseURL: URL = URL(string: "http://127.0.0.1:8080")!, session: URLSession = .shared) {
-        self.baseURL = baseURL; self.session = session
+    public init(baseURL: URL = URL(string: "http://127.0.0.1:8080")!, session: URLSession = .shared, authorizationToken: String? = nil) {
+        self.baseURL = baseURL; self.session = session; self.authorizationToken = authorizationToken
         #if canImport(UserNotifications)
         // `swift run` is a bare executable, which UserNotifications cannot register. A packaged app can.
         if Self.notificationsAreAvailable {
@@ -101,9 +102,10 @@ public final class ServiceClient: ObservableObject {
         }
     }
 
-    public func configure(baseURL: URL) {
-        guard baseURL.scheme?.lowercased() == "http", (baseURL.host == "127.0.0.1" || baseURL.host == "localhost") else { return }
+    public func configure(baseURL: URL, authorizationToken: String? = nil) {
+        guard baseURL.scheme?.lowercased() == "http", baseURL.host == "127.0.0.1", baseURL.user == nil, baseURL.password == nil else { return }
         self.baseURL = baseURL
+        self.authorizationToken = authorizationToken
     }
 
     @discardableResult
@@ -148,7 +150,7 @@ public final class ServiceClient: ObservableObject {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(["title": trimmedTitle])
         do {
-            let (data, response) = try await session.data(for: request)
+            let (data, response) = try await send(request)
             try Self.validate(response: response, data: data)
             let task: JarvisTask
             do { task = try Self.decoder.decode(JarvisTask.self, from: data) }
@@ -307,7 +309,7 @@ public final class ServiceClient: ObservableObject {
             urlRequest.httpMethod = "POST"
             urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
             urlRequest.httpBody = try JSONEncoder().encode(request)
-            let (data, response) = try await session.data(for: urlRequest)
+            let (data, response) = try await send(urlRequest)
             try Self.validate(response: response, data: data)
             // After submitting, refresh tasks + approval metadata so the
             // task-detail window opened by the caller sees the new request.
@@ -355,7 +357,7 @@ public final class ServiceClient: ObservableObject {
             urlRequest.httpMethod = "POST"
             urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
             urlRequest.httpBody = try JSONEncoder().encode(request)
-            let (data, response) = try await session.data(for: urlRequest)
+            let (data, response) = try await send(urlRequest)
             try Self.validate(response: response, data: data)
             _ = try await refresh()
             _ = try await loadApprovalRequests(taskID: taskID)
@@ -406,7 +408,7 @@ public final class ServiceClient: ObservableObject {
             urlRequest.httpMethod = "POST"
             urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
             urlRequest.httpBody = try JSONEncoder().encode(request)
-            let (data, response) = try await session.data(for: urlRequest)
+            let (data, response) = try await send(urlRequest)
             try Self.validate(response: response, data: data)
             _ = try await refresh()
             _ = try await loadApprovalRequests(taskID: taskID)
@@ -462,7 +464,7 @@ public final class ServiceClient: ObservableObject {
             urlRequest.httpMethod = "POST"
             urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
             urlRequest.httpBody = try JSONEncoder().encode(request)
-            let (data, response) = try await session.data(for: urlRequest)
+            let (data, response) = try await send(urlRequest)
             try Self.validate(response: response, data: data)
             _ = try await refresh()
             _ = try await loadApprovalRequests(taskID: taskID)
@@ -499,17 +501,26 @@ public final class ServiceClient: ObservableObject {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let body { request.httpBody = try JSONEncoder().encode(body) }
         do {
-            let (data, response) = try await session.data(for: request)
+            let (data, response) = try await send(request)
             try Self.validate(response: response, data: data)
         } catch let error as ServiceClientError { throw error }
         catch { throw ServiceClientError.unavailable }
+    }
+
+    private func send(_ original: URLRequest) async throws -> (Data, URLResponse) {
+        var request = original
+        if let authorizationToken {
+            guard let url = request.url, url.scheme?.lowercased() == "http", url.host == "127.0.0.1", url.user == nil, url.password == nil else { throw ServiceClientError.unavailable }
+            request.setValue("Bearer \(authorizationToken)", forHTTPHeaderField: "Authorization")
+        }
+        return try await session.data(for: request, delegate: LoopbackNoRedirectDelegate.shared)
     }
 
     private func request(path: String, method: String) async throws -> (Data, HTTPURLResponse) {
         var request = URLRequest(url: baseURL.appendingPathComponent(path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))))
         request.httpMethod = method
         do {
-            let (data, response) = try await session.data(for: request)
+            let (data, response) = try await send(request)
             try Self.validate(response: response, data: data)
             guard let http = response as? HTTPURLResponse else { throw ServiceClientError.invalidResponse }
             return (data, http)
@@ -553,5 +564,13 @@ public final class ServiceClient: ObservableObject {
 
     public static func decodeAPIError(_ data: Data, decoder: JSONDecoder = JSONDecoder()) throws -> APIError {
         do { return try decoder.decode(APIError.self, from: data) } catch { throw ServiceClientError.decoding }
+    }
+}
+
+/// Do not forward the in-memory bearer token through HTTP redirects.
+final class LoopbackNoRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    static let shared = LoopbackNoRedirectDelegate()
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+        completionHandler(nil)
     }
 }

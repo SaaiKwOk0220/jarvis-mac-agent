@@ -114,8 +114,10 @@ private final class Runtime {
             let database = try Database(path: appSupport.appendingPathComponent("jarvis.sqlite").path)
             try database.migrate()
             self.memory = try SQLiteMemoryStore(database: database)
+            // QA-only, process-scoped opt-in; unavailable by default.
+            let safariReadEnabled = ProcessInfo.processInfo.environment["JARVIS_EXPERIMENTAL_SAFARI_READ"] == "1"
             let service = try TaskService(taskRepository: SQLiteTaskRepository(database: database),
-                auditRepository: SQLiteAuditRepository(database: database), policy: Policy(),
+                auditRepository: SQLiteAuditRepository(database: database), policy: Policy(allowSafariRead: safariReadEnabled),
                 policyConfig: PolicyConfig(
                     approvedDirectories: [appSupport.path],
                     commandNames: ["shell", "swift", "xcodebuild"],
@@ -133,13 +135,13 @@ private final class Runtime {
                 screenshot: ScreenshotToolExecutor(),
                 accessibility: AccessibilityQueryToolExecutor(),
                 browserOpen: BrowserOpenExecutor(),
-                safariRead: SafariPageReadExecutor(reader: SafariVisiblePageReader { expectedURL in try await SafariFocusedPageAdapter.snapshot(expectedURL: expectedURL) }))
+                enableSafariRead: safariReadEnabled)
             self.taskService = service
             let server = LoopbackServer(service: service)
             self.server = server
             Task { @MainActor in
-                if let port = try? await server.start() {
-                    client.configure(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+                if let token = server.authorizationToken, let port = try? await server.start() {
+                    client.configure(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: token)
                     _ = try? await client.refresh()
                 }
             }

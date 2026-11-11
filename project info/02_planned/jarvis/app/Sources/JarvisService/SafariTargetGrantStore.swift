@@ -41,6 +41,13 @@ final class SafariTargetGrantStore: @unchecked Sendable {
         return token
     }
 
+    func preview(token: UUID, taskID: UUID, requestID: UUID, requestDigest: String, now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> SafariCapturedTarget? {
+        lock.lock(); defer { lock.unlock() }
+        entries = entries.filter { $0.value.expires > now }
+        guard let entry = entries[token], entry.taskID == taskID, entry.requestID == requestID, entry.requestDigest == requestDigest else { return nil }
+        return entry.target
+    }
+
     func consume(token: UUID, taskID: UUID, requestID: UUID, requestDigest: String, now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> SafariCapturedTarget? {
         lock.lock(); defer { lock.unlock() }
         entries = entries.filter { $0.value.expires > now }

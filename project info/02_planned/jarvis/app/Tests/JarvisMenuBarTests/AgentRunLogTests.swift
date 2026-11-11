@@ -18,6 +18,13 @@ final class AgentRunLogTests: XCTestCase {
         XCTAssertTrue(entry.text.contains("provided to the model"))
     }
 
+    func testSafariCaptureTellsUserToSwitchWindows() {
+        let call = LLMToolCall(id: "s", name: "safari_read", arguments: [:])
+        let entry = AgentLogEntry(event: .toolCallRequested(call))
+        XCTAssertTrue(entry.text.contains("Switch to the intended Safari window"))
+        XCTAssertTrue(entry.text.contains("before approval"))
+    }
+
     func testCompletedAssistantEventIsShownOnce() {
         let log = AgentRunLog()
         log.append(AgentLogEntry(event: .assistantText("Hello")))

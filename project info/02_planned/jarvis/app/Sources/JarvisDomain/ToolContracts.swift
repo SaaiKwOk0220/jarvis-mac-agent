@@ -147,9 +147,15 @@ public protocol TaskServiceAPI: Sendable {
     func listPendingApprovalRequests(taskID: UUID) async throws -> [PendingApprovalRequest]
     func listTimelineEvents(taskID: UUID) async throws -> [TimelineEvent]
     func takeEphemeralToolResult(taskID: UUID, requestID: UUID, digest: String) async throws -> String?
+    func prepareSafariRead(taskID: UUID) async throws -> ToolRequest
+    func isSafariReadAvailable() async -> Bool
 }
 
+public enum TaskServiceCapabilityError: Error { case unavailable }
+
 public extension TaskServiceAPI {
+    func isSafariReadAvailable() async -> Bool { false }
+    func prepareSafariRead(taskID: UUID) async throws -> ToolRequest { throw TaskServiceCapabilityError.unavailable }
     func takeEphemeralToolResult(taskID: UUID, requestID: UUID, digest: String) async throws -> String? { nil }
 }
 

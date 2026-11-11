@@ -27,12 +27,14 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     private let screenshot: ScreenshotToolExecutor?
     private let accessibility: AccessibilityQueryToolExecutor?
     private let browserOpen: BrowserOpenExecutor?
-    private let safariRead: SafariPageReadExecutor?
+    private let enableSafariRead: Bool
+    private let safariCoordinator = SafariReadCoordinator()
+    var safariCaptureFactory: @Sendable () -> any SafariTargetCapturing = { SafariAXTargetCapture() }
     private let ephemeralResults = EphemeralToolResultStore()
     private let lock = NSLock()
     private var executions: [UUID: Task<Void, Error>] = [:]
 
-    public init(taskRepository: any TaskRepository, auditRepository: any AuditRepository, policy: any PolicyEvaluator, policyConfig: PolicyConfig = .init(), executor: any ToolExecutor = NoOpToolExecutor(), terminal: TerminalToolExecutor? = nil, webFetch: WebFetchToolExecutor? = nil, screenshot: ScreenshotToolExecutor? = nil, accessibility: AccessibilityQueryToolExecutor? = nil, browserOpen: BrowserOpenExecutor? = nil, safariRead: SafariPageReadExecutor? = nil, requestRepository: (any ToolRequestRepository)? = nil, approvalRepository: (any ApprovalRepository)? = nil, unitOfWork: (any PersistenceUnitOfWork)? = nil) throws {
+    public init(taskRepository: any TaskRepository, auditRepository: any AuditRepository, policy: any PolicyEvaluator, policyConfig: PolicyConfig = .init(), executor: any ToolExecutor = NoOpToolExecutor(), terminal: TerminalToolExecutor? = nil, webFetch: WebFetchToolExecutor? = nil, screenshot: ScreenshotToolExecutor? = nil, accessibility: AccessibilityQueryToolExecutor? = nil, browserOpen: BrowserOpenExecutor? = nil, enableSafariRead: Bool = false, requestRepository: (any ToolRequestRepository)? = nil, approvalRepository: (any ApprovalRepository)? = nil, unitOfWork: (any PersistenceUnitOfWork)? = nil) throws {
         guard let sqliteTasks = taskRepository as? SQLiteTaskRepository,
               let sqliteAudits = auditRepository as? SQLiteAuditRepository,
               sqliteTasks.database === sqliteAudits.database else { throw TaskServiceError.incompatiblePersistence }
@@ -49,7 +51,7 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
             guard let sqlite = unitOfWork as? SQLitePersistenceUnitOfWork, sqlite.database === database else { throw TaskServiceError.incompatiblePersistence }
             self.uow = sqlite
         } else { self.uow = SQLitePersistenceUnitOfWork(database: database) }
-        self.tasks = taskRepository; self.audits = auditRepository; self.policy = policy; self.config = policyConfig; self.executor = executor; self.terminal = terminal; self.webFetch = webFetch; self.screenshot = screenshot; self.accessibility = accessibility; self.browserOpen = browserOpen; self.safariRead = safariRead
+        self.tasks = taskRepository; self.audits = auditRepository; self.policy = policy; self.config = policyConfig; self.executor = executor; self.terminal = terminal; self.webFetch = webFetch; self.screenshot = screenshot; self.accessibility = accessibility; self.browserOpen = browserOpen; self.enableSafariRead = enableSafariRead
     }
 
     public func createTask(title: String) async throws -> JarvisTask { try lock.withLock { let task = JarvisTask(title: title); try uow.createTask(task, audit: event(taskID: task.id, summary: "task created", result: "created")); return task } }
@@ -57,17 +59,40 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     public func listTasks() async throws -> [JarvisTask] { try lock.withLock { try tasks.list() } }
 
     public func listPendingApprovalRequests(taskID: UUID) async throws -> [PendingApprovalRequest] {
-        try lock.withLock {
+        let pending: [(ToolRequest, String)] = try lock.withLock {
             guard try tasks.fetch(id: taskID) != nil else { throw TaskServiceError.taskNotFound }
-            let pending = try requests.list(status: .pending).filter { $0.0.taskID == taskID }
-            return try pending.map { request, _ in
-                let reason = (try? audits.events(for: taskID).reversed().first(where: {
-                    $0.actionDigest == request.payloadDigest && $0.summary == "policy requires approval"
-                })?.result) ?? "Approval requested by policy"
-                let redactedPayload = redactSecrets(request.payload)
-                return PendingApprovalRequest(id: request.id, taskID: request.taskID, reason: reason,
-                    target: request.target, payload: redactedPayload == request.payload ? redactedPayload : "[REDACTED]", digest: request.payloadDigest)
+            let events = try audits.events(for: taskID)
+            return try requests.list(status: .pending).filter { $0.0.taskID == taskID }.map { request, _ in
+                let reason = events.reversed().first { $0.actionDigest == request.payloadDigest && $0.requestID == request.id && $0.summary == "policy requires approval" }?.result ?? "Approval requested by policy"
+                return (request, reason)
             }
+        }
+        var output: [PendingApprovalRequest] = []
+        for (request, reason) in pending {
+            if request.name == "safari_read" {
+                let exactURL = await safariCoordinator.preview(request) ?? "Capture expired; reject and try again."
+                output.append(PendingApprovalRequest(id: request.id, taskID: request.taskID, reason: reason, target: exactURL, payload: "Read accessibility text from this captured Safari window", digest: request.payloadDigest))
+            } else {
+                let redactedPayload = redactSecrets(request.payload)
+                output.append(PendingApprovalRequest(id: request.id, taskID: request.taskID, reason: reason, target: request.target, payload: redactedPayload == request.payload ? redactedPayload : "[REDACTED]", digest: request.payloadDigest))
+            }
+        }
+        return output
+    }
+
+    public func isSafariReadAvailable() async -> Bool { enableSafariRead }
+
+    public func prepareSafariRead(taskID: UUID) async throws -> ToolRequest {
+        guard enableSafariRead else { throw TaskServiceCapabilityError.unavailable }
+        try lock.withLock { try ensureRunning(taskID) }
+        let request = try await safariCoordinator.prepare(taskID: taskID, capture: safariCaptureFactory())
+        do {
+            try Task.checkCancellation()
+            try lock.withLock { try requireRunning(taskID) }
+            return request
+        } catch {
+            await safariCoordinator.discard(request)
+            throw error
         }
     }
 
@@ -93,7 +118,12 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
 
     public func submit(request: ToolRequest) async throws -> PolicyDecision {
         try lock.withLock { try ensureRunning(request.taskID) }
-        let decision = policy.evaluate(request, config: config)
+        var decision = policy.evaluate(request, config: config)
+        if request.name == "safari_read" {
+            let preview = enableSafariRead ? await safariCoordinator.preview(request) : nil
+            if preview == nil { decision = .deny(reason: "Safari capture unavailable or expired") }
+            else if case .requireApproval = decision { } else { decision = .deny(reason: "Safari reading requires explicit approval") }
+        }
         switch decision {
         case .allow:
             try lock.withLock {
@@ -112,29 +142,39 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
                 let task = try requiredTask(request.taskID)
                 try uow.transition(taskID: task.id, from: task.status, to: .blocked, audits: [event(request, summary: "tool request received", result: "received"), event(request, summary: "policy denied", result: reason)])
             }
+            if request.name == "safari_read" { await safariCoordinator.discard(request) }
         }
         return decision
     }
 
     public func approve(requestID: UUID, digest: String) async throws {
-        let request = try lock.withLock { () throws -> ToolRequest in
+        let preliminary = try lock.withLock { () throws -> ToolRequest in
+            guard let (request, status) = try requests.fetch(id: requestID), status == .pending else { throw TaskServiceError.requestNotAwaitingApproval }
+            return request
+        }
+        if preliminary.name == "safari_read" {
+            guard enableSafariRead, await safariCoordinator.preview(preliminary) != nil else { throw TaskServiceCapabilityError.unavailable }
+        }
+        let (request, approval) = try lock.withLock { () throws -> (ToolRequest, Approval) in
             guard let (request, status) = try requests.fetch(id: requestID), status == .pending else { throw TaskServiceError.requestNotAwaitingApproval }
             guard validateApproval(request: request, approvalDigest: digest) else { try audits.append(event(request, summary: "approval rejected", result: "digest mismatch")); throw TaskServiceError.approvalDigestMismatch }
             let approval = Approval(toolRequestID: request.id, actionDigest: request.payloadDigest, decision: .approved)
             let taskStatus = try aggregateStatus(forTask: request.taskID, excluding: request.id, fallback: .running)
             try uow.approveRequest(request, approval: approval, taskStatus: taskStatus, audits: [event(request, summary: "approval accepted", result: "approved", approvalID: approval.id)])
-            return request
+            return (request, approval)
         }
-        startExecution(request)
+        startExecution(request, approval: approval)
     }
 
     public func reject(requestID: UUID) async throws {
-        try lock.withLock {
+        let rejected: ToolRequest = try lock.withLock {
             guard let (request, status) = try requests.fetch(id: requestID), status == .pending else { throw TaskServiceError.requestNotAwaitingApproval }
             let approval = Approval(toolRequestID: request.id, actionDigest: request.payloadDigest, decision: .rejected)
             let taskStatus = try aggregateStatus(forTask: request.taskID, excluding: request.id, fallback: .blocked)
             try uow.rejectRequest(request, approval: approval, taskStatus: taskStatus, audits: [event(request, summary: "approval rejected", result: "rejected", approvalID: approval.id)])
+            return request
         }
+        if rejected.name == "safari_read" { await safariCoordinator.discard(rejected) }
     }
 
     public func cancel(taskID: UUID) async throws {
@@ -149,6 +189,7 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
             ephemeralResults.clear(taskID: taskID)
             try uow.cancelTask(taskID: taskID, requestIDs: [], audits: [event(taskID: taskID, summary: "task cancelled", result: "cancelled")])
         }
+        await safariCoordinator.clear(taskID: taskID)
     }
 
     public func takeEphemeralToolResult(taskID: UUID, requestID: UUID, digest: String) async throws -> String? {
@@ -181,15 +222,16 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
                 audits: [event(taskID: task.id, summary: "task completed", result: "completed")]
             )
         }
+        await safariCoordinator.clear(taskID: taskID)
     }
 
-    private func startExecution(_ request: ToolRequest) {
+    private func startExecution(_ request: ToolRequest, approval: Approval) {
         let gate = ExecutionGate()
         let job: Task<Void, Error> = Task { [weak self] in
             await gate.wait()
             defer { self?.removeExecution(request.id) }
             guard let self else { return }
-            try await self.execute(request)
+            try await self.execute(request, approval: approval)
         }
         lock.withLock { executions[request.id] = job }
         gate.open()
@@ -228,13 +270,12 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     /// pending request on the same task: failure + another pending →
     /// `.awaitingApproval`; failure + another executing → `.running`;
     /// failure + nothing else outstanding → `.failed`.
-    private func execute(_ request: ToolRequest) async throws {
+    private func execute(_ request: ToolRequest, approval: Approval? = nil) async throws {
         do {
             try lock.withLock { guard let (_, status) = try requests.fetch(id: request.id), status == .executing else { throw TaskServiceError.requestNotAwaitingApproval }; try requireRunning(request.taskID) }
-            if request.name == "safari_read" && safariRead == nil { throw SafariAXReadError.unavailable }
+            if request.name == "safari_read" && (!enableSafariRead || approval == nil) { throw SafariAXReadError.unavailable }
             if request.name == "browser_open" && browserOpen == nil { throw BrowserOpenError.unavailable }
             let picked: any ToolExecutor = {
-                if request.name == "safari_read", let safariRead = self.safariRead { return safariRead }
                 if request.name == "browser_open", let browserOpen = self.browserOpen { return browserOpen }
                 if request.name == "shell", let terminal = self.terminal { return terminal }
                 if request.name == "fetch", let webFetch = self.webFetch { return webFetch }
@@ -242,7 +283,13 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
                 if request.name == "ax_query", let accessibility = self.accessibility { return accessibility }
                 return executor
             }()
-            let result = try await picked.execute(request)
+            let result: ToolResult
+            if request.name == "safari_read" {
+                guard let approval else { throw SafariAXReadError.unavailable }
+                result = ToolResult(summary: try await safariCoordinator.readApproved(request, approval: approval))
+            } else {
+                result = try await picked.execute(request)
+            }
             try lock.withLock {
                 guard let task = try tasks.fetch(id: request.taskID), task.status != .cancelled else { return }
                 let taskStatus = try aggregateStatus(forTask: request.taskID, excluding: request.id, fallback: .running)
@@ -260,7 +307,8 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
             let aggregate: TaskStatus = (try? aggregateStatus(forTask: request.taskID, excluding: request.id, fallback: fallback)) ?? fallback
             try lock.withLock {
                 guard let task = try tasks.fetch(id: request.taskID), task.status != .cancelled else { return }
-                try uow.finishRequest(request, status: .failed, taskStatus: aggregate, audits: [event(request, summary: "tool failure", result: "failed")])
+                let safeFailure = request.name == "safari_read" ? Self.safariFailureMessage(error) : "failed"
+                try uow.finishRequest(request, status: .failed, taskStatus: aggregate, audits: [event(request, summary: "tool failure", result: safeFailure)])
             }
             throw error
         }
@@ -288,6 +336,13 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     private func transition(_ task: JarvisTask, to: TaskStatus) throws { do { try TaskStateMachine.validate(from: task.status, to: to) } catch { throw TaskServiceError.illegalTransition(from: task.status, to: to) }; try uow.transition(taskID: task.id, from: task.status, to: to, audits: [event(taskID: task.id, summary: "task transitioned", result: "\(task.status.rawValue) -> \(to.rawValue)")]) }
     private func bounded(_ summary: String) -> String { String(redactSecrets(summary).prefix(512)) }
     private func event(_ request: ToolRequest, summary: String, result: String, approvalID: UUID? = nil) -> AuditEvent { event(taskID: request.taskID, sideEffect: request.sideEffect, digest: request.payloadDigest, summary: summary, result: result, approvalID: approvalID, requestID: request.id, target: (request.name == "browser_open" || request.name == "safari_read") ? Self.browserAuditTarget(request.target) : request.target) }
+    private static func safariFailureMessage(_ error: Error) -> String {
+        if let error = error as? SafariAXReadError { return error.localizedDescription }
+        if let error = error as? SafariVisiblePageError { return error.localizedDescription }
+        if let error = error as? SafariReadCoordinatorError { return error.localizedDescription }
+        return "Safari page reading failed safely."
+    }
+
     private static func browserAuditTarget(_ target: String) -> String {
         guard let parts = URLComponents(string: target), parts.scheme == "https", let host = parts.host else { return "[REDACTED]" }
         return "https://\(host)" + (parts.port.map { ":\($0)" } ?? "")

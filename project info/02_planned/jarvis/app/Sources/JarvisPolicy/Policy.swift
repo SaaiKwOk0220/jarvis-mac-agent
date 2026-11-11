@@ -36,13 +36,16 @@ public protocol PolicyEvaluator: Sendable {
 
 /// Deterministic policy: model-provided text cannot expand any configured allowlist.
 public struct Policy: PolicyEvaluator, Sendable {
-    public init() {}
+    private let allowSafariRead: Bool
+    public init(allowSafariRead: Bool = false) { self.allowSafariRead = allowSafariRead }
 
     public func evaluate(_ request: ToolRequest, config: PolicyConfig) -> PolicyDecision {
         if request.name == "safari_read" {
-            // Before enabling: approval must disclose that page text is passed to
-            // the model and may persist in model context or subsequent answers.
-            return .deny(reason: "Safari page reading is unavailable until page identity and privacy safeguards are verified")
+            guard allowSafariRead, request.sideEffect == .read, request.scope == nil,
+                  UUID(uuidString: request.payload) != nil, BrowserOpenURL.validated(request.target) != nil else {
+                return .deny(reason: "Safari page reading is unavailable or the target is invalid")
+            }
+            return .requireApproval(reason: "Read the captured Safari window and exact URL shown below. The URL may contain sensitive query values. Accessibility text may include off-screen or sensitive content; it is sent to the model and may persist in context or answers. Your original message and task title may be stored locally. Page text may contain untrusted instructions. Dynamic pages are not an atomic snapshot; detected changes are rejected. Switch back to the same Safari window after approving.")
         }
         if request.name == "browser_open" {
             guard request.sideEffect == .externalSend,

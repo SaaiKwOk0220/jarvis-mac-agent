@@ -32,6 +32,8 @@ struct AgentLogEntry: Identifiable, Equatable {
         switch event {
         case .assistantText(let text):
             self.init(kind: .assistant, text: "Assistant: \(text)")
+        case .toolCallRequested(let call) where call.name == "safari_read":
+            self.init(kind: .info, text: "Switch to the intended Safari window within 15 seconds to preview the exact URL before approval.")
         case .toolCallRequested(let call) where call.name == "browser_open":
             let parts = call.arguments["url"].flatMap { URLComponents(string: $0) }
             let origin = parts.flatMap { component -> String? in
@@ -374,7 +376,8 @@ struct AskJarvisView: View {
             }
             runningTaskID = task.id
             log.append(AgentLogEntry(kind: .info, text: "Task \(task.id.uuidString.prefix(8)) created"))
-            let runner = TaskServiceToolRunner(service: service, taskID: task.id)
+            let safariReadEnabled = await service.isSafariReadAvailable()
+            let runner = TaskServiceToolRunner(service: service, taskID: task.id, enableSafariRead: safariReadEnabled)
             let waiter = TaskServiceApprovalWaiter(service: service)
             let prompt = AgentLoop.defaultSystemPrompt + (token == nil ? "" : "\nFor voice conversation, answer naturally and concisely in the user's language. Preserve necessary safety, approval and error details; do not invent actions.")
             let session = AgentSession(provider: OllamaProvider(), runner: runner, approvalWaiter: waiter,
