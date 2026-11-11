@@ -450,7 +450,7 @@ final class OptionalLiveVAD: @unchecked Sendable {
             invalid.store(true, ordering: .releasing)
         }
     }
-    func stop() { terminal.stop(); active.store(false, ordering: .releasing); timer?.cancel(); timer = nil }
+    func stop() { tapGate.close(); terminal.stop(); active.store(false, ordering: .releasing); timer?.cancel(); timer = nil }
     private func consume() {
         guard active.load(ordering: .acquiring) else { return }
         guard !invalid.load(ordering: .acquiring) else { fail(); return }
