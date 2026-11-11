@@ -34,10 +34,11 @@ private actor ClickVerifyGate {
     var calls = 0
     var resume: CheckedContinuation<Void, Never>?
     let entered: XCTestExpectation
-    init(_ entered: XCTestExpectation) { self.entered = entered }
+    let blockAt: Int
+    init(_ entered: XCTestExpectation, blockAt: Int = 2) { self.entered = entered; self.blockAt = blockAt }
     func visit() async {
         calls += 1
-        if calls == 2 {
+        if calls == blockAt {
             await withCheckedContinuation { continuation in
                 resume = continuation
                 entered.fulfill()
@@ -73,6 +74,25 @@ extension SafariClickTicketTests {
         do { try await coordinator.approve(token: cancelled, requestID: id, digest: "digest"); XCTFail("cancelled") } catch { }
         let count = await counter.value
         XCTAssertEqual(count, 1)
+    }
+
+    func testTaskCancelDuringCaptureProducesNoTicket() async throws {
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "digest")
+        let ref = AXUIElementCreateSystemWide()
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "capture started")
+        let gate = ClickVerifyGate(entered, blockAt: 1)
+        let capture = SafariClickCapture { await gate.visit(); return [candidate] }
+        let counter = ClickActionCounter()
+        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: capture, clock: { 11 }) { await counter.increment() }
+        let task = Task { try await coordinator.prepare(requestID: UUID(), identity: identity) }
+        await fulfillment(of: [entered], timeout: 2)
+        task.cancel()
+        await gate.release()
+        do { _ = try await task.value; XCTFail("cancelled capture issued ticket") } catch { }
+        do { try await capture.verify(expected: identity); XCTFail("capture reference retained") } catch { }
+        let count = await counter.value
+        XCTAssertEqual(count, 0)
     }
 
     func testClockGoingBackwardFailsClosed() async throws {

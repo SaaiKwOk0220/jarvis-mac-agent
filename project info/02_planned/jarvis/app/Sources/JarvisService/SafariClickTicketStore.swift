@@ -45,6 +45,8 @@ actor SafariClickCapture {
 
     init(provider: @escaping Provider) { self.provider = provider }
 
+    func clear() { captured = nil }
+
     func capture(expected: SafariClickIdentity) async throws {
         let matches = try await provider().filter { $0.identity == expected && $0.identity.enabled }
         guard matches.count == 1 else { throw CaptureError.ambiguousOrMissing }
@@ -94,8 +96,15 @@ actor SafariClickApprovalPrototype {
         preparing = true
         defer { preparing = false }
         let current = generation
+        try Task.checkCancellation()
         try await capture.capture(expected: identity)
-        guard current == generation else { throw Failure.invalid }
+        do {
+            try Task.checkCancellation()
+            guard current == generation else { throw Failure.invalid }
+        } catch {
+            await capture.clear()
+            throw error
+        }
         let token = UUID()
         pending[token] = Pending(requestID: requestID, identity: identity, expires: try readClock() + 60, generation: current)
         return token
