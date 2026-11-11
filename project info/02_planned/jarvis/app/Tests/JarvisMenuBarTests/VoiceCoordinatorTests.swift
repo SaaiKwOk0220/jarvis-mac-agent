@@ -268,6 +268,15 @@ private final class PCMTestCollector: @unchecked Sendable {
         XCTAssertThrowsError(try OfflinePCMResampler.convert([0], sourceRate: 0))
     }
 
+    func testVADTerminalFailureAndEndpointAreMutuallyExclusive() {
+        let failureFirst = VADTerminalState()
+        XCTAssertTrue(failureFirst.fail())
+        XCTAssertFalse(failureFirst.endpoint())
+        let endpointFirst = VADTerminalState()
+        XCTAssertTrue(endpointFirst.endpoint())
+        XCTAssertFalse(endpointFirst.fail())
+    }
+
     func testLiveVADConcurrentProducerFailsClosed() async throws {
         let url = try XCTUnwrap(OptionalVADAvailability.bundledModelURL)
         let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
@@ -286,6 +295,59 @@ private final class PCMTestCollector: @unchecked Sendable {
         release.signal()
         await first.value
         await fulfillment(of: [failed], timeout: 3)
+        vad.stop()
+    }
+
+    func testLiveVADHighRateContinuousInputForTenSeconds() async throws {
+        let url = try XCTUnwrap(OptionalVADAvailability.bundledModelURL)
+        for rate in [96_000.0, 192_000.0] {
+            let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1))
+            let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(rate * 0.02)))
+            buffer.frameLength = buffer.frameCapacity
+            let samples = try XCTUnwrap(buffer.floatChannelData)[0]
+            for i in 0..<Int(buffer.frameLength) { samples[i] = Float(0.001 * sin(Double(i) * 2 * .pi * 1000 / rate)) }
+            let failed = expectation(description: "continuous \(rate) has no overflow")
+            failed.isInverted = true
+            let vad = try OptionalLiveVAD(format: format, modelURL: url, pause: 8, onFailure: { _ in failed.fulfill() }, onSilence: {})
+            vad.start()
+            for _ in 0..<500 { vad.submit(buffer); try await Task.sleep(for: .milliseconds(20)) }
+            await fulfillment(of: [failed], timeout: 0.1)
+            vad.stop()
+        }
+    }
+
+    func testLiveVADStoppedWaitingSessionSkipsInitialization() async throws {
+        let url = try XCTUnwrap(OptionalVADAvailability.bundledModelURL)
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
+        let entered = expectation(description: "first initialization entered")
+        let secondEntered = expectation(description: "stopped session must not initialize")
+        secondEntered.isInverted = true
+        let release = DispatchSemaphore(value: 0)
+        let first = try OptionalLiveVAD(format: format, modelURL: url, pause: 2, beforeInitialize: { entered.fulfill(); release.wait() }, onFailure: { _ in }, onSilence: {})
+        let second = try OptionalLiveVAD(format: format, modelURL: url, pause: 2, beforeInitialize: { secondEntered.fulfill() }, onFailure: { _ in }, onSilence: {})
+        first.start()
+        await fulfillment(of: [entered], timeout: 2)
+        second.start(); second.stop(); release.signal()
+        await fulfillment(of: [secondEntered], timeout: 0.3)
+        first.stop()
+    }
+
+    func testLiveVADSlowInitializationOverflowFailsClosed() async throws {
+        let url = try XCTUnwrap(OptionalVADAvailability.bundledModelURL)
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 48_000))
+        buffer.frameLength = buffer.frameCapacity
+        let entered = expectation(description: "initialization waiting")
+        let failed = expectation(description: "overflow fails")
+        let silence = expectation(description: "no silence")
+        silence.isInverted = true
+        let release = DispatchSemaphore(value: 0)
+        let vad = try OptionalLiveVAD(format: format, modelURL: url, pause: 2, beforeInitialize: { entered.fulfill(); release.wait() }, onFailure: { _ in failed.fulfill() }, onSilence: { silence.fulfill() })
+        vad.start()
+        await fulfillment(of: [entered], timeout: 2)
+        vad.submit(buffer); vad.submit(buffer); vad.submit(buffer)
+        release.signal()
+        await fulfillment(of: [failed, silence], timeout: 1)
         vad.stop()
     }
 

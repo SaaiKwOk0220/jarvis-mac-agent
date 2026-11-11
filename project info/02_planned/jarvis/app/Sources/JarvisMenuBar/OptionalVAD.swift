@@ -267,16 +267,27 @@ enum VADDownmix {
     }
 }
 
+/// Exactly one terminal reason wins; all endpoint outcomes require manual confirmation.
+final class VADTerminalState: @unchecked Sendable {
+    private let state = ManagedAtomic<Int>(0)
+    func fail() -> Bool { state.compareExchange(expected: 0, desired: 1, ordering: .acquiringAndReleasing).exchanged }
+    func endpoint() -> Bool { state.compareExchange(expected: 0, desired: 2, ordering: .acquiringAndReleasing).exchanged }
+    func stop() { _ = state.compareExchange(expected: 0, desired: 3, ordering: .acquiringAndReleasing) }
+}
+
 /// Optional VAD runs off the tap; any loss or unsupported format fails closed.
 final class OptionalLiveVAD: @unchecked Sendable {
+    private static let initializationQueue = DispatchQueue(label: "jarvis.vad.model-initialization")
     private let queue: RealtimePCMBuffer
     private let channelCount: Int
     private let sampleRate: Double
     private let worker = DispatchQueue(label: "jarvis.vad.live", qos: .userInitiated)
     private let invalid = ManagedAtomic(false)
+    private let terminal = VADTerminalState()
     private let active = ManagedAtomic(true)
     private let producerBusy = ManagedAtomic(false)
     private let onProducerAcquired: (@Sendable () -> Void)?
+    private let beforeInitialize: (@Sendable () -> Void)?
     private let onFailure: @MainActor @Sendable (String) -> Void
     private let onSilence: @MainActor @Sendable () -> Void
     private var converter: StreamingPCMResampler?
@@ -287,6 +298,7 @@ final class OptionalLiveVAD: @unchecked Sendable {
     private var detector: SpeechPauseDetector
     init(format: AVAudioFormat, modelURL: URL, pause: Double,
          onProducerAcquired: (@Sendable () -> Void)? = nil,
+         beforeInitialize: (@Sendable () -> Void)? = nil,
          onFailure: @escaping @MainActor @Sendable (String) -> Void,
          onSilence: @escaping @MainActor @Sendable () -> Void) throws {
         guard format.commonFormat == .pcmFormatFloat32, (1...8).contains(Int(format.channelCount)),
@@ -295,7 +307,7 @@ final class OptionalLiveVAD: @unchecked Sendable {
         queue = RealtimePCMBuffer(capacity: Int(format.sampleRate) * channelCount * 2)
         self.modelURL = modelURL
         detector = SpeechPauseDetector(pauseDuration: pause)
-        self.onProducerAcquired = onProducerAcquired
+        self.onProducerAcquired = onProducerAcquired; self.beforeInitialize = beforeInitialize
         self.onFailure = onFailure; self.onSilence = onSilence
     }
     func start() {
@@ -306,10 +318,14 @@ final class OptionalLiveVAD: @unchecked Sendable {
         worker.async { [weak self] in
             guard let self, self.active.load(ordering: .acquiring) else { return }
             do {
-                let converter = try StreamingPCMResampler(sourceRate: self.sampleRate)
-                let model = try SileroOfflineInference(modelURL: self.modelURL)
-                guard self.active.load(ordering: .acquiring) else { return }
-                self.converter = converter; self.model = model
+                let prepared: (StreamingPCMResampler, SileroOfflineInference)? = try Self.initializationQueue.sync {
+                    guard self.active.load(ordering: .acquiring) else { return nil }
+                    self.beforeInitialize?()
+                    guard self.active.load(ordering: .acquiring) else { return nil }
+                    return (try StreamingPCMResampler(sourceRate: self.sampleRate), try SileroOfflineInference(modelURL: self.modelURL))
+                }
+                guard self.active.load(ordering: .acquiring), let prepared else { return }
+                self.converter = prepared.0; self.model = prepared.1
             } catch { self.fail() }
         }
         timer.resume()
@@ -318,15 +334,20 @@ final class OptionalLiveVAD: @unchecked Sendable {
     func submit(_ buffer: AVAudioPCMBuffer) {
         guard active.load(ordering: .acquiring) else { return }
         guard producerBusy.compareExchange(expected: false, desired: true, ordering: .acquiringAndReleasing).exchanged else {
-            invalid.store(true, ordering: .releasing); return
+            markInvalid(); return
         }
         defer { producerBusy.store(false, ordering: .releasing) }
         onProducerAcquired?()
         guard Int(buffer.format.channelCount) == channelCount, buffer.format.sampleRate == sampleRate,
-              queue.writePCM(buffer) else { invalid.store(true, ordering: .releasing); return }
+              queue.writePCM(buffer) else { markInvalid(); return }
     }
-    func signalLoss() { if active.load(ordering: .acquiring) { invalid.store(true, ordering: .releasing) } }
-    func stop() { active.store(false, ordering: .releasing); timer?.cancel(); timer = nil }
+    func signalLoss() { if active.load(ordering: .acquiring) { markInvalid() } }
+    private func markInvalid() {
+        if terminal.fail() {
+            invalid.store(true, ordering: .releasing)
+        }
+    }
+    func stop() { terminal.stop(); active.store(false, ordering: .releasing); timer?.cancel(); timer = nil }
     private func consume() {
         guard active.load(ordering: .acquiring) else { return }
         guard !invalid.load(ordering: .acquiring) else { fail(); return }
@@ -344,6 +365,7 @@ final class OptionalLiveVAD: @unchecked Sendable {
                 let probability = try model.probability(frame: frame)
                 guard !invalid.load(ordering: .acquiring), active.load(ordering: .acquiring) else { fail(); return }
                 if detector.observe(level: probability >= 0.5 ? 0.03 : 0, duration: 512.0 / 16000) {
+                    guard terminal.endpoint() else { fail(); return }
                     active.store(false, ordering: .releasing)
                     DispatchQueue.main.async { [onSilence] in onSilence() }
                     return
