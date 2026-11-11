@@ -17,7 +17,7 @@ struct JarvisMenuBarApp: App {
     init() {
         do { instanceLock = try SingleInstanceLock() }
         catch {
-            let message = "Jarvis is already running, or its instance lock is unavailable. Close older Jarvis instances and try again."
+            let message = StartupFailure.message(for: error)
             FileHandle.standardError.write(Data("\(message)\n".utf8))
             let alert = NSAlert()
             alert.messageText = "Jarvis could not start"
@@ -72,6 +72,7 @@ struct JarvisMenuBarApp: App {
             AskJarvisView(
                 client: client,
                 service: runtime.taskService,
+                voiceDraftStore: runtime.voiceDraftStore,
                 memoryContextProvider: runtime.memoryContextProvider
             )
             .frame(minWidth: 520, minHeight: 460)
@@ -100,6 +101,7 @@ private final class Runtime {
     /// to `TaskServiceToolRunner`; both paths end up at this one service, so
     /// the agent loop is bound by the same policy gate as every other task.
     private(set) var taskService: (any TaskServiceAPI)?
+    private(set) var voiceDraftStore: VoiceDraftStore?
 
     /// The user's memory store, or `nil` when initialisation failed. The
     /// "Memory" window shows an unavailable message in that case, and the
@@ -108,11 +110,12 @@ private final class Runtime {
 
     init(client: ServiceClient) {
         do {
-            let appSupport = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
-                appropriateFor: nil, create: true).appendingPathComponent("Jarvis", isDirectory: true)
-            try FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true)
+            let supportParent = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                appropriateFor: nil, create: true)
+            let appSupport = try PrivateAppStorage.prepare(parent: supportParent)
             let database = try Database(path: appSupport.appendingPathComponent("jarvis.sqlite").path)
             try database.migrate()
+            self.voiceDraftStore = try VoiceDraftStore(database: database)
             self.memory = try SQLiteMemoryStore(database: database)
             let service = try TaskService(taskRepository: SQLiteTaskRepository(database: database),
                 auditRepository: SQLiteAuditRepository(database: database), policy: Policy(),
@@ -142,7 +145,14 @@ private final class Runtime {
                 }
             }
         } catch {
-            // The UI remains available and reports an unavailable service if setup fails.
+            let message = StartupFailure.message(for: error)
+            Task { @MainActor in
+                let alert = NSAlert()
+                alert.messageText = "无法安全打开 Jarvis 数据"
+                alert.informativeText = message
+                alert.alertStyle = .warning
+                alert.runModal()
+            }
         }
     }
 
