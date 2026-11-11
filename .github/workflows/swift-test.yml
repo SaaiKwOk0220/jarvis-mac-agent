@@ -2,9 +2,12 @@ name: swift-test
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, feat/voice-conversation]
   push:
     branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
   test:
