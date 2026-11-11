@@ -436,7 +436,7 @@ struct AskJarvisView: View {
                 Toggle("实验性语音停顿检测", isOn: $optionalVADEnabled)
                     .disabled(voice.isRecording || voice.isStarting || voice.isFinishing)
                 Text(optionalVADEnabled
-                     ? "下次录音将使用本机语音检测。检测到停顿或发生错误时，请确认转写并手动发送。"
+                     ? "下次录音将使用本机语音检测。空草稿且服务可用时，可靠停顿并完成转写后会倒计时自动发送，可取消；检测异常时请检查转写并手动发送。"
                      : "当前使用现有停顿检测方式；实验性检测默认关闭。")
                     .font(.caption).foregroundStyle(.secondary)
                 }
