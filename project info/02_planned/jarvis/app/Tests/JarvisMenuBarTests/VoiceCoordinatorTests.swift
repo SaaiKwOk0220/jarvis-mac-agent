@@ -279,6 +279,14 @@ private final class PCMTestCollector: @unchecked Sendable {
         XCTAssertFalse(endpointFirst.confirmEndpoint())
     }
 
+    func testVADDrainWaitsForCallbacksAndQueueAndFailsClosed() {
+        XCTAssertEqual(VADDrainReadiness.evaluate(isDrained: false, queuedSamples: 0, invalid: false, timedOut: false), .wait)
+        XCTAssertEqual(VADDrainReadiness.evaluate(isDrained: true, queuedSamples: 1, invalid: false, timedOut: false), .wait)
+        XCTAssertEqual(VADDrainReadiness.evaluate(isDrained: true, queuedSamples: 0, invalid: true, timedOut: false), .fail)
+        XCTAssertEqual(VADDrainReadiness.evaluate(isDrained: true, queuedSamples: 0, invalid: false, timedOut: true), .fail)
+        XCTAssertEqual(VADDrainReadiness.evaluate(isDrained: true, queuedSamples: 0, invalid: false, timedOut: false), .ready)
+    }
+
     func testVADTapDrainGateClosesAgainstInFlightProducer() {
         let gate = VADTapDrainGate()
         XCTAssertTrue(gate.enter())

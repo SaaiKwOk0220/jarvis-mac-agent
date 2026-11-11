@@ -306,6 +306,14 @@ enum VADDownmix {
     }
 }
 
+enum VADDrainReadiness: Equatable {
+    case wait, ready, fail
+    static func evaluate(isDrained: Bool, queuedSamples: Int, invalid: Bool, timedOut: Bool) -> Self {
+        if invalid || timedOut { return .fail }
+        return isDrained && queuedSamples == 0 ? .ready : .wait
+    }
+}
+
 /// Tracks complete tap callbacks without blocking the audio thread.
 final class VADTapDrainGate: @unchecked Sendable {
     private let state = ManagedAtomic<UInt64>(0)
