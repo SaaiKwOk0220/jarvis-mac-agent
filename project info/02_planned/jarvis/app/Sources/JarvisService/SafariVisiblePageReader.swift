@@ -235,11 +235,12 @@ public struct SafariPageReadExecutor: ToolExecutor, Sendable {
 enum SafariClickCandidateProvider {
     static func candidates(expected: SafariClickIdentity) async throws -> [SafariClickCandidate] {
         guard AXIsProcessTrusted(), !expected.title.isEmpty, expected.enabled else { throw SafariAXReadError.permissionDenied }
-        let pid = await MainActor.run { () -> pid_t? in
+        let process = await MainActor.run { () -> (pid_t, Date)? in
             guard let app = NSWorkspace.shared.frontmostApplication, app.bundleIdentifier == "com.apple.Safari" else { return nil }
-            return app.processIdentifier
+            guard let launch = app.launchDate else { return nil }
+            return (app.processIdentifier, launch)
         }
-        guard let pid, pid == expected.pid else { throw SafariAXReadError.notFocused }
+        guard let (pid, launchDate) = process, pid == expected.pid else { throw SafariAXReadError.notFocused }
         let app = AXUIElementCreateApplication(pid)
         let window = try SafariFocusedPageAdapter.element(app, kAXFocusedWindowAttribute as String)
         let page = try SafariFocusedPageAdapter.readPage(window, includeText: false)
@@ -264,7 +265,7 @@ enum SafariClickCandidateProvider {
                       AXUIElementCopyAttributeValue(node, kAXEnabledAttribute as CFString, &rawEnabled) == .success,
                       let enabled = rawEnabled as? Bool else { throw SafariAXReadError.unavailable }
                 if title == expected.title && enabled {
-                    results.append(SafariClickCandidate(element: node, window: window, identity: expected))
+                    results.append(SafariClickCandidate(element: node, window: window, launchDate: launchDate, identity: expected))
                     guard results.count <= 1 else { throw SafariAXReadError.unavailable }
                 }
             }
@@ -275,8 +276,11 @@ enum SafariClickCandidateProvider {
                 for child in children { stack.append((child, depth + 1, inWeb || role == "AXWebArea")) }
             } else if status != .noValue && status != .attributeUnsupported { throw SafariAXReadError.unavailable }
         }
-        let currentPID = await MainActor.run { NSWorkspace.shared.frontmostApplication?.processIdentifier }
-        guard currentPID == pid,
+        let current = await MainActor.run { () -> (pid_t, Date)? in
+            guard let app = NSWorkspace.shared.frontmostApplication, app.bundleIdentifier == "com.apple.Safari", let launch = app.launchDate else { return nil }
+            return (app.processIdentifier, launch)
+        }
+        guard current?.0 == pid, current?.1 == launchDate,
               CFEqual(window, try SafariFocusedPageAdapter.element(app, kAXFocusedWindowAttribute as String)),
               try SafariFocusedPageAdapter.readPage(window, includeText: false).url == expected.url else { throw SafariAXReadError.targetChanged }
         return results
