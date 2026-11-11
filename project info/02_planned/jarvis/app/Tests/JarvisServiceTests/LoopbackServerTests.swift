@@ -159,7 +159,7 @@ final class LoopbackServerTests: XCTestCase {
 }
 private struct SlowListService: TaskServiceAPI {
     let underlying: TaskService
-    func createTask(title: String) async throws -> JarvisTask { try await underlying.createTask(title: title) }
+    func createTask(title: String) async throws -> JarvisTask { try await Task.sleep(nanoseconds: 1_000_000_000); return try await underlying.createTask(title: title) }
     func getTask(id: UUID) async throws -> JarvisTask? { try await underlying.getTask(id: id) }
     func listTasks() async throws -> [JarvisTask] { try await Task.sleep(nanoseconds: 6_000_000_000); return try await underlying.listTasks() }
     func submit(request: ToolRequest) async throws -> PolicyDecision { try await underlying.submit(request: request) }
@@ -223,6 +223,34 @@ extension LoopbackServerTests {
         defer { server.stop() }
         let response = try sendRawLoopback(port: port, request: "POST /tasks HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\nContent-Length: 100000\r\n\r\n")
         XCTAssertTrue(response.hasPrefix("HTTP/1.1 403"))
+    }
+
+    func testClientDisconnectDoesNotCancelAcceptedMutation() async throws {
+        let (service, _, _, _, _, _) = try makeService()
+        let server = LoopbackServer(service: SlowListService(underlying: service))
+        let port = try await server.start()
+        defer { server.stop() }
+        let token = try XCTUnwrap(server.authorizationToken)
+        let body = "{\"title\":\"disconnect mutation\"}"
+        let fd = try openSlowSocket(port: port, bytes: "POST /tasks HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\nAuthorization: Bearer \(token)\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)")
+        try await Task.sleep(nanoseconds: 300_000_000)
+        Darwin.close(fd)
+        try await Task.sleep(nanoseconds: 1_300_000_000)
+        let tasks = try await service.listTasks()
+        XCTAssertEqual(tasks.filter { $0.title == "disconnect mutation" }.count, 1)
+    }
+
+    func testConcurrentStartsPermitOnlyOneListener() async throws {
+        let (service, _, _, _, _, _) = try makeService()
+        let server = LoopbackServer(service: service)
+        defer { server.stop() }
+        let outcomes = await withTaskGroup(of: Bool.self, returning: [Bool].self) { group in
+            for _ in 0..<12 { group.addTask { (try? await server.start()) != nil } }
+            var results: [Bool] = []
+            for await outcome in group { results.append(outcome) }
+            return results
+        }
+        XCTAssertEqual(outcomes.filter { $0 }.count, 1)
     }
 
     func testCompletedRequestAllowsSlowHandlerAndRestart() async throws {

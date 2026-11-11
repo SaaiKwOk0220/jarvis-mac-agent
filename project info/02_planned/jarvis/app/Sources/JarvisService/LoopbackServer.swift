@@ -161,20 +161,30 @@ public final class LoopbackServer: @unchecked Sendable {
         listener.newConnectionHandler = { [weak self] connection in
             self?.handle(connection: connection)
         }
-        self.listener = listener
-        listener.start(queue: connectionQueue)
+        let installed = connectionQueue.sync { () -> Bool in
+            guard self.listener == nil else { return false }
+            self.listener = listener
+            listener.start(queue: connectionQueue)
+            return true
+        }
+        guard installed else { listener.cancel(); throw NSError(domain: "JarvisService", code: 3, userInfo: [NSLocalizedDescriptionKey: "listener already running"]) }
         for _ in 0..<100 {
-            if let port = listener.port, port.rawValue != 0 { return port.rawValue }
+            let state = connectionQueue.sync { (self.listener === listener, listener.port?.rawValue) }
+            guard state.0 else { throw CancellationError() }
+            if let port = state.1, port != 0 { return port }
             try await Task.sleep(nanoseconds: 10_000_000)
         }
-        listener.cancel()
+        connectionQueue.sync {
+            if self.listener === listener { self.listener = nil }
+            listener.cancel()
+        }
         throw NSError(domain: "JarvisService", code: 1, userInfo: [NSLocalizedDescriptionKey: "loopback listener failed to start"])
     }
 
     public func stop() {
-        listener?.cancel()
-        listener = nil
         connectionQueue.sync {
+            listener?.cancel()
+            listener = nil
             connections.values.forEach { $0.cancel() }
             connections.removeAll()
             receiving.removeAll()
@@ -294,7 +304,7 @@ public final class LoopbackServer: @unchecked Sendable {
                 return fields[1].trimmingCharacters(in: .whitespaces)
             }
         }
-        guard let port = listener?.port?.rawValue,
+        guard let port = connectionQueue.sync(execute: { listener?.port?.rawValue }),
               values("host") == ["127.0.0.1:\(port)"],
               values("origin").isEmpty else { return httpResponse(LoopbackResponse(status: 403)) }
         let contentLengths = values("content-length")
