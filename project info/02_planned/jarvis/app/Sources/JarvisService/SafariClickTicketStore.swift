@@ -73,15 +73,17 @@ actor SafariClickApprovalPrototype {
     private var pending: [UUID: Pending] = [:]
     private var generation: UInt64 = 0
     private var preparing = false
+    private var executing = false
     private let enabled: Bool
     private let capture: SafariClickCapture
     private let perform: @Sendable () async throws -> Void
-    init(enabled: Bool = false, capture: SafariClickCapture, perform: @escaping @Sendable () async throws -> Void) {
-        self.enabled = enabled; self.capture = capture; self.perform = perform
+    private let clock: @Sendable () -> TimeInterval
+    init(enabled: Bool = false, capture: SafariClickCapture, clock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }, perform: @escaping @Sendable () async throws -> Void) {
+        self.enabled = enabled; self.capture = capture; self.clock = clock; self.perform = perform
     }
     func prepare(requestID: UUID, identity: SafariClickIdentity, now: TimeInterval) async throws -> UUID {
         guard enabled else { throw Failure.disabled }
-        guard pending.isEmpty && !preparing else { throw Failure.invalid }
+        guard pending.isEmpty && !preparing && !executing else { throw Failure.invalid }
         preparing = true
         defer { preparing = false }
         let current = generation
@@ -96,9 +98,14 @@ actor SafariClickApprovalPrototype {
     func approve(token: UUID, requestID: UUID, digest: String, now: TimeInterval) async throws {
         guard let entry = pending.removeValue(forKey: token), entry.requestID == requestID,
               entry.identity.requestDigest == digest, entry.generation == generation else { throw Failure.invalid }
+        guard !executing else { throw Failure.invalid }
+        executing = true
+        defer { executing = false }
         guard now < entry.expires else { throw Failure.expired }
         try await capture.verify(expected: entry.identity)
         guard entry.generation == generation else { throw Failure.invalid }
+        guard clock() < entry.expires else { throw Failure.expired }
+        // Once perform begins, cancellation cannot undo the external action.
         try await perform()
     }
 }
