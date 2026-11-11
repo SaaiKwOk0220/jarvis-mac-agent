@@ -18,4 +18,10 @@ if [ ! -d "$resource" ]; then
   exit 1
 fi
 cp -R "$resource" "$app_dir/"
+vad_resource="$bin_dir/Jarvis_JarvisMenuBar.bundle"
+if [ ! -d "$vad_resource" ]; then
+  printf 'Required Jarvis model resource bundle missing: %s\n' "$vad_resource" >&2
+  exit 1
+fi
+cp -R "$vad_resource" "$app_dir/"
 printf '%s\n' "$app_dir"
