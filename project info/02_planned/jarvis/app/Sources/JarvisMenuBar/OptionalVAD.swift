@@ -306,6 +306,28 @@ enum VADDownmix {
     }
 }
 
+/// Tracks complete tap callbacks without blocking the audio thread.
+final class VADTapDrainGate: @unchecked Sendable {
+    private let state = ManagedAtomic<UInt64>(0)
+    private let closed: UInt64 = 1 << 63
+    func enter() -> Bool {
+        while true {
+            let value = state.load(ordering: .acquiring)
+            guard value & closed == 0, value < closed - 1 else { return false }
+            if state.compareExchange(expected: value, desired: value + 1, ordering: .acquiringAndReleasing).exchanged { return true }
+        }
+    }
+    func leave() { _ = state.wrappingDecrementThenLoad(ordering: .acquiringAndReleasing) }
+    func close() {
+        while true {
+            let value = state.load(ordering: .acquiring)
+            if value & closed != 0 { return }
+            if state.compareExchange(expected: value, desired: value | closed, ordering: .acquiringAndReleasing).exchanged { return }
+        }
+    }
+    var isDrained: Bool { state.load(ordering: .acquiring) == closed }
+}
+
 /// Exactly one terminal reason wins; all endpoint outcomes require manual confirmation.
 final class VADTerminalState: @unchecked Sendable {
     private let state = ManagedAtomic<Int>(0)
