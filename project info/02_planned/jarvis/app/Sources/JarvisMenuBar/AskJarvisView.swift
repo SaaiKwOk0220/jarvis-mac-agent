@@ -419,9 +419,14 @@ struct AskJarvisView: View {
             HStack {
                 Text(statusText).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 Spacer(minLength: 8)
+                if isRunning {
+                    Button("取消任务") { cancel() }
+                        .layoutPriority(1)
+                        .accessibilityHint("停止当前任务")
+                }
                 if conversation.isActive {
                     Button("结束语音对话") { stopConversation() }
-                        .controlSize(.large)
+                        .layoutPriority(1)
                         .accessibilityHint("停止连续对话和麦克风")
                 }
             }
@@ -430,7 +435,6 @@ struct AskJarvisView: View {
                     Button("朗读回答") { voice.speak(lastAnswer) }
                         .disabled(lastAnswer.isEmpty || voice.isRecording || voice.isStarting || voice.isFinishing)
                     Button("停止朗读") { stopConversation() }.disabled(!voice.isSpeaking)
-                    Button("取消任务") { cancel() }.disabled(!isRunning)
                     Button(isRunning ? "运行中…" : "发送") { start(fromVoice: conversation.manualRunToken != nil) }
                         .keyboardShortcut(.defaultAction).disabled(!canRun)
                 }
@@ -439,7 +443,6 @@ struct AskJarvisView: View {
                         Button("朗读回答") { voice.speak(lastAnswer) }
                             .disabled(lastAnswer.isEmpty || voice.isRecording || voice.isStarting || voice.isFinishing)
                         Button("停止朗读") { stopConversation() }.disabled(!voice.isSpeaking)
-                        Button("取消任务") { cancel() }.disabled(!isRunning)
                     }
                     Spacer()
                     Button(isRunning ? "运行中…" : "发送") { start(fromVoice: conversation.manualRunToken != nil) }
