@@ -62,6 +62,13 @@ final class PolicyTests: XCTestCase {
         XCTAssertEqual(Policy().evaluate(wrongEffect, config: config), .deny(reason: "invalid browser destination"))
     }
 
+    func testSafariReadRequiresApprovalAndExactOrigin() {
+        let valid = ToolRequest(taskID: taskID, name: "safari_read", sideEffect: .read, target: "https://example.com/", payload: "Read Safari accessibility text")
+        guard case .requireApproval = Policy().evaluate(valid, config: config) else { return XCTFail("expected approval") }
+        let invalid = ToolRequest(taskID: taskID, name: "safari_read", sideEffect: .read, target: "https://example.com/private?secret=x", payload: "Read Safari accessibility text")
+        XCTAssertEqual(Policy().evaluate(invalid, config: config), .deny(reason: "invalid Safari target"))
+    }
+
     func testLocalWriteAlwaysRequiresApproval() {
         let request = ToolRequest(taskID: taskID, name: "write_file", sideEffect: .localWrite,
                                   target: "/tmp/jarvis-project/out.txt", payload: "hello")

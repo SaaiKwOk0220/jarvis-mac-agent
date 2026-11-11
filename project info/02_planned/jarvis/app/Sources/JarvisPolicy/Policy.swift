@@ -39,6 +39,11 @@ public struct Policy: PolicyEvaluator, Sendable {
     public init() {}
 
     public func evaluate(_ request: ToolRequest, config: PolicyConfig) -> PolicyDecision {
+        if request.name == "safari_read" {
+            guard request.sideEffect == .read, request.payload == "Read Safari accessibility text", request.scope == nil,
+                  BrowserOpenURL.validated(request.target) != nil else { return .deny(reason: "invalid Safari target") }
+            return .requireApproval(reason: "Read the focused Safari page accessibility text for this exact origin; text can include off-screen or sensitive content and may be stored locally")
+        }
         if request.name == "browser_open" {
             guard request.sideEffect == .externalSend,
                   request.payload == "Open in browser",

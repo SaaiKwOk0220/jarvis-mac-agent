@@ -27,10 +27,11 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     private let screenshot: ScreenshotToolExecutor?
     private let accessibility: AccessibilityQueryToolExecutor?
     private let browserOpen: BrowserOpenExecutor?
+    private let safariRead: SafariPageReadExecutor?
     private let lock = NSLock()
     private var executions: [UUID: Task<Void, Error>] = [:]
 
-    public init(taskRepository: any TaskRepository, auditRepository: any AuditRepository, policy: any PolicyEvaluator, policyConfig: PolicyConfig = .init(), executor: any ToolExecutor = NoOpToolExecutor(), terminal: TerminalToolExecutor? = nil, webFetch: WebFetchToolExecutor? = nil, screenshot: ScreenshotToolExecutor? = nil, accessibility: AccessibilityQueryToolExecutor? = nil, browserOpen: BrowserOpenExecutor? = nil, requestRepository: (any ToolRequestRepository)? = nil, approvalRepository: (any ApprovalRepository)? = nil, unitOfWork: (any PersistenceUnitOfWork)? = nil) throws {
+    public init(taskRepository: any TaskRepository, auditRepository: any AuditRepository, policy: any PolicyEvaluator, policyConfig: PolicyConfig = .init(), executor: any ToolExecutor = NoOpToolExecutor(), terminal: TerminalToolExecutor? = nil, webFetch: WebFetchToolExecutor? = nil, screenshot: ScreenshotToolExecutor? = nil, accessibility: AccessibilityQueryToolExecutor? = nil, browserOpen: BrowserOpenExecutor? = nil, safariRead: SafariPageReadExecutor? = nil, requestRepository: (any ToolRequestRepository)? = nil, approvalRepository: (any ApprovalRepository)? = nil, unitOfWork: (any PersistenceUnitOfWork)? = nil) throws {
         guard let sqliteTasks = taskRepository as? SQLiteTaskRepository,
               let sqliteAudits = auditRepository as? SQLiteAuditRepository,
               sqliteTasks.database === sqliteAudits.database else { throw TaskServiceError.incompatiblePersistence }
@@ -47,7 +48,7 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
             guard let sqlite = unitOfWork as? SQLitePersistenceUnitOfWork, sqlite.database === database else { throw TaskServiceError.incompatiblePersistence }
             self.uow = sqlite
         } else { self.uow = SQLitePersistenceUnitOfWork(database: database) }
-        self.tasks = taskRepository; self.audits = auditRepository; self.policy = policy; self.config = policyConfig; self.executor = executor; self.terminal = terminal; self.webFetch = webFetch; self.screenshot = screenshot; self.accessibility = accessibility; self.browserOpen = browserOpen
+        self.tasks = taskRepository; self.audits = auditRepository; self.policy = policy; self.config = policyConfig; self.executor = executor; self.terminal = terminal; self.webFetch = webFetch; self.screenshot = screenshot; self.accessibility = accessibility; self.browserOpen = browserOpen; self.safariRead = safariRead
     }
 
     public func createTask(title: String) async throws -> JarvisTask { try lock.withLock { let task = JarvisTask(title: title); try uow.createTask(task, audit: event(taskID: task.id, summary: "task created", result: "created")); return task } }
@@ -213,8 +214,10 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     private func execute(_ request: ToolRequest) async throws {
         do {
             try lock.withLock { guard let (_, status) = try requests.fetch(id: request.id), status == .executing else { throw TaskServiceError.requestNotAwaitingApproval }; try requireRunning(request.taskID) }
+            if request.name == "safari_read" && safariRead == nil { throw SafariAXReadError.unavailable }
             if request.name == "browser_open" && browserOpen == nil { throw BrowserOpenError.unavailable }
             let picked: any ToolExecutor = {
+                if request.name == "safari_read", let safariRead = self.safariRead { return safariRead }
                 if request.name == "browser_open", let browserOpen = self.browserOpen { return browserOpen }
                 if request.name == "shell", let terminal = self.terminal { return terminal }
                 if request.name == "fetch", let webFetch = self.webFetch { return webFetch }
@@ -262,7 +265,7 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     private func requiredTask(_ id: UUID) throws -> JarvisTask { guard let task = try tasks.fetch(id: id) else { throw TaskServiceError.taskNotFound }; return task }
     private func transition(_ task: JarvisTask, to: TaskStatus) throws { do { try TaskStateMachine.validate(from: task.status, to: to) } catch { throw TaskServiceError.illegalTransition(from: task.status, to: to) }; try uow.transition(taskID: task.id, from: task.status, to: to, audits: [event(taskID: task.id, summary: "task transitioned", result: "\(task.status.rawValue) -> \(to.rawValue)")]) }
     private func bounded(_ summary: String) -> String { String(redactSecrets(summary).prefix(512)) }
-    private func event(_ request: ToolRequest, summary: String, result: String, approvalID: UUID? = nil) -> AuditEvent { event(taskID: request.taskID, sideEffect: request.sideEffect, digest: request.payloadDigest, summary: summary, result: result, approvalID: approvalID, target: request.name == "browser_open" ? Self.browserAuditTarget(request.target) : request.target) }
+    private func event(_ request: ToolRequest, summary: String, result: String, approvalID: UUID? = nil) -> AuditEvent { event(taskID: request.taskID, sideEffect: request.sideEffect, digest: request.payloadDigest, summary: summary, result: result, approvalID: approvalID, target: (request.name == "browser_open" || request.name == "safari_read") ? Self.browserAuditTarget(request.target) : request.target) }
     private static func browserAuditTarget(_ target: String) -> String {
         guard let parts = URLComponents(string: target), parts.scheme == "https", let host = parts.host else { return "[REDACTED]" }
         return "https://\(host)" + (parts.port.map { ":\($0)" } ?? "")

@@ -132,7 +132,8 @@ private final class Runtime {
                 webFetch: WebFetchToolExecutor(),
                 screenshot: ScreenshotToolExecutor(),
                 accessibility: AccessibilityQueryToolExecutor(),
-                browserOpen: BrowserOpenExecutor())
+                browserOpen: BrowserOpenExecutor(),
+                safariRead: SafariPageReadExecutor(reader: SafariVisiblePageReader { expectedURL in try await SafariFocusedPageAdapter.snapshot(expectedURL: expectedURL) }))
             self.taskService = service
             let server = LoopbackServer(service: service)
             self.server = server
