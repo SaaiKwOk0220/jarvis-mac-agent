@@ -11,6 +11,10 @@ bundle_dir="$(mktemp -d "$output_dir/Jarvis.XXXXXX")"
 app_dir="$bundle_dir/Jarvis.app"
 mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
 cp "$script_dir/Info.plist" "$app_dir/Contents/Info.plist"
+if [ "${JARVIS_SAFARI_EXPERIMENT_BUNDLE:-0}" = 1 ]; then
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier local.jarvis.safari-experiment' "$app_dir/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleName Jarvis Safari Experiment' "$app_dir/Contents/Info.plist"
+fi
 cp "$bin_dir/JarvisMenuBar" "$app_dir/Contents/MacOS/JarvisMenuBar"
 resource="$bin_dir/GRDB_GRDB.bundle"
 if [ ! -d "$resource" ]; then

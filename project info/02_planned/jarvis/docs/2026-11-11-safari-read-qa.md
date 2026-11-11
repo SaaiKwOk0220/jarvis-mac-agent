@@ -11,3 +11,13 @@ Use a public or disposable HTTPS page with no personal information. Grant Access
 The result is accessibility text, which may include off-screen content and is sent to the model; the model may retain or repeat it. The original user message and task title may also be stored. The feature reads a dynamic page rather than an atomic snapshot: checks compare the Safari process, launch time, window and URL before and after, but cannot prove that a page did not change and return to the same URL (ABA). No claim of document-atomic identity or of protection from prompt injection is made. Do not enable for sensitive pages. UI preview of a query string is intentional; verify the URL does not appear in audit or request records.
 
 The capture timeout and traversal limits are best effort; external AX calls and OS scheduling are not hard real-time guarantees. The switch remains off for production until real-device QA and an independent security review have passed.
+
+## Isolated experimental bundle
+
+Build without starting the app:
+
+```sh
+JARVIS_SAFARI_EXPERIMENT_BUNDLE=1 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer scripts/build-dev-app.sh /private/tmp/jarvis-safari-isolated
+```
+
+The printed bundle uses identifier `local.jarvis.safari-experiment` and Application Support directory `Jarvis-Safari-Experiment`, including its database, screenshots, and instance lock. Its Accessibility permission must be granted separately where macOS requests it. This is a distinct development bundle, not a signed production release. It has not yet been exercised on a real device. Launch only after the tester agrees, with the experimental environment variable set for its executable, and follow the checks above. The feature remains off without that variable.

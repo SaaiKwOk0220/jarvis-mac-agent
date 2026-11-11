@@ -492,7 +492,7 @@ public final class ServiceClient: ObservableObject {
             appropriateFor: nil,
             create: false
         )) ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        return appSupport.appendingPathComponent("Jarvis/screenshots", isDirectory: true)
+        return appSupport.appendingPathComponent(AppStorageNamespace.current, isDirectory: true).appendingPathComponent("screenshots", isDirectory: true)
     }
 
     private func mutate(path: String, body: [String: String]? = nil) async throws {
