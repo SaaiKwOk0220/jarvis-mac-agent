@@ -1,5 +1,5 @@
 import Foundation
-import AVFoundation
+@preconcurrency import AVFoundation
 import CryptoKit
 import Atomics
 import OnnxRuntimeBindings
@@ -130,6 +130,20 @@ final class SileroOfflineInference {
     }
 }
 
+/// Serializes the converter's input request without capturing mutable local state.
+private final class ConverterInput: @unchecked Sendable {
+    private let lock = NSLock()
+    private let buffer: AVAudioPCMBuffer
+    private var supplied: Bool
+    init(_ buffer: AVAudioPCMBuffer, supplied: Bool = false) { self.buffer = buffer; self.supplied = supplied }
+    func next() -> AVAudioPCMBuffer? {
+        lock.lock(); defer { lock.unlock() }
+        guard !supplied else { return nil }
+        supplied = true
+        return buffer
+    }
+}
+
 /// Offline-only conversion of one complete mono recording to 16 kHz.
 enum OfflinePCMResampler {
     static func convert(_ samples: [Float], sourceRate: Double) throws -> [Float] {
@@ -146,11 +160,11 @@ enum OfflinePCMResampler {
         samples.withUnsafeBufferPointer { buffer in inputChannels[0].update(from: buffer.baseAddress!, count: samples.count) }
         let estimated = Int(ceil(Double(samples.count) * 16_000 / sourceRate)) + 1024
         guard let output = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: AVAudioFrameCount(estimated)) else { throw NSError(domain: "JarvisVAD", code: 8) }
-        var fed = false
+        let feeder = ConverterInput(input)
         var error: NSError?
         let status = converter.convert(to: output, error: &error) { _, state in
-            if fed { state.pointee = .endOfStream; return nil }
-            fed = true; state.pointee = .haveData; return input
+            guard let chunk = feeder.next() else { state.pointee = .endOfStream; return nil }
+            state.pointee = .haveData; return chunk
         }
         guard error == nil, status != .error, let channels = output.floatChannelData else { throw error ?? NSError(domain: "JarvisVAD", code: 9) }
         return Array(UnsafeBufferPointer(start: channels[0], count: Int(output.frameLength)))
@@ -180,14 +194,14 @@ final class StreamingPCMResampler {
         samples.withUnsafeBufferPointer { if let base = $0.baseAddress { sourceData[0].update(from: base, count: samples.count) } }
         let count = Int(ceil(Double(samples.count) * 16_000 / source.sampleRate)) + 1024
         guard let output = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: AVAudioFrameCount(count)) else { throw NSError(domain: "JarvisVAD", code: 13) }
-        var fed = samples.isEmpty
+        let feeder = ConverterInput(input, supplied: samples.isEmpty)
         var error: NSError?
         var converted = [Float]()
         for _ in 0..<8 {
             output.frameLength = 0
             let status = converter.convert(to: output, error: &error) { _, state in
-                if fed { state.pointee = final ? .endOfStream : .noDataNow; return nil }
-                fed = true; state.pointee = .haveData; return input
+                guard let chunk = feeder.next() else { state.pointee = final ? .endOfStream : .noDataNow; return nil }
+                state.pointee = .haveData; return chunk
             }
             guard status != .error, error == nil, let channels = output.floatChannelData else { throw error ?? NSError(domain: "JarvisVAD", code: 14) }
             converted.append(contentsOf: UnsafeBufferPointer(start: channels[0], count: Int(output.frameLength)))
