@@ -289,6 +289,15 @@ private final class PCMTestCollector: @unchecked Sendable {
         XCTAssertTrue(gate.isDrained)
     }
 
+    func testVADStopClosesTapAdmission() throws {
+        let url = try XCTUnwrap(OptionalVADAvailability.bundledModelURL)
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
+        let vad = try OptionalLiveVAD(format: format, modelURL: url, pause: 2, onFailure: { _ in }, onSilence: {})
+        vad.stop()
+        XCTAssertFalse(vad.tapGate.enter())
+        XCTAssertTrue(vad.tapGate.isDrained)
+    }
+
     func testLiveVADConcurrentProducerFailsClosed() async throws {
         let url = try XCTUnwrap(OptionalVADAvailability.bundledModelURL)
         let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
