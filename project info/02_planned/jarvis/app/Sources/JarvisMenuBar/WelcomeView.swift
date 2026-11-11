@@ -1,4 +1,5 @@
 import SwiftUI
+@preconcurrency import ApplicationServices
 
 /// First-launch onboarding window. Renders four worker cards (Terminal /
 /// WebFetch / Screenshot / AX) summarizing what each menu-bar entry does
@@ -41,6 +42,12 @@ struct WelcomeView: View {
                     body: "AXUIElement tree walker. Requires Accessibility permission, and the target bundle ID must be in PolicyConfig.applicationBundleIDs."
                 )
             }
+
+            Button("请求辅助功能权限") {
+                AccessibilityPermissionRequest.request()
+            }
+            Text("请在系统设置 → 隐私与安全性 → 辅助功能中允许当前 Jarvis 应用；授权后返回并重新提交请求。")
+                .font(.caption).foregroundStyle(.secondary)
 
             Spacer(minLength: 4)
 
@@ -90,4 +97,12 @@ struct WelcomeView: View {
     /// contract lives in one place even though SwiftUI views are not
     /// exercised by the unit-test target.
     static let welcomedDefaultsKey = "jarvis.welcomed"
+}
+
+enum AccessibilityPermissionRequest {
+    static func request(prompt: ([String: Bool]) -> Bool = { options in
+        AXIsProcessTrustedWithOptions(options as CFDictionary)
+    }) {
+        _ = prompt([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true])
+    }
 }
