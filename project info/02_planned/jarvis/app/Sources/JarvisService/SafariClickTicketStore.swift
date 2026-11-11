@@ -78,10 +78,17 @@ actor SafariClickApprovalPrototype {
     private let capture: SafariClickCapture
     private let perform: @Sendable () async throws -> Void
     private let clock: @Sendable () -> TimeInterval
+    private var lastReading: TimeInterval?
+    private func readClock() throws -> TimeInterval {
+        let value = clock()
+        guard value.isFinite, value >= 0, lastReading.map({ value >= $0 }) ?? true else { throw Failure.invalid }
+        lastReading = value
+        return value
+    }
     init(enabled: Bool = false, capture: SafariClickCapture, clock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }, perform: @escaping @Sendable () async throws -> Void) {
         self.enabled = enabled; self.capture = capture; self.clock = clock; self.perform = perform
     }
-    func prepare(requestID: UUID, identity: SafariClickIdentity, now: TimeInterval) async throws -> UUID {
+    func prepare(requestID: UUID, identity: SafariClickIdentity) async throws -> UUID {
         guard enabled else { throw Failure.disabled }
         guard pending.isEmpty && !preparing && !executing else { throw Failure.invalid }
         preparing = true
@@ -90,21 +97,22 @@ actor SafariClickApprovalPrototype {
         try await capture.capture(expected: identity)
         guard current == generation else { throw Failure.invalid }
         let token = UUID()
-        pending[token] = Pending(requestID: requestID, identity: identity, expires: now + 60, generation: current)
+        pending[token] = Pending(requestID: requestID, identity: identity, expires: try readClock() + 60, generation: current)
         return token
     }
     func cancel() { generation &+= 1; pending.removeAll() }
     func reject(token: UUID) { pending.removeValue(forKey: token) }
-    func approve(token: UUID, requestID: UUID, digest: String, now: TimeInterval) async throws {
+    func approve(token: UUID, requestID: UUID, digest: String) async throws {
         guard let entry = pending.removeValue(forKey: token), entry.requestID == requestID,
               entry.identity.requestDigest == digest, entry.generation == generation else { throw Failure.invalid }
         guard !executing else { throw Failure.invalid }
         executing = true
         defer { executing = false }
-        guard now < entry.expires else { throw Failure.expired }
+        guard try readClock() < entry.expires else { throw Failure.expired }
         try await capture.verify(expected: entry.identity)
         guard entry.generation == generation else { throw Failure.invalid }
-        guard clock() < entry.expires else { throw Failure.expired }
+        try Task.checkCancellation()
+        guard try readClock() < entry.expires else { throw Failure.expired }
         // Once perform begins, cancellation cannot undo the external action.
         try await perform()
     }
