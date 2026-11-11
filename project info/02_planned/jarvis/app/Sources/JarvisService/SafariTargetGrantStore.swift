@@ -8,6 +8,8 @@ struct SafariCapturedTarget: Equatable, Sendable {
     let windowIdentity: UUID
 }
 
+enum SafariTargetGrantError: Error { case invalidTarget, duplicateToken }
+
 /// In-memory, scoped, single-use storage for a potential future approval flow.
 /// Not an authorization decision and not wired to the disabled Safari tool.
 final class SafariTargetGrantStore: @unchecked Sendable {
@@ -23,9 +25,16 @@ final class SafariTargetGrantStore: @unchecked Sendable {
     private var entries: [UUID: Entry] = [:]
     init(lifetime: TimeInterval = 60) { self.lifetime = max(0, lifetime) }
 
-    func insert(_ target: SafariCapturedTarget, token: UUID, taskID: UUID, requestID: UUID, requestDigest: String, now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> UUID {
+    func insert(_ target: SafariCapturedTarget, token: UUID, taskID: UUID, requestID: UUID, requestDigest: String, now: TimeInterval = ProcessInfo.processInfo.systemUptime) throws -> UUID {
+        guard target.processID > 0, !requestDigest.isEmpty, target.url.utf8.count <= 4096,
+              target.url.unicodeScalars.allSatisfy({ $0.isASCII && !$0.properties.isWhitespace && !CharacterSet.controlCharacters.contains($0) }),
+              let components = URLComponents(string: target.url), components.scheme == "https",
+              components.user == nil, components.password == nil, components.fragment == nil,
+              let host = components.host, !host.isEmpty,
+              let url = components.url, url.absoluteString == target.url else { throw SafariTargetGrantError.invalidTarget }
         lock.lock(); defer { lock.unlock() }
         entries = entries.filter { $0.value.expires > now }
+        guard entries[token] == nil else { throw SafariTargetGrantError.duplicateToken }
         if entries.count >= 32, let oldest = entries.min(by: { $0.value.expires < $1.value.expires })?.key { entries.removeValue(forKey: oldest) }
         entries[token] = Entry(target: target, taskID: taskID, requestID: requestID, requestDigest: requestDigest, expires: now + lifetime)
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + lifetime) { [weak self] in self?.purge() }
