@@ -41,11 +41,12 @@ actor SafariClickCapture {
     enum CaptureError: Error { case ambiguousOrMissing, changed }
     typealias Provider = @Sendable () async throws -> [SafariClickCandidate]
     private let provider: Provider
+    private let beforeClear: @Sendable () async -> Void
     private var captured: SafariClickCandidate?
 
-    init(provider: @escaping Provider) { self.provider = provider }
+    init(beforeClear: @escaping @Sendable () async -> Void = {}, provider: @escaping Provider) { self.beforeClear = beforeClear; self.provider = provider }
 
-    func clear() { captured = nil }
+    func clear() async { await beforeClear(); captured = nil }
 
     func capture(expected: SafariClickIdentity) async throws {
         let matches = try await provider().filter { $0.identity == expected && $0.identity.enabled }
@@ -76,6 +77,7 @@ actor SafariClickApprovalPrototype {
     private var generation: UInt64 = 0
     private var preparing = false
     private var executing = false
+    private var cleaning = 0
     private let enabled: Bool
     private let capture: SafariClickCapture
     private let perform: @Sendable () async throws -> Void
@@ -92,7 +94,7 @@ actor SafariClickApprovalPrototype {
     }
     func prepare(requestID: UUID, identity: SafariClickIdentity) async throws -> UUID {
         guard enabled else { throw Failure.disabled }
-        guard pending.isEmpty && !preparing && !executing else { throw Failure.invalid }
+        guard pending.isEmpty && !preparing && !executing && cleaning == 0 else { throw Failure.invalid }
         preparing = true
         defer { preparing = false }
         let current = generation
@@ -110,14 +112,27 @@ actor SafariClickApprovalPrototype {
             throw error
         }
     }
-    func cancel() async { generation &+= 1; pending.removeAll(); await capture.clear() }
+    func cancel() async {
+        generation &+= 1; pending.removeAll(); cleaning += 1
+        defer { cleaning -= 1 }
+        await capture.clear()
+    }
     func reject(token: UUID) async {
-        if pending.removeValue(forKey: token) != nil { await capture.clear() }
+        if pending.removeValue(forKey: token) != nil {
+            cleaning += 1
+            defer { cleaning -= 1 }
+            await capture.clear()
+        }
     }
     func approve(token: UUID, requestID: UUID, digest: String) async throws {
         guard let entry = pending.removeValue(forKey: token) else { throw Failure.invalid }
         guard entry.requestID == requestID, entry.identity.requestDigest == digest,
-              entry.generation == generation else { await capture.clear(); throw Failure.invalid }
+              entry.generation == generation else {
+            cleaning += 1
+            defer { cleaning -= 1 }
+            await capture.clear()
+            throw Failure.invalid
+        }
         guard !executing else { throw Failure.invalid }
         executing = true
         defer { executing = false }

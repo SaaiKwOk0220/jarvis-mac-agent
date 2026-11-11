@@ -77,6 +77,38 @@ extension SafariClickTicketTests {
         XCTAssertEqual(count, 1)
     }
 
+    func testPrepareIsBlockedUntilRejectedCaptureIsCleared() async throws {
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "digest")
+        let ref = AXUIElementCreateSystemWide()
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "cleanup started")
+        let gate = ClickVerifyGate(entered, blockAt: 1)
+        let capture = SafariClickCapture(beforeClear: { await gate.visit() }) { [candidate] }
+        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: capture, clock: { 11 }) { }
+        let token = try await coordinator.prepare(requestID: UUID(), identity: identity)
+        let rejection = Task { await coordinator.reject(token: token) }
+        await fulfillment(of: [entered], timeout: 2)
+        do { _ = try await coordinator.prepare(requestID: UUID(), identity: identity); XCTFail("prepare during cleanup") } catch { }
+        await gate.release()
+        await rejection.value
+        _ = try await coordinator.prepare(requestID: UUID(), identity: identity)
+    }
+
+    func testUnknownTokenDoesNotDiscardOtherRequest() async throws {
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "digest")
+        let ref = AXUIElementCreateSystemWide()
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let counter = ClickActionCounter()
+        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: SafariClickCapture { [candidate] }, clock: { 11 }) { await counter.increment() }
+        let id = UUID()
+        let token = try await coordinator.prepare(requestID: id, identity: identity)
+        await coordinator.reject(token: UUID())
+        do { try await coordinator.approve(token: UUID(), requestID: id, digest: "digest"); XCTFail("unknown token") } catch { }
+        try await coordinator.approve(token: token, requestID: id, digest: "digest")
+        let count = await counter.value
+        XCTAssertEqual(count, 1)
+    }
+
     func testTaskCancelDuringCaptureProducesNoTicket() async throws {
         let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "digest")
         let ref = AXUIElementCreateSystemWide()
