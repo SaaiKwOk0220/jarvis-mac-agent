@@ -15,6 +15,16 @@ final class PrivateAppStorageTests: XCTestCase {
         guard lstat(path.path, &value) == 0 else { throw POSIXError(.ENOENT) }
         return value.st_mode & 0o777
     }
+    func testExperimentNamespacesRemainPrivateAndRejectUnknownPaths() throws {
+        let parent = try temporaryParent()
+        for name in ["Jarvis", "Jarvis-VAD-Experiment", "Jarvis-Safari-Experiment", "Jarvis-Browser-Experiment"] {
+            let directory = try PrivateAppStorage.prepare(parent: parent, directoryName: name)
+            XCTAssertEqual(directory.lastPathComponent, name)
+            XCTAssertEqual(try mode(directory), 0o700)
+            XCTAssertEqual(try mode(directory.appendingPathComponent("jarvis.sqlite")), 0o600)
+        }
+        XCTAssertThrowsError(try PrivateAppStorage.prepare(parent: parent, directoryName: "../other"))
+    }
     func testNewAndExistingStorageIsPrivateAndKeepsContents() throws {
         let parent = try temporaryParent()
         let directory = try PrivateAppStorage.prepare(parent: parent)

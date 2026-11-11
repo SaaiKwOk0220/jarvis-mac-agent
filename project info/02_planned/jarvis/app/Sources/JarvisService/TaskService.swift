@@ -79,7 +79,10 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
                 output.append(PendingApprovalRequest(id: request.id, taskID: request.taskID, reason: reason, target: exactURL, payload: "Read accessibility text from this captured Safari window", digest: request.payloadDigest))
             } else {
                 let redactedPayload = redactSecrets(request.payload)
-                let target = request.name == "browser_open" ? BrowserURLTicketStore.Ticket(payload: request.payload).flatMap { browserTickets.peekBound($0, taskID: request.taskID, requestID: request.id) } ?? "[目标已失效，请拒绝此请求后重新请求]" : request.target
+                let target: String
+                if request.name == "browser_open", let ticket = BrowserURLTicketStore.Ticket(payload: request.payload) {
+                    target = browserTickets.peekBound(ticket, taskID: request.taskID, requestID: request.id) ?? "[目标已失效，请拒绝此请求后重新请求]"
+                } else { target = request.target }
                 output.append(PendingApprovalRequest(id: request.id, taskID: request.taskID, reason: reason, target: target, payload: redactedPayload == request.payload ? redactedPayload : "[REDACTED]", digest: request.payloadDigest))
             }
         }

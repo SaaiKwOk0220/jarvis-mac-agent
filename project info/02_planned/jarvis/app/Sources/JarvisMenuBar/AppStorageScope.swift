@@ -4,6 +4,7 @@ import Foundation
 enum AppStorageScope {
     static func directory(experimental: Bool) -> String { experimental ? "Jarvis-VAD-Experiment" : "Jarvis" }
     static func directory(bundleID: String?, vadIsolation: Bool) -> String {
+        if bundleID == "local.jarvis.browser-experiment" { return "Jarvis-Browser-Experiment" }
         if bundleID == "local.jarvis.safari-experiment" { return "Jarvis-Safari-Experiment" }
         return directory(experimental: vadIsolation)
     }

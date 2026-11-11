@@ -32,6 +32,12 @@ struct JarvisMenuBarApp: App {
             exit(EXIT_FAILURE)
         }
         #endif
+        #if JARVIS_EXACT_BROWSER_EXPERIMENT
+        guard Bundle.main.bundleIdentifier == ExactBrowserExperiment.bundleID,
+              Bundle.main.object(forInfoDictionaryKey: "JarvisBrowserExperiment") as? Bool == true else {
+            FileHandle.standardError.write(Data("Invalid experimental bundle identity.\n".utf8)); exit(EXIT_FAILURE)
+        }
+        #endif
         do { instanceLock = try SingleInstanceLock() }
         catch {
             let message = StartupFailure.message(for: error)
@@ -168,7 +174,7 @@ private final class Runtime {
                 screenshot: ScreenshotToolExecutor(),
                 accessibility: AccessibilityQueryToolExecutor(),
                 browserOpen: BrowserOpenExecutor(),
-                enableSafariRead: safariReadEnabled)
+                enableSafariRead: safariReadEnabled, exactBrowserEnabled: ExactBrowserExperiment.current)
             self.taskService = service
             let server = LoopbackServer(service: service)
             self.server = server

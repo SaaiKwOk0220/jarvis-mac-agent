@@ -3,6 +3,7 @@ import XCTest
 
 final class AppStorageNamespaceTests: XCTestCase {
     func testIntegratedScopesRemainSeparate() {
+        XCTAssertEqual(AppStorageScope.directory(bundleID: "local.jarvis.browser-experiment", vadIsolation: false), "Jarvis-Browser-Experiment")
         XCTAssertEqual(AppStorageScope.directory(bundleID: "local.jarvis.safari-experiment", vadIsolation: false), "Jarvis-Safari-Experiment")
         XCTAssertEqual(AppStorageScope.directory(bundleID: "local.jarvis.vad-experiment", vadIsolation: true), "Jarvis-VAD-Experiment")
         XCTAssertEqual(AppStorageScope.directory(bundleID: "local.jarvis.dev", vadIsolation: false), "Jarvis")

@@ -40,8 +40,13 @@ struct ApprovalView: View {
                                         .fixedSize(horizontal: false, vertical: true)
                                         .frame(maxWidth: .infinity, alignment: .leading)
                                 }.frame(maxHeight: 100)
+                            } else if request.payload.hasPrefix("ticket:") {
+                                Text("完整目标网址（可能包含敏感信息，请滚动核对）").font(.caption)
+                                ScrollView { Text(request.target).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+                                    .frame(minHeight: 44, maxHeight: 120)
+                                Text("批准仅覆盖初始网址。浏览器可能重定向、运行脚本并发送网络请求；原始任务文字可能保存在本机。")
+                                    .font(.caption).foregroundStyle(.secondary)
                             } else {
-                                LabeledContent("Reason", value: request.reason)
                                 LabeledContent("Target", value: request.target)
                             }
                             LabeledContent("Action digest", value: request.digest)

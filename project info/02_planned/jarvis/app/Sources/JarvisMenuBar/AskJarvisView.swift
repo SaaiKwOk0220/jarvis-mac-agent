@@ -295,6 +295,10 @@ struct AskJarvisView: View {
 
     private var conversationPanel: some View {
         VStack(alignment: .leading, spacing: 10) {
+            #if JARVIS_EXACT_BROWSER_EXPERIMENT
+            Text(ExactBrowserExperiment.current ? "实验模式：打开完整网址前需要逐次审批；浏览器可能重定向或发送网络请求。" : "完整网址实验未启用。")
+                .font(.caption).foregroundStyle(.secondary)
+            #endif
             #if JARVIS_SAFARI_EXPERIMENT_BUILD
             HStack {
                 Button("请求辅助功能权限") {
@@ -702,7 +706,7 @@ struct AskJarvisView: View {
             runningTaskID = task.id
             log.append(AgentLogEntry(kind: .info, text: "Task \(task.id.uuidString.prefix(8)) created"))
             let safariReadEnabled = await service.isSafariReadAvailable()
-            let runner = TaskServiceToolRunner(service: service, taskID: task.id, enableSafariRead: safariReadEnabled)
+            let runner = TaskServiceToolRunner(service: service, taskID: task.id, enableSafariRead: safariReadEnabled, exactBrowserEnabled: ExactBrowserExperiment.current)
             let waiter = TaskServiceApprovalWaiter(service: service)
             let prompt = AgentLoop.defaultSystemPrompt + (token == nil ? "" : "\nFor voice conversation, answer naturally and concisely in the user's language. Preserve necessary safety, approval and error details; do not invent actions.")
             let session = AgentSession(provider: OllamaProvider(), runner: runner, approvalWaiter: waiter,

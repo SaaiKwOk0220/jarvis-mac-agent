@@ -3,14 +3,19 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 package_dir="$(cd "$script_dir/.." && pwd)"
 experimental=false
+exact=false
+if [ "${1:-}" = --exact-experiment ]; then exact=true; shift; fi
 if [ "${1:-}" = --experimental ]; then experimental=true; shift; fi
 if [[ "${1:-}" == --* ]]; then printf 'Unknown build option: %s\n' "$1" >&2; exit 2; fi
 if (( $# > 1 )); then printf 'Usage: %s [--experimental] [output-dir]\n' "$0" >&2; exit 2; fi
-if "$experimental" && [ "${JARVIS_SAFARI_EXPERIMENT_BUNDLE:-0}" = 1 ]; then printf 'Choose one experiment.\n' >&2; exit 1; fi
+if { "$experimental" && "$exact"; } || { [ "${JARVIS_SAFARI_EXPERIMENT_BUNDLE:-0}" = 1 ] && { "$experimental" || "$exact"; }; }; then printf 'Choose one experiment.\n' >&2; exit 1; fi
 output_dir="${1:-$package_dir/.build/dev-app}"
 mkdir -p "$output_dir"
 output_dir="$(cd "$output_dir" && pwd)"
-if "$experimental"; then
+if "$exact"; then
+  swift build --package-path "$package_dir" --scratch-path "$package_dir/.build/browser-experiment" -Xswiftc -DJARVIS_EXACT_BROWSER_EXPERIMENT --product JarvisMenuBar >&2
+  bin_dir="$(swift build --package-path "$package_dir" --scratch-path "$package_dir/.build/browser-experiment" --show-bin-path)"
+elif "$experimental"; then
   swift build --package-path "$package_dir" --scratch-path "$package_dir/.build/vad-experiment" -Xswiftc -DJARVIS_VAD_EXPERIMENT --product JarvisMenuBar >&2
   bin_dir="$(swift build --package-path "$package_dir" --scratch-path "$package_dir/.build/vad-experiment" --show-bin-path)"
 elif [ "${JARVIS_SAFARI_EXPERIMENT_BUNDLE:-0}" = 1 ]; then
@@ -34,7 +39,10 @@ else
 fi
 mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
 cp "$script_dir/Info.plist" "$app_dir/Contents/Info.plist"
-if "$experimental"; then
+if "$exact"; then
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier local.jarvis.browser-experiment' "$app_dir/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c 'Add :JarvisBrowserExperiment bool true' "$app_dir/Contents/Info.plist"
+elif "$experimental"; then
   /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier local.jarvis.vad-experiment' "$app_dir/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c 'Add :JarvisExperimentalIsolation bool true' "$app_dir/Contents/Info.plist"
 elif [ "${JARVIS_SAFARI_EXPERIMENT_BUNDLE:-0}" = 1 ]; then
