@@ -132,6 +132,14 @@ struct AskJarvisView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Ask Jarvis").font(.title2).bold()
+            #if JARVIS_SAFARI_EXPERIMENT_BUILD
+            HStack {
+                Button("请求辅助功能权限") { AccessibilityPermissionRequest.request() }
+                    .accessibilityIdentifier("safari-accessibility-permission-request")
+                Text("授权后返回并重新提交请求。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            #endif
             Text("Describe a goal. Jarvis plans tool calls and runs them through the same policy gate and approval flow as any other task.")
                 .font(.callout).foregroundStyle(.secondary)
             Text("开启语音对话后，回答朗读结束会再次打开麦克风。可随时点击“结束语音对话”停止。取消自动运行后编辑并手动运行，仍会继续本次语音对话。")
