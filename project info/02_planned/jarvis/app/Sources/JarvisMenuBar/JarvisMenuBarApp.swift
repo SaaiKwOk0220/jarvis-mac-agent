@@ -154,7 +154,7 @@ private final class Runtime {
             self.voiceDraftStore = try VoiceDraftStore(database: database)
             self.memory = try SQLiteMemoryStore(database: database)
             // QA-only, process-scoped opt-in; unavailable by default.
-            let safariReadEnabled = AppStorageNamespace.safariReadEnabled(bundleID: Bundle.main.bundleIdentifier, flag: ProcessInfo.processInfo.environment["JARVIS_EXPERIMENTAL_SAFARI_READ"])
+            let safariReadEnabled = AppStorageNamespace.safariReadEnabledInCurrentBuild(bundleID: Bundle.main.bundleIdentifier, flag: ProcessInfo.processInfo.environment["JARVIS_EXPERIMENTAL_SAFARI_READ"])
             let service = try TaskService(taskRepository: SQLiteTaskRepository(database: database),
                 auditRepository: SQLiteAuditRepository(database: database), policy: Policy(allowSafariRead: safariReadEnabled),
                 policyConfig: PolicyConfig(

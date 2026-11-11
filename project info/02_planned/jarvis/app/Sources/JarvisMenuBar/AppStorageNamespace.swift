@@ -8,5 +8,12 @@ enum AppStorageNamespace {
     static func safariReadEnabled(bundleID: String?, flag: String?) -> Bool {
         bundleID == "local.jarvis.safari-experiment" && flag == "1"
     }
+    static func safariReadEnabledInCurrentBuild(bundleID: String?, flag: String?) -> Bool {
+        #if JARVIS_SAFARI_EXPERIMENT_BUILD
+        return safariReadEnabled(bundleID: bundleID, flag: flag)
+        #else
+        return false
+        #endif
+    }
     static var current: String { directoryName(bundleID: Bundle.main.bundleIdentifier) }
 }
