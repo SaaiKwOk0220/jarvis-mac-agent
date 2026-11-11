@@ -14,6 +14,8 @@ public protocol DemoTaskServiceAPI: TaskServiceAPI {
 }
 
 public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
+    // Remains disabled until the approval, cancellation and executor paths are verified end-to-end.
+    private let exactBrowserEnabled: Bool
     private let tasks: any TaskRepository
     private let audits: any AuditRepository
     private let requests: any ToolRequestRepository
@@ -31,10 +33,12 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     private let safariCoordinator = SafariReadCoordinator()
     var safariCaptureFactory: @Sendable () -> any SafariTargetCapturing = { SafariAXTargetCapture() }
     private let ephemeralResults = EphemeralToolResultStore()
+    private let browserTickets: BrowserURLTicketStore
+    var testBrowserTicketCount: Int { browserTickets.testEntryCount }
     private let lock = NSLock()
     private var executions: [UUID: Task<Void, Error>] = [:]
 
-    public init(taskRepository: any TaskRepository, auditRepository: any AuditRepository, policy: any PolicyEvaluator, policyConfig: PolicyConfig = .init(), executor: any ToolExecutor = NoOpToolExecutor(), terminal: TerminalToolExecutor? = nil, webFetch: WebFetchToolExecutor? = nil, screenshot: ScreenshotToolExecutor? = nil, accessibility: AccessibilityQueryToolExecutor? = nil, browserOpen: BrowserOpenExecutor? = nil, enableSafariRead: Bool = false, requestRepository: (any ToolRequestRepository)? = nil, approvalRepository: (any ApprovalRepository)? = nil, unitOfWork: (any PersistenceUnitOfWork)? = nil) throws {
+    public init(taskRepository: any TaskRepository, auditRepository: any AuditRepository, policy: any PolicyEvaluator, policyConfig: PolicyConfig = .init(), executor: any ToolExecutor = NoOpToolExecutor(), terminal: TerminalToolExecutor? = nil, webFetch: WebFetchToolExecutor? = nil, screenshot: ScreenshotToolExecutor? = nil, accessibility: AccessibilityQueryToolExecutor? = nil, browserOpen: BrowserOpenExecutor? = nil, enableSafariRead: Bool = false, requestRepository: (any ToolRequestRepository)? = nil, approvalRepository: (any ApprovalRepository)? = nil, unitOfWork: (any PersistenceUnitOfWork)? = nil, exactBrowserEnabled: Bool = false, browserTicketLifetime: TimeInterval = 300) throws {
         guard let sqliteTasks = taskRepository as? SQLiteTaskRepository,
               let sqliteAudits = auditRepository as? SQLiteAuditRepository,
               sqliteTasks.database === sqliteAudits.database else { throw TaskServiceError.incompatiblePersistence }
@@ -51,6 +55,7 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
             guard let sqlite = unitOfWork as? SQLitePersistenceUnitOfWork, sqlite.database === database else { throw TaskServiceError.incompatiblePersistence }
             self.uow = sqlite
         } else { self.uow = SQLitePersistenceUnitOfWork(database: database) }
+        self.exactBrowserEnabled = exactBrowserEnabled; self.browserTickets = BrowserURLTicketStore(lifetime: browserTicketLifetime)
         self.tasks = taskRepository; self.audits = auditRepository; self.policy = policy; self.config = policyConfig; self.executor = executor; self.terminal = terminal; self.webFetch = webFetch; self.screenshot = screenshot; self.accessibility = accessibility; self.browserOpen = browserOpen; self.enableSafariRead = enableSafariRead
     }
 
@@ -74,7 +79,8 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
                 output.append(PendingApprovalRequest(id: request.id, taskID: request.taskID, reason: reason, target: exactURL, payload: "Read accessibility text from this captured Safari window", digest: request.payloadDigest))
             } else {
                 let redactedPayload = redactSecrets(request.payload)
-                output.append(PendingApprovalRequest(id: request.id, taskID: request.taskID, reason: reason, target: request.target, payload: redactedPayload == request.payload ? redactedPayload : "[REDACTED]", digest: request.payloadDigest))
+                let target = request.name == "browser_open" ? BrowserURLTicketStore.Ticket(payload: request.payload).flatMap { browserTickets.peekBound($0, taskID: request.taskID, requestID: request.id) } ?? request.target : request.target
+                output.append(PendingApprovalRequest(id: request.id, taskID: request.taskID, reason: reason, target: target, payload: redactedPayload == request.payload ? redactedPayload : "[REDACTED]", digest: request.payloadDigest))
             }
         }
         return output
@@ -118,6 +124,24 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
 
     public func submit(request: ToolRequest) async throws -> PolicyDecision {
         try lock.withLock { try ensureRunning(request.taskID) }
+        if exactBrowserEnabled, request.name == "browser_open", BrowserOpenURL.validated(request.target) == nil,
+           BrowserOpenURL.validatedExact(request.target) != nil,
+           request.sideEffect == .externalSend, request.payload == "Open in browser", request.scope == nil {
+            guard let policy = policy as? Policy,
+                  case .requireApproval(let reason) = policy.evaluateExactBrowserDestination(request) else {
+                throw BrowserURLTicketError.invalidRequest
+            }
+            let ticket = browserTickets.issue(url: request.target)
+            do {
+                let stored = try browserTickets.persistableRequest(request, ticket: ticket)
+                guard browserTickets.bind(ticket, taskID: request.taskID, requestID: request.id) else { throw BrowserURLTicketError.invalidRequest }
+                try lock.withLock {
+                    try requireRunning(request.taskID)
+                    try uow.submitRequest(stored, status: .pending, taskStatus: .awaitingApproval, audits: [event(stored, summary: "tool request received", result: "received"), event(stored, summary: "policy requires approval", result: reason)])
+                }
+                return .requireApproval(reason: reason)
+            } catch { browserTickets.revoke(id: ticket.id); throw error }
+        }
         var decision = policy.evaluate(request, config: config)
         if request.name == "safari_read" {
             let preview = enableSafariRead ? await safariCoordinator.preview(request) : nil
@@ -155,15 +179,21 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
         if preliminary.name == "safari_read" {
             guard enableSafariRead, await safariCoordinator.preview(preliminary) != nil else { throw TaskServiceCapabilityError.unavailable }
         }
-        let (request, approval) = try lock.withLock { () throws -> (ToolRequest, Approval) in
+        let (request, approval, transient) = try lock.withLock { () throws -> (ToolRequest, Approval, ToolRequest?) in
             guard let (request, status) = try requests.fetch(id: requestID), status == .pending else { throw TaskServiceError.requestNotAwaitingApproval }
             guard validateApproval(request: request, approvalDigest: digest) else { try audits.append(event(request, summary: "approval rejected", result: "digest mismatch")); throw TaskServiceError.approvalDigestMismatch }
+            var transient: ToolRequest?
+            if request.name == "browser_open", let ticket = BrowserURLTicketStore.Ticket(payload: request.payload) {
+                guard let target = browserTickets.consumeBound(ticket, taskID: request.taskID, requestID: request.id),
+                      BrowserOpenURL.validatedExact(target) != nil else { throw TaskServiceError.requestNotAwaitingApproval }
+                transient = ToolRequest(id: request.id, taskID: request.taskID, name: request.name, sideEffect: request.sideEffect, target: target, payload: "Open in browser")
+            }
             let approval = Approval(toolRequestID: request.id, actionDigest: request.payloadDigest, decision: .approved)
             let taskStatus = try aggregateStatus(forTask: request.taskID, excluding: request.id, fallback: .running)
             try uow.approveRequest(request, approval: approval, taskStatus: taskStatus, audits: [event(request, summary: "approval accepted", result: "approved", approvalID: approval.id)])
-            return (request, approval)
+            return (request, approval, transient)
         }
-        startExecution(request, approval: approval)
+        startExecution(request, approval: approval, executionRequest: transient)
     }
 
     public func reject(requestID: UUID) async throws {
@@ -172,6 +202,7 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
             let approval = Approval(toolRequestID: request.id, actionDigest: request.payloadDigest, decision: .rejected)
             let taskStatus = try aggregateStatus(forTask: request.taskID, excluding: request.id, fallback: .blocked)
             try uow.rejectRequest(request, approval: approval, taskStatus: taskStatus, audits: [event(request, summary: "approval rejected", result: "rejected", approvalID: approval.id)])
+            if let ticket = BrowserURLTicketStore.Ticket(payload: request.payload), request.name == "browser_open" { browserTickets.revoke(id: ticket.id) }
             return request
         }
         if rejected.name == "safari_read" { await safariCoordinator.discard(rejected) }
@@ -187,7 +218,11 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
                 if let (request, _) = try requests.fetch(id: requestID), request.taskID == taskID { job.cancel() }
             }
             ephemeralResults.clear(taskID: taskID)
+            let pending = try requests.list(status: .pending).filter { $0.0.taskID == taskID }
             try uow.cancelTask(taskID: taskID, requestIDs: [], audits: [event(taskID: taskID, summary: "task cancelled", result: "cancelled")])
+            for (request, _) in pending where request.name == "browser_open" {
+                if let ticket = BrowserURLTicketStore.Ticket(payload: request.payload) { browserTickets.revoke(id: ticket.id) }
+            }
         }
         await safariCoordinator.clear(taskID: taskID)
     }
@@ -225,13 +260,13 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
         await safariCoordinator.clear(taskID: taskID)
     }
 
-    private func startExecution(_ request: ToolRequest, approval: Approval) {
+    private func startExecution(_ request: ToolRequest, approval: Approval, executionRequest: ToolRequest? = nil) {
         let gate = ExecutionGate()
         let job: Task<Void, Error> = Task { [weak self] in
             await gate.wait()
             defer { self?.removeExecution(request.id) }
             guard let self else { return }
-            try await self.execute(request, approval: approval)
+            try await self.execute(request, approval: approval, executionRequest: executionRequest)
         }
         lock.withLock { executions[request.id] = job }
         gate.open()
@@ -270,8 +305,16 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     /// pending request on the same task: failure + another pending →
     /// `.awaitingApproval`; failure + another executing → `.running`;
     /// failure + nothing else outstanding → `.failed`.
-    private func execute(_ request: ToolRequest, approval: Approval? = nil) async throws {
+    private func execute(_ request: ToolRequest, approval: Approval? = nil, executionRequest: ToolRequest? = nil) async throws {
         do {
+            if let executionRequest {
+                guard executionRequest.id == request.id,
+                      executionRequest.taskID == request.taskID,
+                      executionRequest.name == request.name,
+                      executionRequest.sideEffect == request.sideEffect else {
+                    throw TaskServiceError.approvalDigestMismatch
+                }
+            }
             try lock.withLock { guard let (_, status) = try requests.fetch(id: request.id), status == .executing else { throw TaskServiceError.requestNotAwaitingApproval }; try requireRunning(request.taskID) }
             if request.name == "safari_read" && (!enableSafariRead || approval == nil) { throw SafariAXReadError.unavailable }
             if request.name == "browser_open" && browserOpen == nil { throw BrowserOpenError.unavailable }
@@ -287,8 +330,11 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
             if request.name == "safari_read" {
                 guard let approval else { throw SafariAXReadError.unavailable }
                 result = ToolResult(summary: try await safariCoordinator.readApproved(request, approval: approval))
+            } else if let executionRequest, let browserOpen, request.name == "browser_open",
+                      BrowserURLTicketStore.Ticket(payload: request.payload) != nil {
+                result = try await browserOpen.executeApprovedExact(executionRequest)
             } else {
-                result = try await picked.execute(request)
+                result = try await picked.execute(executionRequest ?? request)
             }
             try lock.withLock {
                 guard let task = try tasks.fetch(id: request.taskID), task.status != .cancelled else { return }

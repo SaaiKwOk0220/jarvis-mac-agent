@@ -39,6 +39,16 @@ public struct Policy: PolicyEvaluator, Sendable {
     private let allowSafariRead: Bool
     public init(allowSafariRead: Bool = false) { self.allowSafariRead = allowSafariRead }
 
+    /// Only call after the service has arranged ephemeral target handling.
+    public func evaluateExactBrowserDestination(_ request: ToolRequest) -> PolicyDecision {
+        guard request.name == "browser_open", request.sideEffect == .externalSend,
+              request.payload == "Open in browser", request.scope == nil,
+              BrowserOpenURL.validatedExact(request.target) != nil else {
+            return .deny(reason: "invalid browser destination")
+        }
+        return .requireApproval(reason: "opens the approved HTTPS address; your original task text may be stored locally")
+    }
+
     public func evaluate(_ request: ToolRequest, config: PolicyConfig) -> PolicyDecision {
         if request.name == "safari_read" {
             guard allowSafariRead, request.sideEffect == .read, request.scope == nil,
