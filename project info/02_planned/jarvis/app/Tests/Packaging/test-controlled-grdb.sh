@@ -7,7 +7,7 @@ trap 'rm -rf "$tmp_dir"' EXIT
 prepared="$("$app_dir/scripts/prepare-controlled-grdb.sh" "$source_repo" "$tmp_dir/cache")"
 test -f "$prepared/LICENSE"
 test "$(shasum -a 256 "$prepared/GRDB/PrivacyInfo.xcprivacy" | cut -d ' ' -f 1)" = 17784da62e51f74c5859df32fe402e01e25cdf6f797a4add06e2a3ce15c911f4
-rg -q 'exclude: \["PrivacyInfo.xcprivacy"\]' "$prepared/Package.swift"
+grep -q 'exclude: \["PrivacyInfo.xcprivacy"\]' "$prepared/Package.swift"
 prepared_again="$("$app_dir/scripts/prepare-controlled-grdb.sh" "$source_repo" "$tmp_dir/cache")"
 test "$prepared" = "$prepared_again"
 printf '\n// tampered\n' >> "$prepared/GRDB/Core/Database.swift"
@@ -24,7 +24,7 @@ fi
 malicious="$tmp_dir/attacker"
 mkdir -p "$malicious"
 JARVIS_CONTROLLED_GRDB_PATH="$malicious" swift package --package-path "$app_dir" dump-package > "$tmp_dir/package.json"
-if rg -F "$malicious" "$tmp_dir/package.json" >/dev/null; then
+if grep -F "$malicious" "$tmp_dir/package.json" >/dev/null; then
   echo 'untrusted GRDB path used by manifest' >&2; exit 1
 fi
 # A forged controlled path cannot make the ordinary build claim controlled packaging.
