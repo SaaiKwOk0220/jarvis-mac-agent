@@ -54,6 +54,20 @@ private actor ClickFixtureCounter {
 }
 
 extension SafariClickTicketTests {
+    func testPressAdapterAllowsOnlyPressWithInjectedAction() throws {
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "digest")
+        let ref = AXUIElementCreateSystemWide()
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        var calls = 0
+        try SafariAXPressAdapter.perform(candidate) { _, action in
+            calls += 1
+            XCTAssertEqual(action as String, kAXPressAction as String)
+            return .success
+        }
+        XCTAssertEqual(calls, 1)
+        XCTAssertThrowsError(try SafariAXPressAdapter.perform(candidate) { _, _ in .failure })
+    }
+
     func testApprovalPrototypeExecutesOnceAndFailsClosed() async throws {
         let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "digest")
         let element = AXUIElementCreateSystemWide()
@@ -75,6 +89,37 @@ extension SafariClickTicketTests {
         do { try await coordinator.approve(token: cancelled, requestID: id, digest: "digest"); XCTFail("cancelled") } catch { }
         let count = await counter.value
         XCTAssertEqual(count, 1)
+    }
+
+    func testCaptureRevalidatesBeforeInjectedPress() async throws {
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "digest")
+        let ref = AXUIElementCreateSystemWide()
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let capture = SafariClickCapture { [candidate] }
+        try await capture.capture(expected: identity)
+        try await capture.press(expected: identity) { _, action in
+            XCTAssertEqual(action as String, kAXPressAction as String)
+            return .success
+        }
+        do { try await capture.press(expected: identity) { _, _ in .success }; XCTFail("replay") } catch { }
+    }
+
+    func testOverlappingCancelKeepsCleanupBarrier() async throws {
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "digest")
+        let ref = AXUIElementCreateSystemWide()
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "first cleanup")
+        let gate = ClickVerifyGate(entered, blockAt: 1)
+        let capture = SafariClickCapture(beforeClear: { await gate.visit() }) { [candidate] }
+        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: capture, clock: { 11 }) { }
+        _ = try await coordinator.prepare(requestID: UUID(), identity: identity)
+        let first = Task { await coordinator.cancel() }
+        await fulfillment(of: [entered], timeout: 2)
+        await coordinator.cancel()
+        do { _ = try await coordinator.prepare(requestID: UUID(), identity: identity); XCTFail("cleanup still active") } catch { }
+        await gate.release()
+        await first.value
+        _ = try await coordinator.prepare(requestID: UUID(), identity: identity)
     }
 
     func testPrepareIsBlockedUntilRejectedCaptureIsCleared() async throws {

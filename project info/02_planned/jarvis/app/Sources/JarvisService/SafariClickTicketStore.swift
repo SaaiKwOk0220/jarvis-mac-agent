@@ -65,6 +65,21 @@ actor SafariClickCapture {
             throw CaptureError.changed
         }
     }
+
+    /// Revalidation and AXPress remain non-atomic with respect to Safari.
+    func press(expected: SafariClickIdentity,
+               action: (AXUIElement, CFString) -> AXError = AXUIElementPerformAction) async throws {
+        guard let before = captured else { throw CaptureError.changed }
+        try await verify(expected: expected)
+        try Task.checkCancellation()
+        guard let after = captured, after.identity == before.identity,
+              after.launchDate == before.launchDate,
+              CFEqual(after.window, before.window), CFEqual(after.element, before.element) else {
+            throw CaptureError.changed
+        }
+        try SafariAXPressAdapter.perform(after, action: action)
+        captured = nil
+    }
 }
 #endif
 
@@ -148,6 +163,21 @@ actor SafariClickApprovalPrototype {
         } catch {
             await capture.clear()
             throw error
+        }
+    }
+}
+#endif
+
+#if os(macOS)
+/// Unregistered adapter. The caller must immediately revalidate capture before
+/// invoking it; AXPress is not atomic with validation and cannot be undone.
+enum SafariAXPressAdapter {
+    static func perform(_ candidate: SafariClickCandidate,
+                        action: (AXUIElement, CFString) -> AXError = AXUIElementPerformAction) throws {
+        guard candidate.identity.enabled else { throw SafariAXReadError.targetChanged }
+        try Task.checkCancellation()
+        guard action(candidate.element, kAXPressAction as CFString) == .success else {
+            throw SafariAXReadError.unavailable
         }
     }
 }
