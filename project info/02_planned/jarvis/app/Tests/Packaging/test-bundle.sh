@@ -45,3 +45,14 @@ printf '#!/bin/sh\nexit 0\n' > "$tmp_dir/no-resource/JarvisMenuBar"
 chmod +x "$tmp_dir/no-resource/JarvisMenuBar"
 if PATH="$tmp_dir/bin:$PATH" FAKE_BUILD_DIR="$tmp_dir/no-resource" JARVIS_SAFARI_EXPERIMENT_BUNDLE=1 JARVIS_STABLE_OUTPUT=1 "$app_dir/scripts/build-dev-app.sh" "$missing" >/dev/null 2>&1; then exit 1; fi
 test ! -e "$missing/Jarvis.app"
+
+# Concurrent creator wins: publisher must not overwrite or delete its app.
+race="$tmp_dir/race"
+mkdir -p "$race"
+cat > "$tmp_dir/bin/codesign" <<'RACE'
+#!/bin/sh
+if [ "$1" = --force ]; then mkdir -p "$RACE_DEST/Jarvis.app"; printf concurrent > "$RACE_DEST/Jarvis.app/sentinel"; fi
+exit 0
+RACE
+if PATH="$tmp_dir/bin:$PATH" FAKE_BUILD_DIR="$tmp_dir/build" RACE_DEST="$race" JARVIS_SAFARI_EXPERIMENT_BUNDLE=1 JARVIS_STABLE_OUTPUT=1 "$app_dir/scripts/build-dev-app.sh" "$race" >/dev/null 2>&1; then exit 1; fi
+test "$(cat "$race/Jarvis.app/sentinel")" = concurrent

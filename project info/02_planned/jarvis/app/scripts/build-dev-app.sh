@@ -17,13 +17,9 @@ if [ "${JARVIS_STABLE_OUTPUT:-0}" = 1 ]; then
     printf 'Stable output is only supported for the Safari experiment.\n' >&2
     exit 1
   fi
-  app_dir="$output_dir/Jarvis.app"
-  if ! mkdir "$app_dir"; then
-    printf 'Refusing to overwrite existing app: %s\n' "$app_dir" >&2
-    exit 1
-  fi
-  # This path was just created by us; a failed build must not strand it.
-  trap 'rm -rf -- "$app_dir"' EXIT
+  stage_dir="$(mktemp -d "$output_dir/.jarvis-stage.XXXXXX")"
+  trap 'rm -rf -- "$stage_dir"' EXIT
+  app_dir="$stage_dir/Jarvis.app"
 else
   bundle_dir="$(mktemp -d "$output_dir/Jarvis.XXXXXX")"
   app_dir="$bundle_dir/Jarvis.app"
@@ -46,5 +42,18 @@ cp -R "$resource" "$app_dir/Contents/Resources/"
 # bundle after its plist and resource bundle are in their final locations.
 codesign --force --sign - "$app_dir" >&2
 codesign --verify --strict "$app_dir" >&2
-if [ "${JARVIS_STABLE_OUTPUT:-0}" = 1 ]; then trap - EXIT; fi
+if [ "${JARVIS_STABLE_OUTPUT:-0}" = 1 ]; then
+  # Darwin renamex_np with RENAME_EXCL atomically refuses an existing target.
+  /usr/bin/python3 - "$app_dir" "$output_dir/Jarvis.app" <<'PYRENAME'
+import ctypes, os, sys
+libc = ctypes.CDLL(None, use_errno=True)
+rename = libc.renamex_np
+rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+rename.restype = ctypes.c_int
+if rename(os.fsencode(sys.argv[1]), os.fsencode(sys.argv[2]), 4) != 0:
+    error = ctypes.get_errno()
+    raise OSError(error, os.strerror(error), sys.argv[2])
+PYRENAME
+  app_dir="$output_dir/Jarvis.app"
+fi
 printf '%s\n' "$app_dir"
