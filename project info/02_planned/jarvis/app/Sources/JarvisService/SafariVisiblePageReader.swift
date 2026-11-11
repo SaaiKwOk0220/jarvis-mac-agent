@@ -230,6 +230,28 @@ public struct SafariPageReadExecutor: ToolExecutor, Sendable {
 }
 
 #if os(macOS)
+/// Shared bounded traversal, injectable for tests. Cycles fail closed at the node limit.
+enum SafariClickTraversal {
+    static func find<Node>(root: Node, maxNodes: Int = 3000, maxDepth: Int = 30,
+        expired: () -> Bool, inspect: (Node, Bool) throws -> (role: String, match: Bool, children: [Node])) throws -> [Node] {
+        var stack: [(Node, Int, Bool)] = [(root, 0, false)]
+        var found: [Node] = []
+        var count = 0
+        while let (node, depth, inWeb) = stack.popLast() {
+            try Task.checkCancellation()
+            count += 1
+            guard count <= maxNodes, depth <= maxDepth, !expired() else { throw SafariAXReadError.limitExceeded }
+            let item = try inspect(node, inWeb)
+            if inWeb && item.match {
+                found.append(node)
+                guard found.count <= 1 else { throw SafariAXReadError.unavailable }
+            }
+            for child in item.children { stack.append((child, depth + 1, inWeb || item.role == "AXWebArea")) }
+        }
+        return found
+    }
+}
+
 /// Captures an AX reference only; it never performs an action. AX snapshots
 /// are not atomic and a same-URL document replacement cannot be ruled out.
 enum SafariClickCandidateProvider {
@@ -245,18 +267,13 @@ enum SafariClickCandidateProvider {
         let window = try SafariFocusedPageAdapter.element(app, kAXFocusedWindowAttribute as String)
         let page = try SafariFocusedPageAdapter.readPage(window, includeText: false)
         guard page.url == expected.url else { throw SafariAXReadError.targetChanged }
-        var stack: [(AXUIElement, Int, Bool)] = [(window, 0, false)]
-        var results: [SafariClickCandidate] = []
-        var count = 0
         let deadline = ContinuousClock.now.advanced(by: .seconds(5))
-        while let (node, depth, inWeb) = stack.popLast() {
-            try Task.checkCancellation()
-            count += 1
-            guard count <= 3000, depth <= 30, ContinuousClock.now < deadline,
-                  AXUIElementSetMessagingTimeout(node, 0.25) == .success else { throw SafariAXReadError.limitExceeded }
+        let nodes = try SafariClickTraversal.find(root: window, expired: { ContinuousClock.now >= deadline }) { node, inWeb in
+            guard AXUIElementSetMessagingTimeout(node, 0.25) == .success else { throw SafariAXReadError.unavailable }
             var rawRole: CFTypeRef?
             guard AXUIElementCopyAttributeValue(node, kAXRoleAttribute as CFString, &rawRole) == .success,
                   let role = rawRole as? String else { throw SafariAXReadError.unavailable }
+            var match = false
             if inWeb && role == expected.role {
                 var rawTitle: CFTypeRef?
                 var rawEnabled: CFTypeRef?
@@ -264,18 +281,19 @@ enum SafariClickCandidateProvider {
                       let title = rawTitle as? String,
                       AXUIElementCopyAttributeValue(node, kAXEnabledAttribute as CFString, &rawEnabled) == .success,
                       let enabled = rawEnabled as? Bool else { throw SafariAXReadError.unavailable }
-                if title == expected.title && enabled {
-                    results.append(SafariClickCandidate(element: node, window: window, launchDate: launchDate, identity: expected))
-                    guard results.count <= 1 else { throw SafariAXReadError.unavailable }
-                }
+                match = title == expected.title && enabled
             }
             var rawChildren: CFTypeRef?
             let status = AXUIElementCopyAttributeValue(node, kAXChildrenAttribute as CFString, &rawChildren)
+            let children: [AXUIElement]
             if status == .success {
-                guard let children = rawChildren as? [AXUIElement] else { throw SafariAXReadError.unavailable }
-                for child in children { stack.append((child, depth + 1, inWeb || role == "AXWebArea")) }
-            } else if status != .noValue && status != .attributeUnsupported { throw SafariAXReadError.unavailable }
+                guard let value = rawChildren as? [AXUIElement] else { throw SafariAXReadError.unavailable }
+                children = value
+            } else if status == .noValue || status == .attributeUnsupported { children = [] }
+            else { throw SafariAXReadError.unavailable }
+            return (role, match, children)
         }
+        let results = nodes.map { SafariClickCandidate(element: $0, window: window, launchDate: launchDate, identity: expected) }
         let current = await MainActor.run { () -> (pid_t, Date)? in
             guard let app = NSWorkspace.shared.frontmostApplication, app.bundleIdentifier == "com.apple.Safari", let launch = app.launchDate else { return nil }
             return (app.processIdentifier, launch)

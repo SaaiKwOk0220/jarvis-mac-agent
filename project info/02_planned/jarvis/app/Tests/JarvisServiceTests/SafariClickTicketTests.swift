@@ -38,6 +38,16 @@ extension SafariClickTicketTests {
         catch SafariClickCapture.CaptureError.changed { }
     }
 
+    func testTraversalLimitsAndMalformedNodes() throws {
+        XCTAssertThrowsError(try SafariClickTraversal.find(root: 0, maxNodes: 3, expired: { false }) { n, _ in ("AXWebArea", false, [n]) })
+        XCTAssertThrowsError(try SafariClickTraversal.find(root: 0, maxDepth: 1, expired: { false }) { n, _ in ("AXWebArea", false, [n + 1]) })
+        XCTAssertThrowsError(try SafariClickTraversal.find(root: 0, expired: { true }) { _, _ in ("AXWebArea", false, [Int]()) })
+        XCTAssertThrowsError(try SafariClickTraversal.find(root: 0, expired: { false }) { _, _ in throw SafariAXReadError.unavailable } as [Int])
+        XCTAssertThrowsError(try SafariClickTraversal.find(root: 0, expired: { false }) { n, _ in n == 0 ? ("AXWebArea", false, [1, 2]) : ("AXButton", true, []) })
+        let matches = try SafariClickTraversal.find(root: 0, expired: { false }) { n, _ in n == 0 ? ("AXWebArea", false, [1]) : ("AXButton", true, []) }
+        XCTAssertEqual(matches, [1])
+    }
+
     func testCaptureRejectsMissingCandidates() async throws {
         let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "digest")
         let capture = SafariClickCapture { [] }
