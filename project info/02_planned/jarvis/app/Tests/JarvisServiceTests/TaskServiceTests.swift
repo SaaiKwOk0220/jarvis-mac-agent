@@ -296,6 +296,7 @@ final class TaskServiceTests: XCTestCase {
 
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/tasks")!)
         request.httpMethod = "POST"
+        request.setValue("Bearer \(try XCTUnwrap(server.authorizationToken))", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = Data("{\"title\":\"Socket task\"}".utf8)
         let (data, response) = try await URLSession.shared.data(for: request)

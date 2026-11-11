@@ -136,8 +136,8 @@ private final class Runtime {
             let server = LoopbackServer(service: service)
             self.server = server
             Task { @MainActor in
-                if let port = try? await server.start() {
-                    client.configure(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+                if let token = server.authorizationToken, let port = try? await server.start() {
+                    client.configure(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: token)
                     _ = try? await client.refresh()
                 }
             }
