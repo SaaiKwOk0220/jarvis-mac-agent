@@ -23,23 +23,24 @@ enum PrivateAppStorage {
         if result == 0 { throw StorageError.unsafeACL }
         throw POSIXError(.EACCES)
     }
-    static func prepareDirectory(parent: URL) throws -> URL {
+    static func prepareDirectory(parent: URL, directoryName: String = "Jarvis") throws -> URL {
+        guard ["Jarvis", "Jarvis-VAD-Experiment"].contains(directoryName) else { throw POSIXError(.EACCES) }
         let parentFD = open(parent.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard parentFD >= 0 else { throw POSIXError(.EACCES) }
         defer { close(parentFD) }
-        if mkdirat(parentFD, "Jarvis", 0o700) != 0 && errno != EEXIST { throw POSIXError(.EACCES) }
-        let directoryFD = openat(parentFD, "Jarvis", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        if mkdirat(parentFD, directoryName, 0o700) != 0 && errno != EEXIST { throw POSIXError(.EACCES) }
+        let directoryFD = openat(parentFD, directoryName, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard directoryFD >= 0 else { throw POSIXError(.EACCES) }
         defer { close(directoryFD) }
         var info = stat()
         guard fstat(directoryFD, &info) == 0, info.st_uid == getuid(), (info.st_mode & S_IFMT) == S_IFDIR else { throw POSIXError(.EACCES) }
         try requireEmptyACL(directoryFD)
         guard fchmod(directoryFD, 0o700) == 0 else { throw POSIXError(.EACCES) }
-        return parent.appendingPathComponent("Jarvis", isDirectory: true)
+        return parent.appendingPathComponent(directoryName, isDirectory: true)
     }
 
-    static func prepare(parent: URL) throws -> URL {
-        let directory = try prepareDirectory(parent: parent)
+    static func prepare(parent: URL, directoryName: String = "Jarvis") throws -> URL {
+        let directory = try prepareDirectory(parent: parent, directoryName: directoryName)
         let directoryFD = open(directory.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard directoryFD >= 0 else { throw POSIXError(.EACCES) }
         defer { close(directoryFD) }

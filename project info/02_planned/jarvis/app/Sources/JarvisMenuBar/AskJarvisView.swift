@@ -128,8 +128,12 @@ struct AskJarvisView: View {
     @State private var isVisible = false
     @State private var voiceWillAutoSubmit = false
     @State private var followLatest = false
+    @State private var showVoiceDiagnostics = false
+    @State private var voiceDiagnostic: VoiceDiagnosticSnapshot?
+    @State private var voiceDiagnosticReason: String?
     @AppStorage(VoiceEndpointSettings.pauseKey) private var pauseSeconds = VoiceEndpointSettings.defaultPause
     @AppStorage(VoiceEndpointSettings.maxRecordingKey) private var maxRecordingSeconds = VoiceEndpointSettings.defaultMaximum
+    @AppStorage("jarvis.voice.optionalVAD") private var optionalVADEnabled = false
     @AppStorage(VoicePlaybackSettings.voiceKey) private var selectedVoiceID = ""
     @AppStorage(VoicePlaybackSettings.rateKey) private var voiceRate = 0.5
 
@@ -233,7 +237,22 @@ struct AskJarvisView: View {
 
             progressLog
 
+            Toggle("显示语音诊断（仅此窗口）", isOn: $showVoiceDiagnostics).font(.caption)
+            if showVoiceDiagnostics && VADBuildAccess.currentAllowed && optionalVADEnabled {
+                Text("实验性语音检测不提供能量诊断；切换将在下次录音时生效。")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else if showVoiceDiagnostics {
+                Text("格式：\(voiceDiagnostic?.formatSupported.map { $0 ? "支持" : "不支持" } ?? "未知") · 超过阈值：\(voiceDiagnostic?.aboveThreshold.map { $0 ? "是" : "否" } ?? "未知") · 静音：\(voiceDiagnostic?.silenceSeconds ?? 0, specifier: "%.1f") 秒 · 结束：\(voiceDiagnosticReason ?? "尚未结束")").font(.caption)
+            }
             DisclosureGroup("语音设置") {
+                if VADBuildAccess.currentAllowed {
+                Toggle("实验性语音停顿检测", isOn: $optionalVADEnabled)
+                    .disabled(voice.isRecording || voice.isStarting || voice.isFinishing)
+                Text(optionalVADEnabled
+                     ? "下次录音将使用本机语音检测。空草稿且服务可用时，可靠停顿并完成转写后会倒计时自动发送，可取消；检测异常时请检查转写并手动发送。"
+                     : "当前使用现有停顿检测方式；实验性检测默认关闭。")
+                    .font(.caption).foregroundStyle(.secondary)
+                }
                 HStack {
                     Text("说完后的停顿")
                     Slider(value: Binding(get: { VoiceEndpointSettings.safePause(pauseSeconds) }, set: { pauseSeconds = VoiceEndpointSettings.safePause($0) }), in: VoiceEndpointSettings.pauseRange, step: 0.5).accessibilityLabel("说完后的停顿秒数")
@@ -288,7 +307,16 @@ struct AskJarvisView: View {
         .onChange(of: voice.errorMessage) { _, message in
             if message != nil { conversation.stop(); autoSubmit.cancel() }
         }
-        .onDisappear { isVisible = false; runLifecycle.invalidate(); stopConversation() }
+        .task(id: showVoiceDiagnostics) {
+            voice.setDiagnosticsEnabled(showVoiceDiagnostics)
+            guard showVoiceDiagnostics else { voiceDiagnostic = nil; voiceDiagnosticReason = nil; return }
+            while !Task.isCancelled {
+                voiceDiagnostic = voice.diagnosticSnapshot()
+                voiceDiagnosticReason = voice.diagnosticReason
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+        .onDisappear { isVisible = false; runLifecycle.invalidate(); stopConversation(); voice.clearDiagnostics(); voiceDiagnostic = nil; voiceDiagnosticReason = nil; showVoiceDiagnostics = false }
     }
 
     private var availableChineseVoices: [AVSpeechSynthesisVoice] {

@@ -15,6 +15,16 @@ struct JarvisMenuBarApp: App {
     private let instanceLock: SingleInstanceLock
 
     init() {
+        do {
+            try VADBuildAccess.validateStartup(
+                experimentalBuild: VADBuildAccess.experimentalBuild,
+                bundleID: Bundle.main.bundleIdentifier,
+                isolation: Bundle.main.object(forInfoDictionaryKey: "JarvisExperimentalIsolation") as? Bool == true
+            )
+        } catch {
+            FileHandle.standardError.write(Data("实验构建身份或数据隔离配置无效，已停止启动。\n".utf8))
+            exit(EXIT_FAILURE)
+        }
         do { instanceLock = try SingleInstanceLock() }
         catch {
             let message = StartupFailure.message(for: error)
@@ -112,7 +122,7 @@ private final class Runtime {
         do {
             let supportParent = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
                 appropriateFor: nil, create: true)
-            let appSupport = try PrivateAppStorage.prepare(parent: supportParent)
+            let appSupport = try PrivateAppStorage.prepare(parent: supportParent, directoryName: AppStorageScope.currentDirectory)
             let database = try Database(path: appSupport.appendingPathComponent("jarvis.sqlite").path)
             try database.migrate()
             self.voiceDraftStore = try VoiceDraftStore(database: database)

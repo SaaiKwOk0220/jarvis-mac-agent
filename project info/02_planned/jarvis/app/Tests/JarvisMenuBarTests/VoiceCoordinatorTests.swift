@@ -73,7 +73,573 @@ private struct ConversationTestWaiter: ApprovalWaiter {
     func waitForResolution(requestID: UUID, payloadDigest: String, taskID: UUID) async throws -> ToolResolution { .cancelled }
 }
 
+private final class PCMTestCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [[Float]] = []
+    func append(_ frame: [Float]) { lock.lock(); defer { lock.unlock() }; stored.append(frame) }
+    var frames: [[Float]] { lock.lock(); defer { lock.unlock() }; return stored }
+}
 @MainActor final class VoiceCoordinatorTests: XCTestCase {
+    func testRealtimePCMBufferConcurrentProducerConsumer() async {
+        let queue = RealtimePCMBuffer(capacity: 64)
+        let producer = Task.detached {
+            for index in 0..<10_000 {
+                let value = [Float(index)]
+                while !value.withUnsafeBufferPointer({ queue.write($0) }) { await Task.yield() }
+            }
+        }
+        let consumer = Task.detached {
+            var result = [Float]()
+            var scratch = [Float](repeating: 0, count: 16)
+            while result.count < 10_000 {
+                let count = scratch.withUnsafeMutableBufferPointer { queue.read(into: $0) }
+                if count == 0 { await Task.yield() } else { result.append(contentsOf: scratch.prefix(count)) }
+            }
+            return result
+        }
+        await producer.value
+        let result = await consumer.value
+        XCTAssertEqual(result, (0..<10_000).map(Float.init))
+    }
+
+    func testRealtimePCMBufferCopiesInterleavedStereoAndRejectsOverflow() throws {
+        let format = try XCTUnwrap(AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 44_100, channels: 2, interleaved: true))
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 2))
+        buffer.frameLength = 2
+        let channels = try XCTUnwrap(buffer.floatChannelData)
+        channels[0][0] = 1; channels[0][2] = 2
+        channels[1][0] = 3; channels[1][2] = 4
+        let queue = RealtimePCMBuffer(capacity: 4)
+        XCTAssertTrue(queue.writePCM(buffer))
+        XCTAssertFalse(queue.writePCM(buffer))
+        var output = [Float](repeating: 0, count: 4)
+        XCTAssertEqual(output.withUnsafeMutableBufferPointer { queue.read(into: $0) }, 4)
+        XCTAssertEqual(output, [1, 3, 2, 4])
+    }
+
+    func testVADDownmixPreservesFramesAndRejectsIncompleteInput() throws {
+        XCTAssertEqual(try VADDownmix.mono([1, -1, 0.5, 0.5], channels: 2), [0, 0.5])
+        XCTAssertEqual(try VADDownmix.mono([0.2, -0.3], channels: 1), [0.2, -0.3])
+        XCTAssertThrowsError(try VADDownmix.mono([0, 1, 2], channels: 2))
+        XCTAssertThrowsError(try VADDownmix.mono([Float.nan], channels: 1))
+    }
+
+    func testRealtimePCMBufferCopiesPlanarStereo() throws {
+        let format = try XCTUnwrap(AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48_000, channels: 2, interleaved: false))
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 2))
+        buffer.frameLength = 2
+        let channels = try XCTUnwrap(buffer.floatChannelData)
+        channels[0][0] = 1; channels[0][1] = 2
+        channels[1][0] = 3; channels[1][1] = 4
+        let queue = RealtimePCMBuffer(capacity: 4)
+        XCTAssertTrue(queue.writePCM(buffer))
+        var output = [Float](repeating: 0, count: 4)
+        XCTAssertEqual(output.withUnsafeMutableBufferPointer { queue.read(into: $0) }, 4)
+        XCTAssertEqual(output, [1, 3, 2, 4])
+    }
+
+    func testRealtimePCMBufferPreservesOrderAndRejectsOverflow() {
+        let queue = RealtimePCMBuffer(capacity: 4)
+        XCTAssertTrue([Float(1), 2, 3].withUnsafeBufferPointer { queue.write($0) })
+        XCTAssertFalse([Float(4), 5].withUnsafeBufferPointer { queue.write($0) })
+        var first = [Float](repeating: 0, count: 2)
+        XCTAssertEqual(first.withUnsafeMutableBufferPointer { queue.read(into: $0) }, 2)
+        XCTAssertEqual(first, [1, 2])
+        XCTAssertTrue([Float(4), 5].withUnsafeBufferPointer { queue.write($0) })
+        var rest = [Float](repeating: 0, count: 4)
+        XCTAssertEqual(rest.withUnsafeMutableBufferPointer { queue.read(into: $0) }, 3)
+        XCTAssertEqual(Array(rest.prefix(3)), [3, 4, 5])
+    }
+
+    func testBoundedPCMQueueConcurrentOverflowIsTerminal() async {
+        let queue = BoundedPCMQueue(capacity: 1)
+        XCTAssertTrue(queue.append([1]))
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<100 { group.addTask { _ = queue.append([2]) } }
+        }
+        XCTAssertTrue(queue.failed)
+        XCTAssertNil(queue.take(maximum: 1))
+    }
+    func testFinishWaitsForSubmissionAlreadyHoldingLifecycleLock() async {
+        let entered = expectation(description: "submit entered critical section")
+        let release = DispatchSemaphore(value: 0)
+        let finishStarted = expectation(description: "finish attempts lifecycle lock")
+        let values = PCMTestCollector()
+        let worker = OfflineVADWorker(capacity: 4, frameSize: 2, afterSubmitLock: {
+            entered.fulfill()
+            release.wait()
+        }, beforeFinishLock: { finishStarted.fulfill() }) { values.append($0) }
+        let submit = Task.detached { worker.submit([1, 2]) }
+        await fulfillment(of: [entered], timeout: 2)
+        let finish = Task.detached { await worker.finish() }
+        await fulfillment(of: [finishStarted], timeout: 2)
+        release.signal()
+        let accepted = await submit.value
+        await finish.value
+        XCTAssertTrue(accepted)
+        XCTAssertEqual(values.frames, [[1, 2]])
+    }
+
+    func testConcurrentFinishNeverLosesAcceptedFrame() async {
+        for _ in 0..<200 {
+            let values = PCMTestCollector()
+            let worker = OfflineVADWorker(capacity: 4, frameSize: 2) { values.append($0) }
+            let submitted = Task.detached { worker.submit([1, 2]) }
+            await worker.finish()
+            let accepted = await submitted.value
+            if accepted { XCTAssertEqual(values.frames, [[1, 2]]) }
+        }
+    }
+    func testVADWorkerFinishWaitsForScheduledFrames() async {
+        let values = PCMTestCollector()
+        let worker = OfflineVADWorker(capacity: 16, frameSize: 2) { values.append($0) }
+        XCTAssertTrue(worker.submit([1, 2, 3, 4]))
+        await worker.finish()
+        XCTAssertEqual(values.frames, [[1, 2], [3, 4]])
+        XCTAssertFalse(worker.submit([5, 6]))
+    }
+    func testVADWorkerFinishDiscardsPartialAndRejectsMoreInput() async {
+        let values = PCMTestCollector()
+        let worker = OfflineVADWorker(capacity: 8, frameSize: 2) { values.append($0) }
+        XCTAssertTrue(worker.submit([1]))
+        await worker.finish()
+        XCTAssertEqual(values.frames, [])
+        XCTAssertFalse(worker.submit([2]))
+    }
+    func testVADWorkerBuffersIncompleteFrames() async {
+        let values = PCMTestCollector()
+        let worker = OfflineVADWorker(capacity: 8, frameSize: 2) { values.append($0) }
+        XCTAssertTrue(worker.submit([1]))
+        await worker.drain()
+        XCTAssertEqual(values.frames, [])
+        XCTAssertTrue(worker.submit([2, 3]))
+        await worker.drain()
+        XCTAssertEqual(values.frames, [[1, 2]])
+    }
+    func testVADWorkerFailureStopsConsumption() async {
+        let worker = OfflineVADWorker(capacity: 8, frameSize: 2) { _ in throw NSError(domain: "test", code: 1) }
+        XCTAssertTrue(worker.submit([1, 2]))
+        await worker.drain()
+        XCTAssertTrue(worker.failed)
+        XCTAssertFalse(worker.submit([3, 4]))
+    }
+    func testBoundedPCMQueueFailsClosedOnOverflow() {
+        let queue = BoundedPCMQueue(capacity: 3)
+        XCTAssertTrue(queue.append([1, 2]))
+        XCTAssertFalse(queue.append([3, 4]))
+        XCTAssertTrue(queue.failed)
+        XCTAssertNil(queue.take(maximum: 3))
+    }
+    func testBoundedPCMQueuePreservesOrderAcrossWrap() {
+        let queue = BoundedPCMQueue(capacity: 3)
+        XCTAssertTrue(queue.append([1, 2]))
+        XCTAssertEqual(queue.take(maximum: 1), [1])
+        XCTAssertTrue(queue.append([3, 4]))
+        XCTAssertEqual(queue.take(maximum: 3), [2, 3, 4])
+    }
+
+    func testStreamingResamplerMatchesWholeSignal() throws {
+        let source = (0..<48_000).map { Float(sin(Double($0) * 2 * .pi * 1_000 / 48_000)) }
+        let whole = try StreamingPCMResampler(sourceRate: 48_000).convert(source, final: true)
+        let stream = try StreamingPCMResampler(sourceRate: 48_000)
+        var chunked = [Float]()
+        for start in stride(from: 0, to: source.count, by: 4_800) {
+            chunked += try stream.convert(Array(source[start..<min(start + 4_800, source.count)]))
+        }
+        chunked += try stream.convert([], final: true)
+        XCTAssertEqual(chunked.count, whole.count)
+        let difference = zip(chunked, whole).reduce(0.0) { $0 + Double(abs($1.0 - $1.1)) } / Double(max(whole.count, 1))
+        XCTAssertLessThan(difference, 0.001)
+    }
+
+    func testStreamingResamplerPreservesLengthAcrossChunks() throws {
+        let converter = try StreamingPCMResampler(sourceRate: 48_000)
+        var result = [Float]()
+        for _ in 0..<10 { result += try converter.convert(Array(repeating: 0, count: 4_800)) }
+        result += try converter.convert([], final: true)
+        XCTAssertEqual(result.count, 16_000, accuracy: 32)
+        XCTAssertTrue(result.allSatisfy { $0.isFinite && abs($0) < 0.001 })
+        XCTAssertThrowsError(try converter.convert([0]))
+    }
+
+    func testOfflineResamplerConverts48kHzSilence() throws {
+        let result = try OfflinePCMResampler.convert(Array(repeating: 0, count: 48_000), sourceRate: 48_000)
+        XCTAssertEqual(result.count, 16_000, accuracy: 32)
+        XCTAssertTrue(result.allSatisfy { $0.isFinite && abs($0) < 0.001 })
+        XCTAssertThrowsError(try OfflinePCMResampler.convert([0], sourceRate: 0))
+    }
+
+    func testVADTerminalFailureCanSupersedeEndpointCandidate() {
+        let failureFirst = VADTerminalState()
+        XCTAssertTrue(failureFirst.fail())
+        XCTAssertFalse(failureFirst.endpoint())
+        let endpointFirst = VADTerminalState()
+        XCTAssertTrue(endpointFirst.endpoint())
+        XCTAssertTrue(endpointFirst.fail())
+        XCTAssertFalse(endpointFirst.confirmEndpoint())
+    }
+
+    func testVADDrainWaitsForCallbacksAndQueueAndFailsClosed() {
+        XCTAssertEqual(VADDrainReadiness.evaluate(isDrained: false, queuedSamples: 0, invalid: false, timedOut: false), .wait)
+        XCTAssertEqual(VADDrainReadiness.evaluate(isDrained: true, queuedSamples: 1, invalid: false, timedOut: false), .wait)
+        XCTAssertEqual(VADDrainReadiness.evaluate(isDrained: true, queuedSamples: 0, invalid: true, timedOut: false), .fail)
+        XCTAssertEqual(VADDrainReadiness.evaluate(isDrained: true, queuedSamples: 0, invalid: false, timedOut: true), .fail)
+        XCTAssertEqual(VADDrainReadiness.evaluate(isDrained: true, queuedSamples: 0, invalid: false, timedOut: false), .ready)
+    }
+
+    func testVADTapDrainGateClosesAgainstInFlightProducer() {
+        let gate = VADTapDrainGate()
+        XCTAssertTrue(gate.enter())
+        gate.close()
+        XCTAssertFalse(gate.enter())
+        XCTAssertFalse(gate.isDrained)
+        gate.leave()
+        XCTAssertTrue(gate.isDrained)
+    }
+
+    func testVADStopClosesTapAdmission() throws {
+        let url = try XCTUnwrap(OptionalVADAvailability.bundledModelURL)
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
+        let vad = try OptionalLiveVAD(format: format, modelURL: url, pause: 2, onFailure: { _ in }, onSilence: {})
+        vad.stop()
+        XCTAssertFalse(vad.tapGate.enter())
+        XCTAssertTrue(vad.tapGate.isDrained)
+    }
+
+    func testLiveVADWaitsForInFlightTapBeforeEnding() async throws {
+        let url = try XCTUnwrap(OptionalVADAvailability.bundledModelURL)
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1))
+        let candidate = expectation(description: "candidate")
+        let ended = expectation(description: "drained endpoint")
+        let failed = expectation(description: "unexpected failure")
+        failed.isInverted = true
+        let vad = try OptionalLiveVAD(format: format, modelURL: url, pause: 0.2,
+            onFailure: { _ in failed.fulfill() },
+            onCandidate: { gate in gate.close(); candidate.fulfill() },
+            probabilityOverride: { frame in frame.contains(where: { abs($0) > 0.05 }) ? 0.9 : 0.0 },
+            onSilence: { ended.fulfill() })
+        XCTAssertTrue(vad.tapGate.enter())
+        vad.start()
+        for i in 0..<24 {
+            let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 512))
+            buffer.frameLength = 512
+            let samples = try XCTUnwrap(buffer.floatChannelData)[0]
+            for n in 0..<512 { samples[n] = i < 12 ? 0.2 : 0 }
+            vad.submit(buffer)
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        await fulfillment(of: [candidate], timeout: 3)
+        XCTAssertFalse(vad.tapGate.isDrained)
+        vad.tapGate.leave()
+        await fulfillment(of: [ended], timeout: 3)
+        await fulfillment(of: [failed], timeout: 0.1)
+        vad.stop()
+    }
+
+    func testLiveVADTimesOutIfTapDoesNotDrain() async throws {
+        let url = try XCTUnwrap(OptionalVADAvailability.bundledModelURL)
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1))
+        let candidate = expectation(description: "candidate")
+        let ended = expectation(description: "unexpected endpoint")
+        ended.isInverted = true
+        let failed = expectation(description: "drain timeout")
+        let vad = try OptionalLiveVAD(format: format, modelURL: url, pause: 0.2,
+            onFailure: { _ in failed.fulfill() },
+            onCandidate: { gate in gate.close(); candidate.fulfill() },
+            probabilityOverride: { frame in frame.contains(where: { abs($0) > 0.05 }) ? 0.9 : 0.0 },
+            onSilence: { ended.fulfill() })
+        XCTAssertTrue(vad.tapGate.enter())
+        vad.start()
+        for i in 0..<24 {
+            let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 512))
+            buffer.frameLength = 512
+            let samples = try XCTUnwrap(buffer.floatChannelData)[0]
+            for n in 0..<512 { samples[n] = i < 12 ? 0.2 : 0 }
+            vad.submit(buffer)
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        await fulfillment(of: [candidate], timeout: 3)
+        XCTAssertFalse(vad.tapGate.isDrained)
+        await fulfillment(of: [failed], timeout: 5)
+        vad.tapGate.leave()
+        await fulfillment(of: [ended], timeout: 0.1)
+        vad.stop()
+    }
+
+    func testLiveVADRejectsSpeechInTail() async throws {
+        let url = try XCTUnwrap(OptionalVADAvailability.bundledModelURL)
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1))
+        let candidate = expectation(description: "candidate")
+        let ended = expectation(description: "unexpected endpoint")
+        ended.isInverted = true
+        let failed = expectation(description: "tail speech rejected")
+        let vad = try OptionalLiveVAD(format: format, modelURL: url, pause: 0.2,
+            onFailure: { _ in failed.fulfill() },
+            onCandidate: { gate in gate.close(); candidate.fulfill() },
+            probabilityOverride: { frame in frame.contains(where: { abs($0) > 0.05 }) ? 0.9 : 0.0 },
+            onSilence: { ended.fulfill() })
+        XCTAssertTrue(vad.tapGate.enter())
+        vad.start()
+        for i in 0..<24 {
+            let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 512))
+            buffer.frameLength = 512
+            let samples = try XCTUnwrap(buffer.floatChannelData)[0]
+            for n in 0..<512 { samples[n] = i < 12 ? 0.2 : 0 }
+            vad.submit(buffer)
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        await fulfillment(of: [candidate], timeout: 3)
+        XCTAssertFalse(vad.tapGate.isDrained)
+        let tail = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 512))
+        tail.frameLength = 512
+        let tailSamples = try XCTUnwrap(tail.floatChannelData)[0]
+        for n in 0..<512 { tailSamples[n] = 0.2 }
+        vad.submit(tail)
+        vad.tapGate.leave()
+        await fulfillment(of: [failed], timeout: 3)
+        await fulfillment(of: [ended], timeout: 0.1)
+        vad.stop()
+    }
+
+    func testLiveVADWatchdogFailsWhileTailInferenceIsBlocked() async throws {
+        let url = try XCTUnwrap(OptionalVADAvailability.bundledModelURL)
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1))
+        let candidate = expectation(description: "candidate")
+        let inferenceEntered = expectation(description: "tail inference entered")
+        let inferenceRelease = DispatchSemaphore(value: 0)
+        let ended = expectation(description: "unexpected endpoint")
+        ended.isInverted = true
+        let failed = expectation(description: "tail speech rejected")
+        let vad = try OptionalLiveVAD(format: format, modelURL: url, pause: 0.2,
+            onFailure: { _ in failed.fulfill() },
+            onCandidate: { gate in gate.close(); candidate.fulfill() },
+            probabilityOverride: { frame in
+                if frame.contains(where: { abs($0) > 0.3 }) { inferenceEntered.fulfill(); inferenceRelease.wait() }
+                return frame.contains(where: { abs($0) > 0.05 }) ? 0.9 : 0.0
+            },
+            onSilence: { ended.fulfill() })
+        XCTAssertTrue(vad.tapGate.enter())
+        vad.start()
+        for i in 0..<24 {
+            let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 512))
+            buffer.frameLength = 512
+            let samples = try XCTUnwrap(buffer.floatChannelData)[0]
+            for n in 0..<512 { samples[n] = i < 12 ? 0.2 : 0 }
+            vad.submit(buffer)
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        await fulfillment(of: [candidate], timeout: 3)
+        XCTAssertFalse(vad.tapGate.isDrained)
+        let tail = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 512))
+        tail.frameLength = 512
+        let tailSamples = try XCTUnwrap(tail.floatChannelData)[0]
+        for n in 0..<512 { tailSamples[n] = 0.4 }
+        vad.submit(tail)
+        vad.tapGate.leave()
+        await fulfillment(of: [inferenceEntered], timeout: 3)
+        await fulfillment(of: [failed], timeout: 5)
+        inferenceRelease.signal()
+        await fulfillment(of: [ended], timeout: 0.1)
+        vad.stop()
+    }
+
+    func testLiveVADConcurrentProducerFailsClosed() async throws {
+        let url = try XCTUnwrap(OptionalVADAvailability.bundledModelURL)
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 16))
+        buffer.frameLength = 16
+        let entered = expectation(description: "producer acquired")
+        let failed = expectation(description: "concurrent producer fails")
+        let release = DispatchSemaphore(value: 0)
+        let vad = try OptionalLiveVAD(format: format, modelURL: url, pause: 2, onProducerAcquired: {
+            entered.fulfill(); release.wait()
+        }, onFailure: { _ in failed.fulfill() }, onSilence: {})
+        vad.start()
+        let first = Task.detached { vad.submit(buffer) }
+        await fulfillment(of: [entered], timeout: 2)
+        vad.submit(buffer)
+        release.signal()
+        await first.value
+        await fulfillment(of: [failed], timeout: 3)
+        vad.stop()
+    }
+
+    func testLiveVADHighRateContinuousInputForTenSeconds() async throws {
+        let url = try XCTUnwrap(OptionalVADAvailability.bundledModelURL)
+        for rate in [96_000.0, 192_000.0] {
+            let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1))
+            let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(rate * 0.02)))
+            buffer.frameLength = buffer.frameCapacity
+            let samples = try XCTUnwrap(buffer.floatChannelData)[0]
+            for i in 0..<Int(buffer.frameLength) { samples[i] = Float(0.001 * sin(Double(i) * 2 * .pi * 1000 / rate)) }
+            let failed = expectation(description: "continuous \(rate) has no overflow")
+            failed.isInverted = true
+            let premature = expectation(description: "no premature endpoint at \(rate)")
+            premature.isInverted = true
+            let vad = try OptionalLiveVAD(format: format, modelURL: url, pause: 8, onFailure: { _ in failed.fulfill() }, onSilence: { premature.fulfill() })
+            vad.start()
+            for _ in 0..<500 { vad.submit(buffer); try await Task.sleep(for: .milliseconds(20)) }
+            try await Task.sleep(for: .milliseconds(300))
+            let counts = vad.testFrameCounts
+            XCTAssertEqual(counts.accepted, Int(buffer.frameLength) * 500)
+            XCTAssertEqual(counts.consumed, counts.accepted)
+            await fulfillment(of: [failed, premature], timeout: 0.1)
+            vad.stop()
+        }
+    }
+
+    func testLiveVADPermitHeldUntilBlockedWorkerExits() async throws {
+        let url = try XCTUnwrap(OptionalVADAvailability.bundledModelURL)
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
+        let entered = expectation(description: "initialization held")
+        let release = DispatchSemaphore(value: 0)
+        var first: OptionalLiveVAD? = try OptionalLiveVAD(format: format, modelURL: url, pause: 2, beforeInitialize: { entered.fulfill(); release.wait() }, onFailure: { _ in }, onSilence: {})
+        first?.start(); await fulfillment(of: [entered], timeout: 2)
+        first?.stop(); first = nil
+        for _ in 0..<10 {
+            XCTAssertThrowsError(try OptionalLiveVAD(format: format, modelURL: url, pause: 2, onFailure: { _ in }, onSilence: {}))
+        }
+        release.signal()
+        var retried: OptionalLiveVAD?
+        for _ in 0..<100 {
+            retried = try? OptionalLiveVAD(format: format, modelURL: url, pause: 2, onFailure: { _ in }, onSilence: {})
+            if retried != nil { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertNotNil(retried)
+        retried?.stop()
+    }
+
+    func testLiveVADSlowInferenceOverflowFailsClosed() async throws {
+        let url = try XCTUnwrap(OptionalVADAvailability.bundledModelURL)
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 48_000))
+        buffer.frameLength = buffer.frameCapacity
+        let entered = expectation(description: "inference entered")
+        let failed = expectation(description: "overflow fails")
+        let silence = expectation(description: "no endpoint")
+        silence.isInverted = true
+        let release = DispatchSemaphore(value: 0)
+        let vad = try OptionalLiveVAD(format: format, modelURL: url, pause: 2, beforeInference: { entered.fulfill(); release.wait() }, onFailure: { _ in failed.fulfill() }, onSilence: { silence.fulfill() })
+        vad.start(); vad.submit(buffer)
+        await fulfillment(of: [entered], timeout: 3)
+        vad.submit(buffer); vad.submit(buffer); vad.submit(buffer)
+        release.signal()
+        await fulfillment(of: [failed, silence], timeout: 1)
+        vad.stop()
+    }
+
+    func testLiveVADSlowInitializationOverflowFailsClosed() async throws {
+        let url = try XCTUnwrap(OptionalVADAvailability.bundledModelURL)
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 48_000))
+        buffer.frameLength = buffer.frameCapacity
+        let entered = expectation(description: "initialization waiting")
+        let failed = expectation(description: "overflow fails")
+        let silence = expectation(description: "no silence")
+        silence.isInverted = true
+        let release = DispatchSemaphore(value: 0)
+        let vad = try OptionalLiveVAD(format: format, modelURL: url, pause: 2, beforeInitialize: { entered.fulfill(); release.wait() }, onFailure: { _ in failed.fulfill() }, onSilence: { silence.fulfill() })
+        vad.start()
+        await fulfillment(of: [entered], timeout: 2)
+        vad.submit(buffer); vad.submit(buffer); vad.submit(buffer)
+        release.signal()
+        await fulfillment(of: [failed, silence], timeout: 1)
+        vad.stop()
+    }
+
+    func testLiveVADHandlesHighRateSilence() async throws {
+        let url = try XCTUnwrap(OptionalVADAvailability.bundledModelURL)
+        for rate in [96_000.0, 192_000.0] {
+            let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1))
+            let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(rate * 0.02)))
+            buffer.frameLength = buffer.frameCapacity
+            let failed = expectation(description: "no failure at \(rate)")
+            failed.isInverted = true
+            let vad = try OptionalLiveVAD(format: format, modelURL: url, pause: 2, onFailure: { _ in failed.fulfill() }, onSilence: {})
+            vad.start()
+            for _ in 0..<12 { vad.submit(buffer); try await Task.sleep(for: .milliseconds(20)) }
+            await fulfillment(of: [failed], timeout: 0.2)
+            vad.stop()
+        }
+    }
+
+    func testLiveVADRejectsUnexpectedFormatWithoutSilence() throws {
+        let url = try XCTUnwrap(OptionalVADAvailability.bundledModelURL)
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
+        let other = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 1))
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: other, frameCapacity: 32))
+        buffer.frameLength = 32
+        let failed = expectation(description: "failure")
+        let silence = expectation(description: "no silence")
+        silence.isInverted = true
+        let vad = try OptionalLiveVAD(format: format, modelURL: url, pause: 2, onFailure: { _ in failed.fulfill() }, onSilence: { silence.fulfill() })
+        vad.start(); vad.submit(buffer)
+        wait(for: [failed, silence], timeout: 0.3)
+        vad.stop()
+    }
+
+    func testBundledVADModelIsValid() throws {
+        let url = try XCTUnwrap(OptionalVADAvailability.bundledModelURL)
+        XCTAssertEqual(OptionalVADAvailability.check(enabled: true, modelURL: url), .available)
+        let model = try SileroOfflineInference(modelURL: url)
+        XCTAssertTrue((0...1).contains(try model.probability(frame: Array(repeating: 0, count: 512))))
+    }
+
+    func testSileroModelProducesFiniteProbabilities() throws {
+        guard let path = ProcessInfo.processInfo.environment["JARVIS_TEST_VAD_MODEL"] else {
+            throw XCTSkip("Set JARVIS_TEST_VAD_MODEL to test the optional model")
+        }
+        let model = try SileroOfflineInference(modelURL: URL(fileURLWithPath: path))
+        for _ in 0..<3 {
+            let probability = try model.probability(frame: Array(repeating: 0, count: 512))
+            XCTAssertTrue((0...1).contains(probability))
+        }
+        XCTAssertThrowsError(try model.probability(frame: [0]))
+    }
+
+    func testOptionalVADIsDisabledByDefaultAndFallsBackForMissingModel() {
+        XCTAssertEqual(OptionalVADAvailability.check(enabled: false, modelURL: nil), .disabled)
+        XCTAssertEqual(OptionalVADAvailability.check(enabled: true, modelURL: nil), .fallback)
+    }
+
+    func testSyntheticNoiseAndSlowSpeechExposeEnergyBaselineLimits() {
+        func frame(_ value: Float, _ seconds: Int) -> VADFrame {
+            VADFrame(samples: Array(repeating: value, count: 160 * seconds), sampleRate: 160)
+        }
+        let noise = VADEvaluator.evaluate([frame(0.03, 1), frame(0.02, 5)], using: EnergyVADCandidate(pauseDuration: 3.5))
+        XCTAssertNil(noise.endpointSeconds)
+        let slow = VADEvaluator.evaluate([frame(0.03, 1), frame(0, 4), frame(0.03, 1)], using: EnergyVADCandidate(pauseDuration: 3.5))
+        XCTAssertEqual(slow.endpointSeconds, 5)
+    }
+
+    func testOfflineVADEvaluationReportsEndpointWithoutExecuting() {
+        let frames = [VADFrame(samples: Array(repeating: 0.03, count: 8), sampleRate: 16), VADFrame(samples: Array(repeating: 0, count: 64), sampleRate: 16)]
+        let report = VADEvaluator.evaluate(frames, using: EnergyVADCandidate(pauseDuration: 3.5))
+        XCTAssertEqual(report.endpointSeconds, 4.5)
+        XCTAssertEqual(report.framesProcessed, 2)
+        let low = VADEvaluator.evaluate([VADFrame(samples: Array(repeating: 0.005, count: 16), sampleRate: 16), VADFrame(samples: Array(repeating: 0, count: 64), sampleRate: 16)], using: EnergyVADCandidate(pauseDuration: 3.5))
+        XCTAssertNil(low.endpointSeconds)
+    }
+
+    func testStalePartialFallsBackWithoutSending() async throws {
+        let backend = FakeVoiceBackend()
+        let voice = VoiceCoordinator(backend: backend, stalePartialLimit: .milliseconds(40))
+        var sent: [String] = []
+        await voice.start(autoSubmit: { sent.append($0) })
+        backend.handler?("第一句")
+        try await Task.sleep(for: .milliseconds(25))
+        backend.handler?("更新的第一句")
+        try await Task.sleep(for: .milliseconds(25))
+        XCTAssertTrue(voice.isRecording)
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertTrue(voice.isFinishing)
+        backend.finishHandler?(true)
+        XCTAssertEqual(voice.transcript, "更新的第一句")
+        XCTAssertTrue(sent.isEmpty)
+        XCTAssertNotNil(voice.errorMessage)
+    }
+
     func testVoiceQualityLabelsAndPreviewDoesNotOpenMicrophone() async {
         XCTAssertEqual(VoicePlaybackSettings.qualityLabel(.default), "默认")
         XCTAssertEqual(VoicePlaybackSettings.qualityLabel(.enhanced), "增强")
@@ -410,6 +976,68 @@ private struct ConversationTestWaiter: ApprovalWaiter {
         XCTAssertEqual(sent, ["测试"])
     }
 
+    func testTwoSuccessiveVoiceTurnsEachFinishOnSilence() async {
+        let backend = FakeVoiceBackend(); let voice = VoiceCoordinator(backend: backend)
+        var sent: [String] = []
+        for text in ["第一句", "第二句"] {
+            await voice.start(autoSubmit: { sent.append($0) })
+            backend.handler?(text)
+            backend.silenceHandler?()
+            backend.finishHandler?(true)
+        }
+        XCTAssertEqual(sent, ["第一句", "第二句"])
+    }
+
+    func testInvalidExperimentalIdentityStopsBeforeStorageAccess() {
+        for (identifier, marker) in [("local.jarvis.dev", true), ("local.jarvis.vad-experiment", false)] {
+            var storageAccessed = false
+            do {
+                try VADBuildAccess.validateStartup(experimentalBuild: true, bundleID: identifier, isolation: marker)
+                storageAccessed = true
+            } catch { }
+            XCTAssertFalse(storageAccessed)
+        }
+        XCTAssertNoThrow(try VADBuildAccess.validateStartup(experimentalBuild: false, bundleID: "local.jarvis.dev", isolation: false))
+        XCTAssertNoThrow(try VADBuildAccess.validateStartup(experimentalBuild: true, bundleID: "local.jarvis.vad-experiment", isolation: true))
+    }
+
+    func testVADBuildAccessRequiresBuildFlagAndExactIsolatedIdentity() {
+        XCTAssertFalse(VADBuildAccess.allowed(experimentalBuild: false, bundleID: "local.jarvis.vad-experiment", isolation: true))
+        XCTAssertFalse(VADBuildAccess.allowed(experimentalBuild: true, bundleID: "local.jarvis.dev", isolation: true))
+        XCTAssertFalse(VADBuildAccess.allowed(experimentalBuild: true, bundleID: "local.jarvis.vad-experiment", isolation: false))
+        XCTAssertTrue(VADBuildAccess.allowed(experimentalBuild: true, bundleID: "local.jarvis.vad-experiment", isolation: true))
+    }
+
+    func testExperimentalAppUsesDistinctDataDirectory() {
+        XCTAssertEqual(AppStorageScope.directory(experimental: false), "Jarvis")
+        XCTAssertEqual(AppStorageScope.directory(experimental: true), "Jarvis-VAD-Experiment")
+    }
+
+    func testConfirmationOnlyEndpointPreservesPartialWithoutFailureOrAutoSubmit() async {
+        let backend = FakeVoiceBackend(); let voice = VoiceCoordinator(backend: backend)
+        var submissions = 0
+        await voice.start(autoSubmit: { _ in submissions += 1 })
+        backend.handler?("测试文字")
+        backend.finishHandler?(false)
+        XCTAssertTrue(voice.needsConfirmation)
+        XCTAssertEqual(voice.transcript, "测试文字")
+        XCTAssertNil(voice.errorMessage)
+        XCTAssertEqual(submissions, 0)
+    }
+
+    func testOldFailureCannotStopNewRecording() async {
+        let backend = FakeVoiceBackend(); let voice = VoiceCoordinator(backend: backend)
+        await voice.start()
+        let oldFailure = backend.failureHandler
+        voice.stop()
+        await voice.start()
+        XCTAssertTrue(voice.isRecording)
+        oldFailure?("旧会话错误")
+        XCTAssertTrue(voice.isRecording)
+        XCTAssertNil(voice.errorMessage)
+        voice.stop()
+    }
+
     func testDraftUpdatePrecedesAutoSubmitAndLateTextIsIgnored() async {
         let backend = FakeVoiceBackend(); let voice = VoiceCoordinator(backend: backend)
         var events: [String] = []
@@ -610,6 +1238,24 @@ private struct ConversationTestWaiter: ApprovalWaiter {
         }
         await fulfillment(of: [done], timeout: 2)
         XCTAssertEqual(validity, [false, false, true])
+    }
+
+    func testTapDrainCoversEntireSpeechAppend() async throws {
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let completed = expectation(description: "tap completed")
+        let drain = VADTapDrainGate()
+        let gate = AudioRequestGate(append: { _ in entered.signal(); release.wait() }, end: {})
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1))
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 64))
+        let tap = SpeechCallbackBridge.tap(gate: gate, drainGate: drain)
+        DispatchQueue.global().async { tap(buffer, AVAudioTime(hostTime: 0)); completed.fulfill() }
+        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success)
+        drain.close()
+        XCTAssertFalse(drain.isDrained)
+        release.signal()
+        await fulfillment(of: [completed], timeout: 3)
+        XCTAssertTrue(drain.isDrained)
     }
 
     func testAudioTapRunsOnBackgroundQueueAndCanFinish() async {
@@ -842,5 +1488,62 @@ private struct ConversationTestWaiter: ApprovalWaiter {
         XCTAssertFalse(backend.started)
         XCTAssertFalse(backend.microphoneRequested)
         XCTAssertFalse(voice.isRecording)
+    }
+}
+
+extension VoiceCoordinatorTests {
+    func testDiagnosticsAreIsolatedPerMonitorAndCleared() {
+        let first = AudioPauseMonitor(onSilence: {})
+        let second = AudioPauseMonitor(onSilence: {})
+        first.setDiagnosticsEnabled(true)
+        second.setDiagnosticsEnabled(true)
+        first.recordDiagnostic(formatSupported: true, aboveThreshold: true, duration: 0.5)
+        first.recordDiagnostic(formatSupported: true, aboveThreshold: false, duration: 0.25)
+        XCTAssertEqual(first.diagnosticSnapshot().silenceSeconds, 0.25, accuracy: 0.001)
+        XCTAssertEqual(second.diagnosticSnapshot().silenceSeconds, 0, accuracy: 0.001)
+        first.clearDiagnostics()
+        XCTAssertNil(first.diagnosticSnapshot().formatSupported)
+    }
+}
+
+extension VoiceCoordinatorTests {
+    func testConcurrentDiagnosticSnapshotsRemainSessionLocal() {
+        let first = AudioPauseMonitor(onSilence: {})
+        let second = AudioPauseMonitor(onSilence: {})
+        first.setDiagnosticsEnabled(true)
+        second.setDiagnosticsEnabled(true)
+        DispatchQueue.concurrentPerform(iterations: 1000) { index in
+            let monitor = index.isMultiple(of: 2) ? first : second
+            monitor.recordDiagnostic(formatSupported: true, aboveThreshold: index.isMultiple(of: 2), duration: 0.01)
+            _ = monitor.diagnosticSnapshot()
+        }
+        XCTAssertEqual(first.diagnosticSnapshot().aboveThreshold, true)
+        XCTAssertEqual(second.diagnosticSnapshot().aboveThreshold, false)
+        XCTAssertEqual(first.diagnosticSnapshot().silenceSeconds, 0, accuracy: 0.001)
+        XCTAssertEqual(second.diagnosticSnapshot().silenceSeconds, 5, accuracy: 0.001)
+    }
+}
+
+extension VoiceCoordinatorTests {
+    func testDiagnosticReasonsDistinguishManualFinishAndSilence() async {
+        let manualBackend = FakeVoiceBackend()
+        let manual = VoiceCoordinator(backend: manualBackend)
+        await manual.start()
+        manual.finishRecording()
+        manualBackend.finishHandler?(true)
+        XCTAssertEqual(manual.diagnosticReason, "手动结束录音")
+
+        let autoBackend = FakeVoiceBackend()
+        let automatic = VoiceCoordinator(backend: autoBackend)
+        await automatic.start()
+        autoBackend.silenceHandler?()
+        autoBackend.finishHandler?(true)
+        XCTAssertEqual(automatic.diagnosticReason, "检测到停顿")
+
+        let stoppedBackend = FakeVoiceBackend()
+        let stopped = VoiceCoordinator(backend: stoppedBackend)
+        await stopped.start()
+        stopped.stop()
+        XCTAssertEqual(stopped.diagnosticReason, "手动停止")
     }
 }

@@ -40,7 +40,7 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
             appropriateFor: nil,
             create: false
         )) ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        return base.appendingPathComponent("Jarvis", isDirectory: true)
+        return base.appendingPathComponent(AppStorageScope.currentDirectory, isDirectory: true)
     }
 
     /// - Parameters:

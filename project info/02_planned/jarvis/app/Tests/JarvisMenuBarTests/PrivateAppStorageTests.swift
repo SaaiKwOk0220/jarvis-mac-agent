@@ -106,6 +106,16 @@ final class PrivateAppStorageTests: XCTestCase {
         }
     }
 
+    func testExperimentDirectoryIsSeparateAndPrivate() throws {
+        let parent = try temporaryParent()
+        let normal = try PrivateAppStorage.prepare(parent: parent)
+        let experiment = try PrivateAppStorage.prepare(parent: parent, directoryName: "Jarvis-VAD-Experiment")
+        XCTAssertNotEqual(normal, experiment)
+        XCTAssertEqual(try mode(experiment), 0o700)
+        XCTAssertEqual(try mode(experiment.appendingPathComponent("jarvis.sqlite")), 0o600)
+        XCTAssertThrowsError(try PrivateAppStorage.prepare(parent: parent, directoryName: "../escape"))
+    }
+
     func testSymlinkDirectoryIsRejectedWithoutChangingTarget() throws {
         let parent = try temporaryParent()
         let target = parent.appendingPathComponent("target")
