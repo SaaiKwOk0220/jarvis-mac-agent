@@ -348,6 +348,7 @@ final class VADTerminalState: @unchecked Sendable {
     }
     func endpoint() -> Bool { state.compareExchange(expected: 0, desired: 2, ordering: .acquiringAndReleasing).exchanged }
     func confirmEndpoint() -> Bool { state.compareExchange(expected: 2, desired: 4, ordering: .acquiringAndReleasing).exchanged }
+    func timeoutCandidate() -> Bool { state.compareExchange(expected: 2, desired: 1, ordering: .acquiringAndReleasing).exchanged }
     func stop() { _ = state.exchange(3, ordering: .acquiringAndReleasing) }
 }
 
@@ -491,6 +492,11 @@ final class OptionalLiveVAD: @unchecked Sendable {
                     guard terminal.endpoint() else { fail(); return }
                     draining = true
                     drainDeadline = .now() + .seconds(3)
+                    // Independent watchdog remains runnable if native inference blocks the worker.
+                    DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + .seconds(3)) { [weak self] in
+                        guard let self, self.terminal.timeoutCandidate() else { return }
+                        self.fail()
+                    }
                     DispatchQueue.main.async { [weak self] in
                         guard let self, self.active.load(ordering: .acquiring) else { return }
                         self.onCandidate(self.tapGate)
