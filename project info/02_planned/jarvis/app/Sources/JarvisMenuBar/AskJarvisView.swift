@@ -239,7 +239,10 @@ struct AskJarvisView: View {
             }
 
             Toggle("显示语音诊断（仅此窗口）", isOn: $showVoiceDiagnostics).font(.caption)
-            if showVoiceDiagnostics {
+            if showVoiceDiagnostics && optionalVADEnabled {
+                Text("实验性语音检测不提供能量诊断；切换将在下次录音时生效。")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else if showVoiceDiagnostics {
                 Text("格式：\(voiceDiagnostic?.formatSupported.map { $0 ? "支持" : "不支持" } ?? "未知") · 超过阈值：\(voiceDiagnostic?.aboveThreshold.map { $0 ? "是" : "否" } ?? "未知") · 静音：\(voiceDiagnostic?.silenceSeconds ?? 0, specifier: "%.1f") 秒 · 结束：\(voiceDiagnosticReason ?? "尚未结束")").font(.caption)
             }
             DisclosureGroup("语音设置") {

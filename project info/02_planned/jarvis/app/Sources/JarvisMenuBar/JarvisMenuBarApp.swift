@@ -111,7 +111,7 @@ private final class Runtime {
     init(client: ServiceClient) {
         do {
             let appSupport = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
-                appropriateFor: nil, create: true).appendingPathComponent("Jarvis", isDirectory: true)
+                appropriateFor: nil, create: true).appendingPathComponent(AppStorageScope.currentDirectory, isDirectory: true)
             try FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true)
             let database = try Database(path: appSupport.appendingPathComponent("jarvis.sqlite").path)
             try database.migrate()

@@ -8,7 +8,7 @@ final class SingleInstanceLock {
 
     static func defaultPath() throws -> String {
         let support = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-        let directory = support.appendingPathComponent("Jarvis/instance-lock", isDirectory: true)
+        let directory = support.appendingPathComponent(AppStorageScope.currentDirectory, isDirectory: true).appendingPathComponent("instance-lock", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         var info = stat()
         guard lstat(directory.path, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR,

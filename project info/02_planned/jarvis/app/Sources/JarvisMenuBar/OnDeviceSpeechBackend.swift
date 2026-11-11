@@ -263,6 +263,8 @@ final class AudioPauseMonitor: @unchecked Sendable {
 
     func start(onText: @escaping @MainActor @Sendable (String) -> Void, onFailure: @escaping @MainActor @Sendable (String) -> Void, onFinish: @escaping @MainActor @Sendable (Bool) -> Void, onSilence: @escaping @MainActor @Sendable () -> Void) throws {
         guard let recognizer, isOnDeviceSupported else { throw SpeechError.unavailable }
+        monitor?.clearDiagnostics()
+        monitor = nil
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.requiresOnDeviceRecognition = true
         request.shouldReportPartialResults = true
@@ -276,7 +278,7 @@ final class AudioPauseMonitor: @unchecked Sendable {
             guard let modelURL = OptionalVADAvailability.bundledModelURL else { throw SpeechError.unavailable }
             let vad = try OptionalLiveVAD(format: format, modelURL: modelURL, pause: VoiceEndpointSettings.pauseSeconds(),
                 onFailure: onFailure,
-                onSilence: { onFailure("检测到停顿，请检查转写并手动运行。") })
+                onSilence: { onFinish(false) })
             optionalVAD = vad
             vad.start()
             input.installTap(onBus: 0, bufferSize: 1024, format: format, block: SpeechCallbackBridge.tap(gate: gate, vad: vad))
