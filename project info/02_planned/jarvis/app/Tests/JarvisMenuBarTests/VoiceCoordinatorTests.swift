@@ -10,6 +10,7 @@ import JarvisLLM
     var started = false
     var stopped = false
     var finished = false
+    var onFinish: (() -> Void)?
     var handler: (@MainActor @Sendable (String) -> Void)?
     var failureHandler: (@MainActor @Sendable (String) -> Void)?
     var finishHandler: (@MainActor @Sendable (Bool) -> Void)?
@@ -25,7 +26,7 @@ import JarvisLLM
     func requestMicrophonePermission() async -> Bool { microphoneRequested = true; return microphoneGranted }
     func start(onText: @escaping @MainActor @Sendable (String) -> Void, onFailure: @escaping @MainActor @Sendable (String) -> Void, onFinish: @escaping @MainActor @Sendable (Bool) -> Void, onSilence: @escaping @MainActor @Sendable () -> Void) throws { started = true; handler = onText; failureHandler = onFailure; finishHandler = onFinish; silenceHandler = onSilence }
     func stop() { stopped = true }
-    func finish() { finished = true }
+    func finish() { finished = true; onFinish?() }
 }
 
 @MainActor private final class FakeSpeaker: VoiceSpeaker {
@@ -1087,10 +1088,12 @@ private final class PCMTestCollector: @unchecked Sendable {
     func testRecordingTimeoutFallsBackToManualEvenWithFinalText() async throws {
         let backend = FakeVoiceBackend()
         let voice = VoiceCoordinator(backend: backend, recordingLimit: .milliseconds(20))
+        let timedOut = expectation(description: "recording timeout requests finalization")
+        backend.onFinish = { timedOut.fulfill() }
         var sent: [String] = []
         await voice.start(autoSubmit: { sent.append($0) })
         backend.handler?("测试")
-        try await Task.sleep(for: .milliseconds(60))
+        await fulfillment(of: [timedOut], timeout: 2)
         XCTAssertTrue(voice.isFinishing)
         XCTAssertTrue(backend.finished)
         backend.finishHandler?(true)
