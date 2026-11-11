@@ -73,6 +73,25 @@ private struct ConversationTestWaiter: ApprovalWaiter {
 }
 
 @MainActor final class VoiceCoordinatorTests: XCTestCase {
+    func testSyntheticNoiseAndSlowSpeechExposeEnergyBaselineLimits() {
+        func frame(_ value: Float, _ seconds: Int) -> VADFrame {
+            VADFrame(samples: Array(repeating: value, count: 160 * seconds), sampleRate: 160)
+        }
+        let noise = VADEvaluator.evaluate([frame(0.03, 1), frame(0.02, 5)], using: EnergyVADCandidate(pauseDuration: 3.5))
+        XCTAssertNil(noise.endpointSeconds)
+        let slow = VADEvaluator.evaluate([frame(0.03, 1), frame(0, 4), frame(0.03, 1)], using: EnergyVADCandidate(pauseDuration: 3.5))
+        XCTAssertEqual(slow.endpointSeconds, 5)
+    }
+
+    func testOfflineVADEvaluationReportsEndpointWithoutExecuting() {
+        let frames = [VADFrame(samples: Array(repeating: 0.03, count: 8), sampleRate: 16), VADFrame(samples: Array(repeating: 0, count: 64), sampleRate: 16)]
+        let report = VADEvaluator.evaluate(frames, using: EnergyVADCandidate(pauseDuration: 3.5))
+        XCTAssertEqual(report.endpointSeconds, 4.5)
+        XCTAssertEqual(report.framesProcessed, 2)
+        let low = VADEvaluator.evaluate([VADFrame(samples: Array(repeating: 0.005, count: 16), sampleRate: 16), VADFrame(samples: Array(repeating: 0, count: 64), sampleRate: 16)], using: EnergyVADCandidate(pauseDuration: 3.5))
+        XCTAssertNil(low.endpointSeconds)
+    }
+
     func testStalePartialFallsBackWithoutSending() async throws {
         let backend = FakeVoiceBackend()
         let voice = VoiceCoordinator(backend: backend, stalePartialLimit: .milliseconds(40))
