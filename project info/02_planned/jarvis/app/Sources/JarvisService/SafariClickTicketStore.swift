@@ -101,29 +101,39 @@ actor SafariClickApprovalPrototype {
         do {
             try Task.checkCancellation()
             guard current == generation else { throw Failure.invalid }
+            let expires = try readClock() + 60
+            let token = UUID()
+            pending[token] = Pending(requestID: requestID, identity: identity, expires: expires, generation: current)
+            return token
         } catch {
             await capture.clear()
             throw error
         }
-        let token = UUID()
-        pending[token] = Pending(requestID: requestID, identity: identity, expires: try readClock() + 60, generation: current)
-        return token
     }
-    func cancel() { generation &+= 1; pending.removeAll() }
-    func reject(token: UUID) { pending.removeValue(forKey: token) }
+    func cancel() async { generation &+= 1; pending.removeAll(); await capture.clear() }
+    func reject(token: UUID) async {
+        if pending.removeValue(forKey: token) != nil { await capture.clear() }
+    }
     func approve(token: UUID, requestID: UUID, digest: String) async throws {
-        guard let entry = pending.removeValue(forKey: token), entry.requestID == requestID,
-              entry.identity.requestDigest == digest, entry.generation == generation else { throw Failure.invalid }
+        guard let entry = pending.removeValue(forKey: token) else { throw Failure.invalid }
+        guard entry.requestID == requestID, entry.identity.requestDigest == digest,
+              entry.generation == generation else { await capture.clear(); throw Failure.invalid }
         guard !executing else { throw Failure.invalid }
         executing = true
         defer { executing = false }
-        guard try readClock() < entry.expires else { throw Failure.expired }
-        try await capture.verify(expected: entry.identity)
-        guard entry.generation == generation else { throw Failure.invalid }
-        try Task.checkCancellation()
-        guard try readClock() < entry.expires else { throw Failure.expired }
-        // Once perform begins, cancellation cannot undo the external action.
-        try await perform()
+        do {
+            guard try readClock() < entry.expires else { throw Failure.expired }
+            try await capture.verify(expected: entry.identity)
+            guard entry.generation == generation else { throw Failure.invalid }
+            try Task.checkCancellation()
+            guard try readClock() < entry.expires else { throw Failure.expired }
+            // Once perform begins, cancellation cannot undo the external action.
+            try await perform()
+            await capture.clear()
+        } catch {
+            await capture.clear()
+            throw error
+        }
     }
 }
 #endif

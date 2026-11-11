@@ -71,6 +71,7 @@ extension SafariClickTicketTests {
         do { try await coordinator.approve(token: expired, requestID: id, digest: "digest"); XCTFail("expired") } catch { }
         let cancelled = try await coordinator.prepare(requestID: id, identity: identity)
         await coordinator.cancel()
+        do { try await capture.verify(expected: identity); XCTFail("cancelled reference retained") } catch { }
         do { try await coordinator.approve(token: cancelled, requestID: id, digest: "digest"); XCTFail("cancelled") } catch { }
         let count = await counter.value
         XCTAssertEqual(count, 1)
@@ -93,6 +94,16 @@ extension SafariClickTicketTests {
         do { try await capture.verify(expected: identity); XCTFail("capture reference retained") } catch { }
         let count = await counter.value
         XCTAssertEqual(count, 0)
+    }
+
+    func testClockFailureClearsCapturedReference() async throws {
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "digest")
+        let ref = AXUIElementCreateSystemWide()
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let capture = SafariClickCapture { [candidate] }
+        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: capture, clock: { .nan }) { }
+        do { _ = try await coordinator.prepare(requestID: UUID(), identity: identity); XCTFail("invalid clock") } catch { }
+        do { try await capture.verify(expected: identity); XCTFail("clock failure retained reference") } catch { }
     }
 
     func testClockGoingBackwardFailsClosed() async throws {
@@ -142,6 +153,7 @@ extension SafariClickTicketTests {
         let id = UUID()
         let rejected = try await coordinator.prepare(requestID: id, identity: identity)
         await coordinator.reject(token: rejected)
+        do { try await capture.verify(expected: identity); XCTFail("rejected reference retained") } catch { }
         do { try await coordinator.approve(token: rejected, requestID: id, digest: "digest"); XCTFail("rejected") } catch { }
         let changed = try await coordinator.prepare(requestID: id, identity: identity)
         do { try await coordinator.approve(token: changed, requestID: id, digest: "digest"); XCTFail("changed") } catch { }
