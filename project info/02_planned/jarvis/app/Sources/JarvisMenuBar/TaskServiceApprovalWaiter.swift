@@ -50,6 +50,12 @@ public final class TaskServiceApprovalWaiter: ApprovalWaiter, @unchecked Sendabl
             for event in events.reversed() {
                 guard event.actionDigest == payloadDigest else { continue }
                 switch event.summary {
+                case "ephemeral tool result":
+                    guard event.result == requestID.uuidString else { continue }
+                    guard let result = try await service.takeEphemeralToolResult(taskID: taskID, requestID: requestID, digest: payloadDigest) else {
+                        return .failed(reason: "Temporary tool result expired or is unavailable.")
+                    }
+                    return .approved(observation: result)
                 case Self.toolResultSummary:
                     return .approved(observation: event.result)
                 case Self.toolFailureSummary:

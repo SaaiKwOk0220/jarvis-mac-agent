@@ -1165,3 +1165,32 @@ private actor BrowserRecorder {
     private(set) var count = 0
     func record(_ url: URL) { count += 1 }
 }
+
+private struct AllowTestSafariPolicy: PolicyEvaluator {
+    func evaluate(_ request: ToolRequest, config: PolicyConfig) -> PolicyDecision {
+        request.name == "safari_read" ? .requireApproval(reason: "test only") : .deny(reason: "not used")
+    }
+}
+
+extension TaskServiceTests {
+    func testSafariResultIsSingleUseAndNeverWrittenToAudit() async throws {
+        let fixture = try Fixture()
+        let secret = "private-page-unique-contents"
+        let reader = SafariVisiblePageReader { expected in SafariPageSnapshot(bundleID: "com.apple.Safari", url: expected, text: secret) }
+        let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: AllowTestSafariPolicy(), safariRead: SafariPageReadExecutor(reader: reader), requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
+        let task = try await service.createTask(title: "read page")
+        let request = ToolRequest(taskID: task.id, name: "safari_read", sideEffect: .read, target: "https://example.com/", payload: "Read Safari accessibility text")
+        _ = try await service.submit(request: request)
+        try await service.approve(requestID: request.id, digest: request.payloadDigest)
+        try await fixture.waitForRequest(id: request.id, status: .completed)
+        let audit = try fixture.audit.events(for: task.id)
+        XCTAssertTrue(audit.contains { $0.summary == "ephemeral tool result" && $0.result == request.id.uuidString })
+        XCTAssertTrue(audit.allSatisfy { !$0.result.contains(secret) && !$0.target.contains(secret) })
+        let wrong = try await service.takeEphemeralToolResult(taskID: task.id, requestID: request.id, digest: "wrong")
+        XCTAssertNil(wrong)
+        let result = try await service.takeEphemeralToolResult(taskID: task.id, requestID: request.id, digest: request.payloadDigest)
+        XCTAssertEqual(result, secret)
+        let again = try await service.takeEphemeralToolResult(taskID: task.id, requestID: request.id, digest: request.payloadDigest)
+        XCTAssertNil(again)
+    }
+}

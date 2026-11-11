@@ -146,6 +146,11 @@ public protocol TaskServiceAPI: Sendable {
     func complete(taskID: UUID) async throws
     func listPendingApprovalRequests(taskID: UUID) async throws -> [PendingApprovalRequest]
     func listTimelineEvents(taskID: UUID) async throws -> [TimelineEvent]
+    func takeEphemeralToolResult(taskID: UUID, requestID: UUID, digest: String) async throws -> String?
+}
+
+public extension TaskServiceAPI {
+    func takeEphemeralToolResult(taskID: UUID, requestID: UUID, digest: String) async throws -> String? { nil }
 }
 
 /// Outcome returned by `TaskServiceAPI.submit(request:)`. Declared in

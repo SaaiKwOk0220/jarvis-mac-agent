@@ -9,6 +9,7 @@ final class StaticTimelineService: TaskServiceAPI, @unchecked Sendable {
     private let lock = NSLock()
     private var timeline: [TimelineEvent]
     private var listCallCount = 0
+    var ephemeralValue: String?
 
     init(timeline: [TimelineEvent] = []) { self.timeline = timeline }
 
@@ -22,7 +23,11 @@ final class StaticTimelineService: TaskServiceAPI, @unchecked Sendable {
         }
     }
 
-    // The waiter only touches `listTimelineEvents`; everything below exists
+    func takeEphemeralToolResult(taskID: UUID, requestID: UUID, digest: String) async throws -> String? {
+        lock.withLock { let value = ephemeralValue; ephemeralValue = nil; return value }
+    }
+
+    // The waiter also consumes temporary results; everything below exists
     // solely to satisfy `TaskServiceAPI`.
     func createTask(title: String) async throws -> JarvisTask { JarvisTask(title: title) }
     func getTask(id: UUID) async throws -> JarvisTask? { nil }
@@ -63,6 +68,26 @@ private func terminalEvent(
 }
 
 final class TaskServiceApprovalWaiterTests: XCTestCase {
+
+    func testWaiterConsumesOnlyMatchingEphemeralResult() async throws {
+        let requestID = UUID(), otherID = UUID(), digest = "digest"
+        let service = StaticTimelineService(timeline: [
+            terminalEvent(actionDigest: digest, summary: "ephemeral tool result", result: otherID.uuidString),
+            terminalEvent(actionDigest: digest, summary: "ephemeral tool result", result: requestID.uuidString)
+        ])
+        service.ephemeralValue = "private"
+        let waiter = TaskServiceApprovalWaiter(service: service, pollInterval: 0.01, timeout: 1)
+        let resolution = try await waiter.waitForResolution(requestID: requestID, payloadDigest: digest, taskID: UUID())
+        XCTAssertEqual(resolution, .approved(observation: "private"))
+    }
+
+    func testWaiterFailsClosedWhenEphemeralResultUnavailable() async throws {
+        let requestID = UUID(), digest = "digest"
+        let service = StaticTimelineService(timeline: [terminalEvent(actionDigest: digest, summary: "ephemeral tool result", result: requestID.uuidString)])
+        let waiter = TaskServiceApprovalWaiter(service: service, pollInterval: 0.01, timeout: 1)
+        let resolution = try await waiter.waitForResolution(requestID: requestID, payloadDigest: digest, taskID: UUID())
+        XCTAssertEqual(resolution, .failed(reason: "Temporary tool result expired or is unavailable."))
+    }
 
     /// A "tool result" audit event whose `actionDigest` matches the request
     /// the waiter was told to follow is the approval-then-success case.

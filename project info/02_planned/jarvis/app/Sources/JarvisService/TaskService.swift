@@ -28,6 +28,7 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     private let accessibility: AccessibilityQueryToolExecutor?
     private let browserOpen: BrowserOpenExecutor?
     private let safariRead: SafariPageReadExecutor?
+    private let ephemeralResults = EphemeralToolResultStore()
     private let lock = NSLock()
     private var executions: [UUID: Task<Void, Error>] = [:]
 
@@ -145,7 +146,16 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
             for (requestID, job) in executions {
                 if let (request, _) = try requests.fetch(id: requestID), request.taskID == taskID { job.cancel() }
             }
+            ephemeralResults.clear(taskID: taskID)
             try uow.cancelTask(taskID: taskID, requestIDs: [], audits: [event(taskID: taskID, summary: "task cancelled", result: "cancelled")])
+        }
+    }
+
+    public func takeEphemeralToolResult(taskID: UUID, requestID: UUID, digest: String) async throws -> String? {
+        try lock.withLock {
+            guard let (request, status) = try requests.fetch(id: requestID), request.taskID == taskID,
+                  request.name == "safari_read", request.payloadDigest == digest, status == .completed else { return nil }
+            return ephemeralResults.take(taskID: taskID, requestID: requestID, digest: digest)
         }
     }
 
@@ -163,6 +173,7 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
             guard task.status != .cancelled && task.status != .completed && task.status != .failed else {
                 throw TaskServiceError.illegalTransition(from: task.status, to: .completed)
             }
+            ephemeralResults.clear(taskID: taskID)
             try uow.transition(
                 taskID: task.id,
                 from: task.status,
@@ -229,7 +240,12 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
             try lock.withLock {
                 guard let task = try tasks.fetch(id: request.taskID), task.status != .cancelled else { return }
                 let taskStatus = try aggregateStatus(forTask: request.taskID, excluding: request.id, fallback: .running)
-                try uow.finishRequest(request, status: .completed, taskStatus: taskStatus, audits: [event(request, summary: "tool result", result: bounded(result.summary))])
+                let auditResult = request.name == "safari_read" ? request.id.uuidString : bounded(result.summary)
+                let summary = request.name == "safari_read" ? "ephemeral tool result" : "tool result"
+                try uow.finishRequest(request, status: .completed, taskStatus: taskStatus, audits: [event(request, summary: summary, result: auditResult)])
+                if request.name == "safari_read" {
+                    ephemeralResults.put(result.summary, taskID: request.taskID, requestID: request.id, digest: request.payloadDigest)
+                }
             }
         } catch is CancellationError {
             // Cancellation transaction already sets request and task to cancelled; never add success/failure after it.
