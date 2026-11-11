@@ -29,3 +29,19 @@ test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$output/Contents
 printf sentinel > "$output/sentinel"
 if PATH="$tmp_dir/bin:$PATH" FAKE_BUILD_DIR="$tmp_dir/build" JARVIS_SAFARI_EXPERIMENT_BUNDLE=1 JARVIS_STABLE_OUTPUT=1 "$app_dir/scripts/build-dev-app.sh" "$stable" >/dev/null 2>&1; then exit 1; fi
 test "$(cat "$output/sentinel")" = sentinel
+
+# Failed signing must remove only the newly created stable app, permitting retry.
+failure="$tmp_dir/failure"
+mkdir -p "$failure"
+printf '#!/bin/sh\nexit 1\n' > "$tmp_dir/bin/codesign"
+if PATH="$tmp_dir/bin:$PATH" FAKE_BUILD_DIR="$tmp_dir/build" JARVIS_SAFARI_EXPERIMENT_BUNDLE=1 JARVIS_STABLE_OUTPUT=1 "$app_dir/scripts/build-dev-app.sh" "$failure" >/dev/null 2>&1; then exit 1; fi
+test ! -e "$failure/Jarvis.app"
+printf '#!/bin/sh\nexit 0\n' > "$tmp_dir/bin/codesign"
+PATH="$tmp_dir/bin:$PATH" FAKE_BUILD_DIR="$tmp_dir/build" JARVIS_SAFARI_EXPERIMENT_BUNDLE=1 JARVIS_STABLE_OUTPUT=1 "$app_dir/scripts/build-dev-app.sh" "$failure" >/dev/null
+
+missing="$tmp_dir/missing"
+mkdir -p "$tmp_dir/no-resource"
+printf '#!/bin/sh\nexit 0\n' > "$tmp_dir/no-resource/JarvisMenuBar"
+chmod +x "$tmp_dir/no-resource/JarvisMenuBar"
+if PATH="$tmp_dir/bin:$PATH" FAKE_BUILD_DIR="$tmp_dir/no-resource" JARVIS_SAFARI_EXPERIMENT_BUNDLE=1 JARVIS_STABLE_OUTPUT=1 "$app_dir/scripts/build-dev-app.sh" "$missing" >/dev/null 2>&1; then exit 1; fi
+test ! -e "$missing/Jarvis.app"

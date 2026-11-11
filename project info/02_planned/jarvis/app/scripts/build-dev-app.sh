@@ -22,6 +22,8 @@ if [ "${JARVIS_STABLE_OUTPUT:-0}" = 1 ]; then
     printf 'Refusing to overwrite existing app: %s\n' "$app_dir" >&2
     exit 1
   fi
+  # This path was just created by us; a failed build must not strand it.
+  trap 'rm -rf -- "$app_dir"' EXIT
 else
   bundle_dir="$(mktemp -d "$output_dir/Jarvis.XXXXXX")"
   app_dir="$bundle_dir/Jarvis.app"
@@ -44,4 +46,5 @@ cp -R "$resource" "$app_dir/Contents/Resources/"
 # bundle after its plist and resource bundle are in their final locations.
 codesign --force --sign - "$app_dir" >&2
 codesign --verify --strict "$app_dir" >&2
+if [ "${JARVIS_STABLE_OUTPUT:-0}" = 1 ]; then trap - EXIT; fi
 printf '%s\n' "$app_dir"
