@@ -15,6 +15,13 @@ struct JarvisMenuBarApp: App {
     private let instanceLock: SingleInstanceLock
 
     init() {
+        #if JARVIS_SAFARI_EXPERIMENT_BUILD
+        guard Bundle.main.bundleIdentifier == "local.jarvis.safari-experiment",
+              Bundle.main.object(forInfoDictionaryKey: "JarvisSafariExperiment") as? Bool == true else {
+            FileHandle.standardError.write(Data("Invalid experimental bundle identity.\n".utf8))
+            exit(EXIT_FAILURE)
+        }
+        #endif
         do { instanceLock = try SingleInstanceLock() }
         catch {
             let message = "Jarvis is already running, or its instance lock is unavailable. Close older Jarvis instances and try again."
@@ -115,7 +122,7 @@ private final class Runtime {
             try database.migrate()
             self.memory = try SQLiteMemoryStore(database: database)
             // QA-only, process-scoped opt-in; unavailable by default.
-            let safariReadEnabled = ProcessInfo.processInfo.environment["JARVIS_EXPERIMENTAL_SAFARI_READ"] == "1"
+            let safariReadEnabled = AppStorageNamespace.safariReadEnabled(bundleID: Bundle.main.bundleIdentifier, flag: ProcessInfo.processInfo.environment["JARVIS_EXPERIMENTAL_SAFARI_READ"])
             let service = try TaskService(taskRepository: SQLiteTaskRepository(database: database),
                 auditRepository: SQLiteAuditRepository(database: database), policy: Policy(allowSafariRead: safariReadEnabled),
                 policyConfig: PolicyConfig(

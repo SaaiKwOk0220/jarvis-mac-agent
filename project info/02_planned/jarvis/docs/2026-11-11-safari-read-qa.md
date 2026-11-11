@@ -1,10 +1,6 @@
 # Safari accessibility reading: experimental QA
 
-Safari reading is disabled unless the app process is started with `JARVIS_EXPERIMENTAL_SAFARI_READ=1`. This switch is for local QA, not a release setting. Run from the package directory:
-
-```sh
-JARVIS_EXPERIMENTAL_SAFARI_READ=1 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift run JarvisMenuBar
-```
+Safari reading requires the exact experimental bundle identity and `JARVIS_EXPERIMENTAL_SAFARI_READ=1`. Ordinary bundles and `swift run` cannot enable it. The compiled experimental app checks its identity and plist marker before accessing storage. Build the isolated bundle using the instructions below; do not start it before QA approval.
 
 Use a public or disposable HTTPS page with no personal information. Grant Accessibility permission only when testing, and revoke it afterward if no longer wanted. Ask Jarvis to read the current Safari page; when prompted, focus that Safari window. Inspect the entire captured URL, including its query, in the approval preview before approving. Return to that same window within 15 seconds after approval. Test reject, cancel, timeout, changed URL, different Safari window, app restart and permission denial. Inspect local audit records for absence of the full URL path/query and page text.
 
@@ -21,3 +17,5 @@ JARVIS_SAFARI_EXPERIMENT_BUNDLE=1 DEVELOPER_DIR=/Applications/Xcode.app/Contents
 ```
 
 The printed bundle uses identifier `local.jarvis.safari-experiment` and Application Support directory `Jarvis-Safari-Experiment`, including its database, screenshots, and instance lock. Its Accessibility permission must be granted separately where macOS requests it. This is a distinct development bundle, not a signed production release. It has not yet been exercised on a real device. Launch only after the tester agrees, with the experimental environment variable set for its executable, and follow the checks above. The feature remains off without that variable.
+
+The experiment still shares the system Ollama service, Safari process and macOS privacy framework (TCC); a distinct bundle identity does not create a separate user account or browser profile. Accessibility authorization is managed by macOS and must be verified on the actual signed build.
