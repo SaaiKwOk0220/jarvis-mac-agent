@@ -32,4 +32,14 @@ public struct BrowserOpenExecutor: ToolExecutor, Sendable {
         guard await opener(url) else { throw BrowserOpenError.openFailed }
         return ToolResult(summary: "Browser open requested")
     }
+
+    /// Internal path for targets recovered from an approved one-use ticket.
+    func executeApprovedExact(_ request: ToolRequest) async throws -> ToolResult {
+        guard request.name == "browser_open", request.sideEffect == .externalSend,
+              request.payload == "Open in browser", request.scope == nil,
+              let url = BrowserOpenURL.validatedExact(request.target) else { throw BrowserOpenError.invalidRequest }
+        try Task.checkCancellation()
+        guard await opener(url) else { throw BrowserOpenError.openFailed }
+        return ToolResult(summary: "Browser open requested")
+    }
 }
