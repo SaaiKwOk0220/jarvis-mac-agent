@@ -37,23 +37,28 @@ public struct SafariVisiblePageReader: Sendable {
 import AppKit
 import ApplicationServices
 
-public enum SafariAXReadError: Error { case permissionDenied, unavailable, targetChanged, limitExceeded }
+public enum SafariAXReadError: Error { case permissionDenied, unavailable, targetChanged, limitExceeded, notFocused, focusTimedOut }
 
 /// Reads only Safari's focused window and verifies the same window and URL after traversal.
-@MainActor
 public enum SafariFocusedPageAdapter {
-    public static func snapshot(expectedURL: String) throws -> SafariPageSnapshot {
+    public static func snapshot(expectedURL: String) async throws -> SafariPageSnapshot {
         guard AXIsProcessTrusted() else { throw SafariAXReadError.permissionDenied }
-        guard let app = NSWorkspace.shared.frontmostApplication, app.bundleIdentifier == "com.apple.Safari" else { throw SafariAXReadError.unavailable }
-        let pid = app.processIdentifier
+        let frontPID = await MainActor.run { () -> pid_t? in
+            guard let app = NSWorkspace.shared.frontmostApplication, app.bundleIdentifier == "com.apple.Safari" else { return nil }
+            return app.processIdentifier
+        }
+        guard let pid = frontPID else { throw SafariAXReadError.notFocused }
         let application = AXUIElementCreateApplication(pid)
         let window = try element(application, kAXFocusedWindowAttribute as String)
         let before = try readPage(window, includeText: false)
         guard before.url == expectedURL else { throw SafariAXReadError.targetChanged }
         let first = try readPage(window, includeText: true)
         guard first.url == expectedURL else { throw SafariAXReadError.targetChanged }
-        guard let current = NSWorkspace.shared.frontmostApplication,
-              current.bundleIdentifier == "com.apple.Safari", current.processIdentifier == pid else { throw SafariAXReadError.targetChanged }
+        let currentPID = await MainActor.run { () -> pid_t? in
+            guard let app = NSWorkspace.shared.frontmostApplication, app.bundleIdentifier == "com.apple.Safari" else { return nil }
+            return app.processIdentifier
+        }
+        guard currentPID == pid else { throw SafariAXReadError.targetChanged }
         let currentWindow = try element(application, kAXFocusedWindowAttribute as String)
         guard CFEqual(window, currentWindow) else { throw SafariAXReadError.targetChanged }
         let second = try readPage(currentWindow, includeText: false)
@@ -71,9 +76,13 @@ public enum SafariFocusedPageAdapter {
     private static func readPage(_ window: AXUIElement, includeText: Bool) throws -> (url: String, text: String) {
         var stack: [(AXUIElement, Int, Bool)] = [(window, 0, false)]
         var count = 0
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
         var pageURL: String?
         var text = [String]()
         while let (node, depth, insideWebArea) = stack.popLast() {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else { throw SafariAXReadError.limitExceeded }
+            guard AXUIElementSetMessagingTimeout(node, 0.25) == .success else { throw SafariAXReadError.unavailable }
             count += 1
             guard count <= 3000, depth <= 30 else { throw SafariAXReadError.limitExceeded }
             var roleValue: CFTypeRef?
@@ -112,14 +121,29 @@ public enum SafariFocusedPageAdapter {
 /// Reads accessibility text after an explicitly approved exact HTTPS origin.
 public struct SafariPageReadExecutor: ToolExecutor, Sendable {
     private let reader: SafariVisiblePageReader
-    public init(reader: SafariVisiblePageReader) { self.reader = reader }
+    private let focusTimeout: Duration
+    private let focusPollInterval: Duration
+    public init(reader: SafariVisiblePageReader, focusTimeout: Duration = .seconds(15), focusPollInterval: Duration = .milliseconds(250)) {
+        self.reader = reader
+        self.focusTimeout = focusTimeout
+        self.focusPollInterval = focusPollInterval
+    }
     public func execute(_ request: ToolRequest) async throws -> ToolResult {
         guard request.name == "safari_read", request.sideEffect == .read,
               request.payload == "Read Safari accessibility text", request.scope == nil,
               BrowserOpenURL.validated(request.target) != nil else { throw SafariAXReadError.unavailable }
         try Task.checkCancellation()
-        let text = try await reader.read(expectedURL: request.target)
-        try Task.checkCancellation()
-        return ToolResult(summary: text)
+        let deadline = ContinuousClock.now.advanced(by: focusTimeout)
+        while true {
+            try Task.checkCancellation()
+            do {
+                let text = try await reader.read(expectedURL: request.target)
+                try Task.checkCancellation()
+                return ToolResult(summary: text)
+            } catch SafariAXReadError.notFocused {
+                guard ContinuousClock.now < deadline else { throw SafariAXReadError.focusTimedOut }
+                try await Task.sleep(for: focusPollInterval)
+            }
+        }
     }
 }
