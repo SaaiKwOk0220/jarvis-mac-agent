@@ -79,7 +79,7 @@ struct NewShellTaskView: View {
             in: .userDomainMask,
             appropriateFor: nil,
             create: false
-        ).appendingPathComponent("Jarvis", isDirectory: true)) ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        ).appendingPathComponent(AppStorageNamespace.current, isDirectory: true)) ?? URL(fileURLWithPath: NSTemporaryDirectory())
         return url.path
     }
 

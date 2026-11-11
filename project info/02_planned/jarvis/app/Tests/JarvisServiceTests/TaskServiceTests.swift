@@ -1044,3 +1044,178 @@ private func XCTAssertThrowsErrorAsync<T>(
         errorHandler(error)
     }
 }
+private struct AllowTestSafariPolicy: PolicyEvaluator {
+    func evaluate(_ request: ToolRequest, config: PolicyConfig) -> PolicyDecision {
+        request.name == "safari_read" ? .requireApproval(reason: "test only") : .deny(reason: "not used")
+    }
+}
+
+extension TaskServiceTests {
+    func testSafariResultIsSingleUseAndNeverWrittenToAudit() async throws {
+        let fixture = try Fixture()
+        let secret = "private-page-unique-contents"
+        let capture = SafariStaticFixture(text: secret)
+        let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: AllowTestSafariPolicy(), enableSafariRead: true, requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
+        service.safariCaptureFactory = { capture }
+        let task = try await service.createTask(title: "read page")
+        let request = try await service.prepareSafariRead(taskID: task.id)
+        _ = try await service.submit(request: request)
+        try await service.approve(requestID: request.id, digest: request.payloadDigest)
+        try await fixture.waitForRequest(id: request.id, status: .completed)
+        let audit = try fixture.audit.events(for: task.id)
+        XCTAssertTrue(audit.contains { $0.summary == "ephemeral tool result" && $0.result == request.id.uuidString && $0.requestID == request.id })
+        XCTAssertTrue(audit.allSatisfy { !$0.result.contains(secret) && !$0.target.contains(secret) })
+        let wrong = try await service.takeEphemeralToolResult(taskID: task.id, requestID: request.id, digest: "wrong")
+        XCTAssertNil(wrong)
+        let result = try await service.takeEphemeralToolResult(taskID: task.id, requestID: request.id, digest: request.payloadDigest)
+        XCTAssertEqual(result, secret)
+        let again = try await service.takeEphemeralToolResult(taskID: task.id, requestID: request.id, digest: request.payloadDigest)
+        XCTAssertNil(again)
+    }
+}
+
+private actor DelayedPage {
+    private var continuation: CheckedContinuation<Void, Never>?
+    func wait() async { await withCheckedContinuation { continuation = $0 } }
+    func hasStarted() -> Bool { continuation != nil }
+    func release() { continuation?.resume(); continuation = nil }
+}
+
+extension TaskServiceTests {
+    func testCancellationWhileSafariResultPendingDoesNotStoreOrPublishIt() async throws {
+        let fixture = try Fixture(), page = DelayedPage()
+        let capture = SafariStaticFixture(text: "private-cancelled-page", page: page)
+        let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: AllowTestSafariPolicy(), enableSafariRead: true, requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
+        service.safariCaptureFactory = { capture }
+        let task = try await service.createTask(title: "read page")
+        let request = try await service.prepareSafariRead(taskID: task.id)
+        _ = try await service.submit(request: request)
+        try await service.approve(requestID: request.id, digest: request.payloadDigest)
+        for _ in 0..<100 { if await page.hasStarted() { break }; try await Task.sleep(for: .milliseconds(10)) }
+        let started = await page.hasStarted()
+        XCTAssertTrue(started)
+        try await service.cancel(taskID: task.id)
+        await page.release()
+        await service.waitForTrackedExecution(request.id)
+        let result = try await service.takeEphemeralToolResult(taskID: task.id, requestID: request.id, digest: request.payloadDigest)
+        XCTAssertNil(result)
+        let events = try fixture.audit.events(for: task.id)
+        XCTAssertFalse(events.contains { $0.summary == "ephemeral tool result" || $0.result.contains("private-cancelled-page") })
+    }
+}
+
+private actor SafariCaptureFixture: SafariTargetCapturing {
+    let target = SafariCapturedTarget(url: "https://example.com/private?token=supersecret", processID: 77, windowIdentity: UUID())
+    func capture() async throws -> SafariCapturedTarget { target }
+    func verify(_ target: SafariCapturedTarget) async throws { guard target == self.target else { throw SafariAXReadError.targetChanged } }
+    func read(_ target: SafariCapturedTarget) async throws -> String { "private page text" }
+}
+
+extension TaskServiceTests {
+    func testSafariCapturePreviewApprovalAndReadRemainPrivate() async throws {
+        let fixture = try Fixture()
+        let capture = SafariCaptureFixture()
+        let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: Policy(allowSafariRead: true), enableSafariRead: true, requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
+        service.safariCaptureFactory = { capture }
+        let task = try await service.createTask(title: "read current page")
+        let request = try await service.prepareSafariRead(taskID: task.id)
+        XCTAssertFalse(String(decoding: try JSONEncoder().encode(request), as: UTF8.self).contains("supersecret"))
+        let decision = try await service.submit(request: request)
+        guard case .requireApproval = decision else { return XCTFail("explicit approval is required") }
+        let persisted = try XCTUnwrap(fixture.requests.fetch(id: request.id)?.0)
+        XCTAssertFalse(persisted.target.contains("supersecret"))
+        XCTAssertFalse(persisted.payload.contains("supersecret"))
+        let pending = try await service.listPendingApprovalRequests(taskID: task.id)
+        XCTAssertEqual(pending.first?.target, "https://example.com/private?token=supersecret")
+        XCTAssertTrue(pending.first?.reason.contains("not an atomic snapshot") == true)
+        try await service.approve(requestID: request.id, digest: request.payloadDigest)
+        try await fixture.waitForRequest(id: request.id, status: .completed)
+        let result = try await service.takeEphemeralToolResult(taskID: task.id, requestID: request.id, digest: request.payloadDigest)
+        XCTAssertEqual(result, "private page text")
+        let events = try fixture.audit.events(for: task.id)
+        XCTAssertTrue(events.allSatisfy { !$0.target.contains("supersecret") && !$0.result.contains("supersecret") && !$0.result.contains("private page text") })
+    }
+}
+
+private actor SafariStaticFixture: SafariTargetCapturing {
+    let target = SafariCapturedTarget(url: "https://example.com/", processID: 77, windowIdentity: UUID())
+    let text: String
+    let page: DelayedPage?
+    init(text: String, page: DelayedPage? = nil) { self.text = text; self.page = page }
+    func capture() async throws -> SafariCapturedTarget { target }
+    func verify(_ target: SafariCapturedTarget) async throws { guard target == self.target else { throw SafariAXReadError.targetChanged } }
+    func read(_ target: SafariCapturedTarget) async throws -> String { if let page { await page.wait() }; return text }
+}
+
+extension TaskServiceTests {
+    func testSafariFeatureIsDisabledByDefault() async throws {
+        let fixture = try Fixture()
+        let task = try await fixture.service.createTask(title: "read page")
+        let available = await fixture.service.isSafariReadAvailable()
+        XCTAssertFalse(available)
+        await XCTAssertThrowsErrorAsync(try await fixture.service.prepareSafariRead(taskID: task.id))
+    }
+
+    func testSafariApprovalCannotBeReplayedAfterRestartOrChangedDigest() async throws {
+        let fixture = try Fixture()
+        let capture = SafariCaptureFixture()
+        let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: Policy(allowSafariRead: true), enableSafariRead: true, requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
+        service.safariCaptureFactory = { capture }
+        let task = try await service.createTask(title: "read page")
+        let request = try await service.prepareSafariRead(taskID: task.id)
+        _ = try await service.submit(request: request)
+        await XCTAssertThrowsErrorAsync(try await service.approve(requestID: request.id, digest: "wrong"))
+        let restarted = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: Policy(allowSafariRead: true), enableSafariRead: true, requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
+        let pending = try await restarted.listPendingApprovalRequests(taskID: task.id)
+        XCTAssertTrue(pending.first?.target.contains("expired") == true)
+        await XCTAssertThrowsErrorAsync(try await restarted.approve(requestID: request.id, digest: request.payloadDigest))
+        let audit = try fixture.audit.events(for: task.id)
+        XCTAssertTrue(audit.allSatisfy { !$0.result.contains("supersecret") && !$0.target.contains("supersecret") })
+    }
+
+    func testRejectedSafariPreviewCannotBeApprovedAgain() async throws {
+        let fixture = try Fixture(), capture = SafariCaptureFixture()
+        let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: Policy(allowSafariRead: true), enableSafariRead: true, requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
+        service.safariCaptureFactory = { capture }
+        let task = try await service.createTask(title: "read page")
+        let request = try await service.prepareSafariRead(taskID: task.id)
+        _ = try await service.submit(request: request)
+        try await service.reject(requestID: request.id)
+        await XCTAssertThrowsErrorAsync(try await service.approve(requestID: request.id, digest: request.payloadDigest))
+        let pending = try await service.listPendingApprovalRequests(taskID: task.id)
+        XCTAssertTrue(pending.isEmpty)
+    }
+}
+
+private struct UnsafeAllowSafariPolicy: PolicyEvaluator {
+    func evaluate(_ request: ToolRequest, config: PolicyConfig) -> PolicyDecision { .allow }
+}
+
+extension TaskServiceTests {
+    func testSafariCannotExecuteWhenInjectedPolicyWouldAllowWithoutApproval() async throws {
+        let fixture = try Fixture(), capture = SafariCaptureFixture()
+        let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: UnsafeAllowSafariPolicy(), enableSafariRead: true, requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
+        service.safariCaptureFactory = { capture }
+        let task = try await service.createTask(title: "read page")
+        let request = try await service.prepareSafariRead(taskID: task.id)
+        let decision = try await service.submit(request: request)
+        XCTAssertEqual(decision, .deny(reason: "Safari reading requires explicit approval"))
+        XCTAssertNil(try fixture.requests.fetch(id: request.id))
+    }
+
+    func testSafariRejectedOrCancelledPreviewCannotBeUsed() async throws {
+        for cancel in [false, true] {
+            let fixture = try Fixture(), capture = SafariCaptureFixture()
+            let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: Policy(allowSafariRead: true), enableSafariRead: true, requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
+            service.safariCaptureFactory = { capture }
+            let task = try await service.createTask(title: "read page")
+            let request = try await service.prepareSafariRead(taskID: task.id)
+            _ = try await service.submit(request: request)
+            if cancel { try await service.cancel(taskID: task.id) }
+            else { try await service.reject(requestID: request.id) }
+            await XCTAssertThrowsErrorAsync(try await service.approve(requestID: request.id, digest: request.payloadDigest))
+            let result = try await service.takeEphemeralToolResult(taskID: task.id, requestID: request.id, digest: request.payloadDigest)
+            XCTAssertNil(result)
+        }
+    }
+}

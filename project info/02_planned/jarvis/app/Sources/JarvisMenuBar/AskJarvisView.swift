@@ -31,12 +31,16 @@ struct AgentLogEntry: Identifiable, Equatable {
         switch event {
         case .assistantText(let text):
             self.init(kind: .assistant, text: "Assistant: \(text)")
+        case .toolCallRequested(let call) where call.name == "safari_read":
+            self.init(kind: .info, text: "请在 15 秒内切换到目标 Safari 窗口，以便审批前检查准确网址。")
         case .toolCallRequested(let call):
             let arguments = call.arguments
                 .sorted { $0.key < $1.key }
                 .map { "\"\($0.key)\": \"\($0.value)\"" }
                 .joined(separator: ", ")
             self.init(kind: .toolCall, text: "Tool call: \(call.name)({\(arguments)})")
+        case .toolCallSucceeded(let name, _) where name == "safari_read":
+            self.init(kind: .result, text: "页面文本将发送给模型，可能保留在对话上下文；此处不显示页面内容。")
         case .toolCallSucceeded(let name, let observation):
             self.init(kind: .result, text: "Result (\(name)): \(Self.abbreviated(observation))")
         case .toolCallDenied(let name, let reason):
@@ -111,6 +115,11 @@ struct AskJarvisView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Ask Jarvis").font(.title2).bold()
+            #if JARVIS_SAFARI_EXPERIMENT_BUILD
+            Button("请求辅助功能权限") { _ = AccessibilityPermissionRequest.request() }
+            Text("授权后返回并重新提交请求。页面文本会发送给模型，可能留在对话或回答中。")
+                .font(.caption).foregroundStyle(.secondary)
+            #endif
             Text("Describe a goal. Jarvis plans tool calls and runs them through the same policy gate and approval flow as any other task.")
                 .font(.callout).foregroundStyle(.secondary)
 
@@ -241,7 +250,8 @@ struct AskJarvisView: View {
             runningTaskID = task.id
             log.append(AgentLogEntry(kind: .info, text: "Task \(task.id.uuidString.prefix(8)) created"))
 
-            let runner = TaskServiceToolRunner(service: service, taskID: task.id)
+            let enabled = await service.isSafariReadAvailable()
+            let runner = TaskServiceToolRunner(service: service, taskID: task.id, enableSafariRead: enabled)
             let waiter = TaskServiceApprovalWaiter(service: service)
             let session = AgentSession(
                 provider: OllamaProvider(),

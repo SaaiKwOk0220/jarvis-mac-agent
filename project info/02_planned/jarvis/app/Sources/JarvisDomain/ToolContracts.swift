@@ -146,6 +146,17 @@ public protocol TaskServiceAPI: Sendable {
     func complete(taskID: UUID) async throws
     func listPendingApprovalRequests(taskID: UUID) async throws -> [PendingApprovalRequest]
     func listTimelineEvents(taskID: UUID) async throws -> [TimelineEvent]
+    func takeEphemeralToolResult(taskID: UUID, requestID: UUID, digest: String) async throws -> String?
+    func prepareSafariRead(taskID: UUID) async throws -> ToolRequest
+    func isSafariReadAvailable() async -> Bool
+}
+
+public enum TaskServiceCapabilityError: Error { case unavailable }
+
+public extension TaskServiceAPI {
+    func isSafariReadAvailable() async -> Bool { false }
+    func prepareSafariRead(taskID: UUID) async throws -> ToolRequest { throw TaskServiceCapabilityError.unavailable }
+    func takeEphemeralToolResult(taskID: UUID, requestID: UUID, digest: String) async throws -> String? { nil }
 }
 
 /// Outcome returned by `TaskServiceAPI.submit(request:)`. Declared in
@@ -182,11 +193,12 @@ public struct TimelineEvent: Codable, Equatable, Sendable, Identifiable {
     public let summary: String
     public let result: String
     public let approvalID: UUID?
+    public let requestID: UUID?
 
     public init(id: UUID, timestamp: Date, worker: String, target: String, sideEffect: SideEffect,
-                actionDigest: String, summary: String, result: String, approvalID: UUID?) {
+                actionDigest: String, summary: String, result: String, approvalID: UUID?, requestID: UUID? = nil) {
         self.id = id; self.timestamp = timestamp; self.worker = worker; self.target = target
         self.sideEffect = sideEffect; self.actionDigest = actionDigest; self.summary = summary
-        self.result = result; self.approvalID = approvalID
+        self.result = result; self.approvalID = approvalID; self.requestID = requestID
     }
 }
