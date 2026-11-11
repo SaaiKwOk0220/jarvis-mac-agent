@@ -309,9 +309,16 @@ enum VADDownmix {
 /// Exactly one terminal reason wins; all endpoint outcomes require manual confirmation.
 final class VADTerminalState: @unchecked Sendable {
     private let state = ManagedAtomic<Int>(0)
-    func fail() -> Bool { state.compareExchange(expected: 0, desired: 1, ordering: .acquiringAndReleasing).exchanged }
+    func fail() -> Bool {
+        while true {
+            let current = state.load(ordering: .acquiring)
+            guard current == 0 || current == 2 else { return false }
+            if state.compareExchange(expected: current, desired: 1, ordering: .acquiringAndReleasing).exchanged { return true }
+        }
+    }
     func endpoint() -> Bool { state.compareExchange(expected: 0, desired: 2, ordering: .acquiringAndReleasing).exchanged }
-    func stop() { _ = state.compareExchange(expected: 0, desired: 3, ordering: .acquiringAndReleasing) }
+    func confirmEndpoint() -> Bool { state.compareExchange(expected: 2, desired: 4, ordering: .acquiringAndReleasing).exchanged }
+    func stop() { _ = state.exchange(3, ordering: .acquiringAndReleasing) }
 }
 
 enum VADSessionError: LocalizedError {
