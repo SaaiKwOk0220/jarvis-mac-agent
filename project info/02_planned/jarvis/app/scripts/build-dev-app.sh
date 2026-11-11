@@ -26,5 +26,9 @@ if [ ! -d "$resource" ]; then
   printf 'Required GRDB resource bundle missing: %s\n' "$resource" >&2
   exit 1
 fi
-cp -R "$resource" "$app_dir/"
+cp -R "$resource" "$app_dir/Contents/Resources/"
+# The copied SwiftPM executable may carry its own signature. Seal the final
+# bundle after its plist and resource bundle are in their final locations.
+codesign --force --sign - "$app_dir" >&2
+codesign --verify --strict "$app_dir" >&2
 printf '%s\n' "$app_dir"
