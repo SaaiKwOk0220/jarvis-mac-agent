@@ -62,3 +62,7 @@ exit 0
 RACE
 if PATH="$tmp_dir/bin:$PATH" FAKE_BUILD_DIR="$tmp_dir/build" RACE_DEST="$race" JARVIS_SAFARI_EXPERIMENT_BUNDLE=1 JARVIS_STABLE_OUTPUT=1 "$app_dir/scripts/build-dev-app.sh" "$race" >/dev/null 2>&1; then exit 1; fi
 test "$(cat "$race/Jarvis.app/sentinel")" = concurrent
+
+# Unknown options and excess arguments must fail before creating output.
+if PATH="$tmp_dir/bin:$PATH" FAKE_BUILD_DIR="$tmp_dir/build" "$app_dir/scripts/build-dev-app.sh" --unknown >/dev/null 2>&1; then exit 1; fi
+if PATH="$tmp_dir/bin:$PATH" FAKE_BUILD_DIR="$tmp_dir/build" "$app_dir/scripts/build-dev-app.sh" "$tmp_dir/one" "$tmp_dir/two" >/dev/null 2>&1; then exit 1; fi

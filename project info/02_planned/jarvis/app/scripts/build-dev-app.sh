@@ -4,6 +4,8 @@ script_dir="$(cd "$(dirname "$0")" && pwd)"
 package_dir="$(cd "$script_dir/.." && pwd)"
 experimental=false
 if [ "${1:-}" = --experimental ]; then experimental=true; shift; fi
+if [[ "${1:-}" == --* ]]; then printf 'Unknown build option: %s\n' "$1" >&2; exit 2; fi
+if (( $# > 1 )); then printf 'Usage: %s [--experimental] [output-dir]\n' "$0" >&2; exit 2; fi
 if "$experimental" && [ "${JARVIS_SAFARI_EXPERIMENT_BUNDLE:-0}" = 1 ]; then printf 'Choose one experiment.\n' >&2; exit 1; fi
 output_dir="${1:-$package_dir/.build/dev-app}"
 mkdir -p "$output_dir"
@@ -52,8 +54,8 @@ if [ ! -d "$vad_resource" ]; then printf 'Required Jarvis model resource bundle 
 cp -R "$vad_resource" "$app_dir/Contents/Resources/"
 # The copied SwiftPM executable may carry its own signature. Seal the final
 # bundle after its plist and resource bundle are in their final locations.
-codesign --force --sign - "$app_dir" >&2
-codesign --verify --strict "$app_dir" >&2
+codesign --force --deep --sign - "$app_dir" >&2
+codesign --verify --deep --strict "$app_dir" >&2
 if [ "${JARVIS_STABLE_OUTPUT:-0}" = 1 ]; then
   # Darwin renamex_np with RENAME_EXCL atomically refuses an existing target.
   /usr/bin/python3 - "$app_dir" "$output_dir/Jarvis.app" <<'PYRENAME'
