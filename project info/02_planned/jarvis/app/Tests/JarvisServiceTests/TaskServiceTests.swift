@@ -1341,6 +1341,63 @@ extension TaskServiceTests {
         XCTAssertEqual(action.value, 0)
         XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .cancelled)
     }
+    func testExperimentalClickCancelAfterActionStartsRecordsUnknownOutcome() async throws {
+        let fixture = try Fixture()
+        let task = try await fixture.service.createTask(title: "click")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/private", role: "AXButton", title: "Secret", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "action started")
+        let block = ExperimentalClickBlockingAction(entered)
+        await fixture.service.installExperimentalClickForTesting(action: { _, _ in block.run(); return .success })
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let approval = Task { try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest) }
+        await fulfillment(of: [entered], timeout: 2)
+        try await fixture.service.cancel(taskID: task.id)
+        let events = try fixture.audit.events(for: task.id)
+        XCTAssertTrue(events.contains { $0.result == "action outcome unknown; do not retry automatically" })
+        block.release.signal()
+        _ = try? await approval.value
+    }
+    func testExperimentalClickCancelAuditTransactionFailureKeepsUnknownForRetry() async throws {
+        let fixture = try Fixture()
+        let task = try await fixture.service.createTask(title: "click")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/private", role: "AXButton", title: "Secret", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "action started")
+        let block = ExperimentalClickBlockingAction(entered)
+        await fixture.service.installExperimentalClickForTesting(action: { _, _ in block.run(); return .success })
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let approval = Task { try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest) }
+        await fulfillment(of: [entered], timeout: 2)
+        try fixture.database.write { db in try db.execute(sql: "CREATE TRIGGER reject_cancel_audit BEFORE INSERT ON audit_events WHEN NEW.summary = 'task cancelled' BEGIN SELECT RAISE(ABORT, 'test'); END") }
+        await XCTAssertThrowsErrorAsync(try await fixture.service.cancel(taskID: task.id))
+        try fixture.database.write { db in try db.execute(sql: "DROP TRIGGER reject_cancel_audit") }
+        try await fixture.service.cancel(taskID: task.id)
+        let events = try fixture.audit.events(for: task.id)
+        XCTAssertTrue(events.contains { $0.result == "action outcome unknown; do not retry automatically" })
+        block.release.signal()
+        _ = try? await approval.value
+    }
+    func testExperimentalClickTaskCancellationAfterCommitClosesPendingRequest() async throws {
+        let fixture = try Fixture(), action = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "click")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/private", role: "AXButton", title: "Secret", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "committed")
+        let gate = ExperimentalClickVerificationGate(entered: entered, blockAt: 1)
+        await fixture.service.installExperimentalClickForTesting(afterSubmit: { await gate.visit() }, action: { _, _ in action.increment(); return .success })
+        let submission = Task { try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] }) }
+        await fulfillment(of: [entered], timeout: 2)
+        submission.cancel()
+        await gate.release()
+        do { _ = try await submission.value; XCTFail("cancelled submission succeeded") } catch { }
+        let pending = try fixture.requests.list(status: .pending).filter { $0.0.taskID == task.id }
+        XCTAssertTrue(pending.isEmpty)
+        XCTAssertEqual(action.value, 0)
+    }
     func testExperimentalClickWrongDigestRevokesTicket() async throws {
         let (fixture, _, request, action) = try await experimentalFixture()
         await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: "wrong"))
@@ -1373,12 +1430,19 @@ private actor ExperimentalClickVerificationGate {
     let entered: XCTestExpectation
     var count = 0
     var continuation: CheckedContinuation<Void, Never>?
-    init(entered: XCTestExpectation) { self.entered = entered }
+    let blockAt: Int
+    init(entered: XCTestExpectation, blockAt: Int = 2) { self.entered = entered; self.blockAt = blockAt }
     func visit() async {
         count += 1
-        if count == 2 { await withCheckedContinuation { continuation = $0; entered.fulfill() } }
+        if count == blockAt { await withCheckedContinuation { continuation = $0; entered.fulfill() } }
     }
     func release() { continuation?.resume(); continuation = nil }
+}
+private final class ExperimentalClickBlockingAction: @unchecked Sendable {
+    let entered: XCTestExpectation
+    let release = DispatchSemaphore(value: 0)
+    init(_ entered: XCTestExpectation) { self.entered = entered }
+    func run() { entered.fulfill(); _ = release.wait(timeout: .now() + 5) }
 }
 private final class ExperimentalClickClock: @unchecked Sendable {
     private let lock = NSLock()
