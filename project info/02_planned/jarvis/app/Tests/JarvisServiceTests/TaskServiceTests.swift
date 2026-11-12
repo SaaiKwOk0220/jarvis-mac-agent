@@ -6,7 +6,7 @@ import JarvisPolicy
 @testable import JarvisService
 
 final class TaskServiceTests: XCTestCase {
-    func testExactBrowserApprovalTransactionFailureShowsExpiredTarget() async throws {
+    func testExactBrowserApprovalTransactionFailurePreservesPreview() async throws {
         #if !JARVIS_EXACT_BROWSER_EXPERIMENT && !JARVIS_COMBINED_EXPERIMENT
         throw XCTSkip("Exact browser feature is unavailable in ordinary builds")
         #endif
@@ -22,7 +22,7 @@ final class TaskServiceTests: XCTestCase {
         }
         await XCTAssertThrowsErrorAsync(try await fixture.service.approve(requestID: request.id, digest: digest))
         let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
-        XCTAssertEqual(pending.first?.target, "[目标已失效，请拒绝此请求后重新请求]")
+        XCTAssertEqual(pending.first?.target, "https://example.com/private")
         let count = await recorder.count
         XCTAssertEqual(count, 0)
     }
@@ -3035,6 +3035,7 @@ extension TaskServiceTests {
         let warning = try XCTUnwrap(events.last { $0.summary == "browser open outcome unknown" })
         XCTAssertEqual(warning.requestID, item.id)
         XCTAssertTrue(warning.result.contains("do not retry automatically"))
+        XCTAssertTrue(try SQLitePersistenceUnitOfWork(database: fixture.database).hasExactBrowserBarrier())
         XCTAssertTrue(events.allSatisfy { !$0.result.contains("private-token") && !$0.target.contains("private-token") })
     }
     #endif
@@ -3051,6 +3052,7 @@ extension TaskServiceTests {
         let events = try await fixture.service.listTimelineEvents(taskID: task.id)
         let warning = try XCTUnwrap(events.last { $0.summary == "browser open outcome unknown" })
         XCTAssertTrue(warning.result.contains("do not retry automatically"))
+        XCTAssertTrue(try SQLitePersistenceUnitOfWork(database: fixture.database).hasExactBrowserBarrier())
         XCTAssertTrue(events.allSatisfy { !$0.result.contains("private-token") && !$0.target.contains("private-token") })
     }
 }
@@ -3058,35 +3060,22 @@ extension TaskServiceTests {
 
 #if JARVIS_EXACT_BROWSER_EXPERIMENT || JARVIS_COMBINED_EXPERIMENT
 extension TaskServiceTests {
-    func testUnknownBrowserCapacityFailsClosedWithoutDroppingEarlierOutcomes() async throws {
+    func testUnknownBrowserOutcomeBlocksNextRequestWithoutDroppingOutcome() async throws {
         let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { _ in false }, exactOpener: { _ in false }), exactBrowserEnabled: true)
-        var firstTask: JarvisTask?
-        var firstRequest: UUID?
-        for index in 0..<64 {
-            let task = try await fixture.service.createTask(title: "open \(index)")
-            let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private/\(index)", payload: "Open in browser")
-            _ = try await fixture.service.submit(request: request)
-            let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
-            let item = try XCTUnwrap(pending.first)
-            try await fixture.service.approve(requestID: item.id, digest: item.digest)
-            await fixture.service.waitForTrackedExecution(item.id)
-            if index == 0 { firstTask = task; firstRequest = item.id }
-        }
-        let task = try await fixture.service.createTask(title: "overflow")
-        let overflow = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private/overflow", payload: "Open in browser")
-        do {
-            _ = try await fixture.service.submit(request: overflow)
-            XCTFail("Expected exact-browser capacity limit")
-        } catch BrowserOpenError.exactCapacityReached {
-            let message = BrowserOpenError.exactCapacityReached.localizedDescription
-            XCTAssertTrue(message.contains("64"))
-            XCTAssertTrue(message.contains("pending"))
-            XCTAssertTrue(message.contains("unknown"))
-            XCTAssertFalse(message.contains("example.com"))
-        }
-        XCTAssertNil(try fixture.requests.fetch(id: overflow.id))
-        let events = try await fixture.service.listTimelineEvents(taskID: try XCTUnwrap(firstTask).id)
-        XCTAssertTrue(events.contains { $0.summary == "browser open outcome unknown" && $0.requestID == firstRequest })
+        let first = try await fixture.service.createTask(title: "first")
+        let request = ToolRequest(taskID: first.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private/first", payload: "Open in browser")
+        _ = try await fixture.service.submit(request: request)
+        let pending = try await fixture.service.listPendingApprovalRequests(taskID: first.id)
+        let item = try XCTUnwrap(pending.first)
+        try await fixture.service.approve(requestID: item.id, digest: item.digest)
+        await fixture.service.waitForTrackedExecution(item.id)
+        let task = try await fixture.service.createTask(title: "later")
+        let later = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private/later", payload: "Open in browser")
+        do { _ = try await fixture.service.submit(request: later); XCTFail("expected unresolved barrier") }
+        catch ExactBrowserBarrierError.unresolved { }
+        XCTAssertNil(try fixture.requests.fetch(id: later.id))
+        let events = try await fixture.service.listTimelineEvents(taskID: first.id)
+        XCTAssertTrue(events.contains { $0.summary == "browser open outcome unknown" && $0.requestID == item.id })
     }
 }
 #endif
@@ -3103,8 +3092,221 @@ extension TaskServiceTests {
         let task = try await fixture.service.createTask(title: "overflow")
         let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private/overflow", payload: "Open in browser")
         do { _ = try await fixture.service.submit(request: request); XCTFail("Expected capacity limit") }
-        catch BrowserOpenError.exactCapacityReached { }
+        catch BrowserOpenError.exactCapacityReached {
+            let message = BrowserOpenError.exactCapacityReached.localizedDescription
+            XCTAssertTrue(message.contains("64"))
+            XCTAssertTrue(message.contains("pending"))
+            XCTAssertTrue(message.contains("unknown"))
+            XCTAssertFalse(message.contains("example.com"))
+        }
         XCTAssertNil(try fixture.requests.fetch(id: request.id))
+    }
+}
+#endif
+
+#if JARVIS_EXACT_BROWSER_EXPERIMENT || JARVIS_COMBINED_EXPERIMENT
+extension TaskServiceTests {
+    func testExactBrowserUncertainOutcomeBlocksAfterRestart() async throws {
+        let path = NSTemporaryDirectory() + "jarvis-exact-barrier-\(UUID().uuidString).sqlite"
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let first = try Fixture(path: path, browserOpen: BrowserOpenExecutor(opener: { _ in false }, exactOpener: { _ in false }), exactBrowserEnabled: true)
+        let task = try await first.service.createTask(title: "open")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private", payload: "Open in browser")
+        _ = try await first.service.submit(request: request)
+        let pending = try await first.service.listPendingApprovalRequests(taskID: task.id)
+        let item = try XCTUnwrap(pending.first)
+        try await first.service.approve(requestID: item.id, digest: item.digest)
+        await first.service.waitForTrackedExecution(item.id)
+        let second = try Fixture(path: path, browserOpen: BrowserOpenExecutor(opener: { _ in false }, exactOpener: { _ in true }), exactBrowserEnabled: true)
+        let laterTask = try await second.service.createTask(title: "later")
+        let later = ToolRequest(taskID: laterTask.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/other", payload: "Open in browser")
+        do { _ = try await second.service.submit(request: later); XCTFail("expected durable barrier") }
+        catch ExactBrowserBarrierError.unresolved { }
+    }
+    func testExactBrowserBarrierWriteFailureNeverOpens() async throws {
+        let recorder = BrowserRecorder()
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { _ in false }, exactOpener: { url in recorder.record(url); return true }), exactBrowserEnabled: true)
+        let task = try await fixture.service.createTask(title: "open")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private", payload: "Open in browser")
+        _ = try await fixture.service.submit(request: request)
+        let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        let item = try XCTUnwrap(pending.first)
+        try fixture.database.write { db in try db.execute(sql: "CREATE TRIGGER reject_exact_barrier BEFORE INSERT ON exact_browser_barriers BEGIN SELECT RAISE(ABORT, 'test'); END") }
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approve(requestID: item.id, digest: item.digest))
+        XCTAssertEqual(recorder.count, 0)
+        XCTAssertEqual(try fixture.requests.fetch(id: item.id)?.1, .pending)
+    }
+}
+#endif
+
+#if JARVIS_EXACT_BROWSER_EXPERIMENT || JARVIS_COMBINED_EXPERIMENT
+extension TaskServiceTests {
+    func testExactBrowserApprovalBarrierIsSharedAcrossConnectionsAndSuccessClearsIt() async throws {
+        let path = NSTemporaryDirectory() + "jarvis-exact-multi-\(UUID().uuidString).sqlite"
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let page = DelayedPage()
+        let executor = BrowserOpenExecutor(opener: { _ in false }, exactOpener: { _ in await page.wait(); return true })
+        let first = try Fixture(path: path, browserOpen: executor, exactBrowserEnabled: true)
+        let second = try Fixture(path: path, browserOpen: executor, exactBrowserEnabled: true)
+        let a = try await first.service.createTask(title: "a")
+        let b = try await second.service.createTask(title: "b")
+        let reqA = ToolRequest(taskID: a.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/a", payload: "Open in browser")
+        let reqB = ToolRequest(taskID: b.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/b", payload: "Open in browser")
+        _ = try await first.service.submit(request: reqA)
+        _ = try await second.service.submit(request: reqB)
+        let pendingA = try await first.service.listPendingApprovalRequests(taskID: a.id)
+        let pendingB = try await second.service.listPendingApprovalRequests(taskID: b.id)
+        let itemA = try XCTUnwrap(pendingA.first), itemB = try XCTUnwrap(pendingB.first)
+        try await first.service.approve(requestID: itemA.id, digest: itemA.digest)
+        for _ in 0..<100 where !(await page.hasStarted()) { try await Task.sleep(for: .milliseconds(10)) }
+        let started = await page.hasStarted(); XCTAssertTrue(started)
+        do { try await second.service.approve(requestID: itemB.id, digest: itemB.digest); XCTFail("expected shared barrier") }
+        catch ExactBrowserBarrierError.unresolved { }
+        XCTAssertEqual(try second.requests.fetch(id: itemB.id)?.1, .pending)
+        await page.release()
+        try await first.waitForRequest(id: itemA.id, status: .completed)
+        XCTAssertEqual(try first.requests.fetch(id: itemA.id)?.1, .completed)
+        XCTAssertFalse(try SQLitePersistenceUnitOfWork(database: second.database).hasExactBrowserBarrier())
+    }
+}
+#endif
+
+#if JARVIS_EXACT_BROWSER_EXPERIMENT || JARVIS_COMBINED_EXPERIMENT
+extension TaskServiceTests {
+    func testConcurrentExactBrowserApprovalsAcrossConnectionsStartAtMostOne() async throws {
+        let path = NSTemporaryDirectory() + "jarvis-exact-race-\(UUID().uuidString).sqlite"
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let recorder = BrowserRecorder()
+        let executor = BrowserOpenExecutor(opener: { _ in false }, exactOpener: { url in
+            recorder.record(url)
+            try? await Task.sleep(for: .milliseconds(500))
+            return true
+        })
+        let first = try Fixture(path: path, browserOpen: executor, exactBrowserEnabled: true)
+        let second = try Fixture(path: path, browserOpen: executor, exactBrowserEnabled: true)
+        let a = try await first.service.createTask(title: "a")
+        let b = try await second.service.createTask(title: "b")
+        let reqA = ToolRequest(taskID: a.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/a", payload: "Open in browser")
+        let reqB = ToolRequest(taskID: b.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/b", payload: "Open in browser")
+        _ = try await first.service.submit(request: reqA)
+        _ = try await second.service.submit(request: reqB)
+        let pa = try await first.service.listPendingApprovalRequests(taskID: a.id)
+        let pb = try await second.service.listPendingApprovalRequests(taskID: b.id)
+        let itemA = try XCTUnwrap(pa.first), itemB = try XCTUnwrap(pb.first)
+        func attempt(_ service: TaskService, _ item: PendingApprovalRequest) async -> Bool {
+            do { try await service.approve(requestID: item.id, digest: item.digest); return true } catch { return false }
+        }
+        async let acceptedA = attempt(first.service, itemA)
+        async let acceptedB = attempt(second.service, itemB)
+        let outcomes = await [acceptedA, acceptedB]
+        XCTAssertEqual(outcomes.filter { $0 }.count, 1)
+        await first.service.waitForTrackedExecution(itemA.id)
+        await second.service.waitForTrackedExecution(itemB.id)
+        XCTAssertEqual(recorder.count, 1)
+    }
+    func testApprovalTransactionRollbackDoesNotLeaveExactBrowserBarrier() async throws {
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { _ in false }, exactOpener: { _ in true }), exactBrowserEnabled: true)
+        let task = try await fixture.service.createTask(title: "open")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private", payload: "Open in browser")
+        _ = try await fixture.service.submit(request: request)
+        let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        let item = try XCTUnwrap(pending.first)
+        try fixture.database.write { db in try db.execute(sql: "CREATE TRIGGER reject_exact_approval BEFORE INSERT ON approvals BEGIN SELECT RAISE(ABORT, 'test'); END") }
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approve(requestID: item.id, digest: item.digest))
+        XCTAssertFalse(try SQLitePersistenceUnitOfWork(database: fixture.database).hasExactBrowserBarrier())
+        XCTAssertEqual(try fixture.requests.fetch(id: item.id)?.1, .pending)
+    }
+}
+#endif
+
+#if (JARVIS_EXACT_BROWSER_EXPERIMENT || JARVIS_COMBINED_EXPERIMENT) && JARVIS_SAFARI_CLICK_TESTING
+extension TaskServiceTests {
+    func testRevocationBeforeBrowserStartClearsDurableBarrier() async throws {
+        let page = DelayedPage(), recorder = BrowserRecorder()
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { _ in false }, exactOpener: { url in recorder.record(url); return true }), exactBrowserEnabled: true)
+        fixture.service.testBeforeExactBrowserOpen = { await page.wait() }
+        let task = try await fixture.service.createTask(title: "open")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private", payload: "Open in browser")
+        _ = try await fixture.service.submit(request: request)
+        let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        let item = try XCTUnwrap(pending.first)
+        try await fixture.service.approve(requestID: item.id, digest: item.digest)
+        for _ in 0..<100 where !(await page.hasStarted()) { try await Task.sleep(for: .milliseconds(10)) }
+        let started = await page.hasStarted(); XCTAssertTrue(started)
+        XCTAssertTrue(try SQLitePersistenceUnitOfWork(database: fixture.database).hasExactBrowserBarrier())
+        try fixture.service.setExactBrowserEnabled(false)
+        await page.release()
+        await fixture.service.waitForTrackedExecution(item.id)
+        XCTAssertEqual(recorder.count, 0)
+        XCTAssertFalse(try SQLitePersistenceUnitOfWork(database: fixture.database).hasExactBrowserBarrier())
+    }
+}
+#endif
+
+#if (JARVIS_EXACT_BROWSER_EXPERIMENT || JARVIS_COMBINED_EXPERIMENT) && JARVIS_SAFARI_CLICK_TESTING
+extension TaskServiceTests {
+    func testPreStartBarrierClearFailureLeavesBarrierAndWarning() async throws {
+        let page = DelayedPage(), recorder = BrowserRecorder()
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { _ in false }, exactOpener: { url in recorder.record(url); return true }), exactBrowserEnabled: true)
+        fixture.service.testBeforeExactBrowserOpen = { await page.wait() }
+        let task = try await fixture.service.createTask(title: "open")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private", payload: "Open in browser")
+        _ = try await fixture.service.submit(request: request)
+        let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        let item = try XCTUnwrap(pending.first)
+        try await fixture.service.approve(requestID: item.id, digest: item.digest)
+        for _ in 0..<100 where !(await page.hasStarted()) { try await Task.sleep(for: .milliseconds(10)) }
+        let started = await page.hasStarted(); XCTAssertTrue(started)
+        try fixture.database.write { db in try db.execute(sql: "CREATE TRIGGER reject_exact_clear BEFORE DELETE ON exact_browser_barriers BEGIN SELECT RAISE(ABORT, 'test'); END") }
+        try fixture.service.setExactBrowserEnabled(false)
+        await page.release()
+        await fixture.service.waitForTrackedExecution(item.id)
+        XCTAssertEqual(recorder.count, 0)
+        XCTAssertTrue(try SQLitePersistenceUnitOfWork(database: fixture.database).hasExactBrowserBarrier())
+        let events = try await fixture.service.listTimelineEvents(taskID: task.id)
+        XCTAssertTrue(events.contains { $0.summary == "browser open outcome unknown" && $0.requestID == item.id })
+    }
+}
+#endif
+
+#if JARVIS_EXACT_BROWSER_EXPERIMENT || JARVIS_COMBINED_EXPERIMENT
+extension TaskServiceTests {
+    func testExactBrowserInFlightBarrierSurvivesNewServiceInstance() async throws {
+        let path = NSTemporaryDirectory() + "jarvis-exact-inflight-\(UUID().uuidString).sqlite"
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let page = DelayedPage()
+        let first = try Fixture(path: path, browserOpen: BrowserOpenExecutor(opener: { _ in false }, exactOpener: { _ in await page.wait(); return false }), exactBrowserEnabled: true)
+        let task = try await first.service.createTask(title: "open")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private", payload: "Open in browser")
+        _ = try await first.service.submit(request: request)
+        let pending = try await first.service.listPendingApprovalRequests(taskID: task.id)
+        let item = try XCTUnwrap(pending.first)
+        try await first.service.approve(requestID: item.id, digest: item.digest)
+        for _ in 0..<100 where !(await page.hasStarted()) { try await Task.sleep(for: .milliseconds(10)) }
+        let started = await page.hasStarted(); XCTAssertTrue(started)
+        let restarted = try Fixture(path: path, browserOpen: BrowserOpenExecutor(opener: { _ in false }, exactOpener: { _ in true }), exactBrowserEnabled: true)
+        let laterTask = try await restarted.service.createTask(title: "later")
+        let later = ToolRequest(taskID: laterTask.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/later", payload: "Open in browser")
+        do { _ = try await restarted.service.submit(request: later); XCTFail("expected in-flight barrier") }
+        catch ExactBrowserBarrierError.unresolved { }
+        await page.release()
+        await first.service.waitForTrackedExecution(item.id)
+        XCTAssertTrue(try SQLitePersistenceUnitOfWork(database: restarted.database).hasExactBrowserBarrier())
+    }
+}
+#endif
+
+#if JARVIS_EXACT_BROWSER_EXPERIMENT || JARVIS_COMBINED_EXPERIMENT
+extension TaskServiceTests {
+    func testExactBrowserBarrierReadFailureBlocksNewAction() async throws {
+        let recorder = BrowserRecorder()
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { _ in false }, exactOpener: { url in recorder.record(url); return true }), exactBrowserEnabled: true)
+        let task = try await fixture.service.createTask(title: "open")
+        try fixture.database.write { db in try db.execute(sql: "DROP TABLE exact_browser_barriers") }
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private", payload: "Open in browser")
+        await XCTAssertThrowsErrorAsync(try await fixture.service.submit(request: request))
+        XCTAssertNil(try fixture.requests.fetch(id: request.id))
+        XCTAssertEqual(recorder.count, 0)
     }
 }
 #endif

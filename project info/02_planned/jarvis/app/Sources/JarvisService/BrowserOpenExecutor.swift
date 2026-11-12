@@ -58,7 +58,7 @@ public struct BrowserOpenExecutor: ToolExecutor, Sendable {
     }
 
     /// Internal path for targets recovered from an approved one-use ticket.
-    func executeApprovedExact(_ request: ToolRequest, gate: ExactBrowserSessionGate, generation: UInt64) async throws -> ToolResult {
+    func executeApprovedExact(_ request: ToolRequest, gate: ExactBrowserSessionGate, generation: UInt64, onStarted: @Sendable () -> Void = {}) async throws -> ToolResult {
         guard request.name == "browser_open", request.sideEffect == .externalSend,
               request.payload == "Open in browser", request.scope == nil,
               let url = BrowserOpenURL.validatedExact(request.target) else { throw BrowserOpenError.invalidRequest }
@@ -68,6 +68,7 @@ public struct BrowserOpenExecutor: ToolExecutor, Sendable {
         // Closing after the pending → started transition cannot revoke this
         // open. The async system API runs outside the lock and main actor.
         try gate.beginOpen(attempt)
+        onStarted()
         let opened = await exactOpener(url)
         guard opened, !Task.isCancelled else { throw BrowserOpenError.outcomeUnknown }
         return ToolResult(summary: "Browser open requested")

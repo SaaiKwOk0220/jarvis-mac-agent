@@ -6,6 +6,13 @@ import JarvisDomain
 import JarvisPersistence
 import JarvisPolicy
 
+private final class ExactBrowserStartMarker: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    func markStarted() { lock.withLock { value = true } }
+    var started: Bool { lock.withLock { value } }
+}
+
 public struct ToolResult: Codable, Equatable, Sendable { public let summary: String; public init(summary: String) { self.summary = summary } }
 public protocol ToolExecutor: Sendable { func execute(_ request: ToolRequest) async throws -> ToolResult }
 public struct NoOpToolExecutor: ToolExecutor { public init() {} ; public func execute(_ request: ToolRequest) async throws -> ToolResult { ToolResult(summary: "demo executor completed") } }
@@ -79,6 +86,7 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     }
     #if JARVIS_SAFARI_CLICK_TESTING
     var testAfterExactBrowserOpen: @Sendable () async -> Void = {}
+    var testBeforeExactBrowserOpen: @Sendable () async -> Void = {}
     #endif
 
     private func recordBrowserUnknownLocked(_ request: ToolRequest) {
@@ -228,6 +236,8 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
         try lock.withLock { try ensureRunning(request.taskID) }
         if request.name == "browser_open", BrowserOpenURL.validated(request.target) == nil,
            BrowserOpenURL.validatedExact(request.target) != nil {
+            guard let sqlite = uow as? SQLitePersistenceUnitOfWork else { throw TaskServiceCapabilityError.unavailable }
+            guard try !sqlite.hasExactBrowserBarrier() else { throw ExactBrowserBarrierError.unresolved }
             guard let exactGeneration = exactBrowserGate.capture() else {
                 let reason = "invalid browser destination"
                 try lock.withLock {
@@ -301,13 +311,25 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
             guard validateApproval(request: request, approvalDigest: digest) else { try audits.append(event(request, summary: "approval rejected", result: "digest mismatch")); throw TaskServiceError.approvalDigestMismatch }
             var transient: ToolRequest?
             if request.name == "browser_open", let ticket = BrowserURLTicketStore.Ticket(payload: request.payload) {
-                guard let target = browserTickets.consumeBound(ticket, taskID: request.taskID, requestID: request.id),
+                guard let target = browserTickets.peekBound(ticket, taskID: request.taskID, requestID: request.id),
                       BrowserOpenURL.validatedExact(target) != nil else { throw TaskServiceError.requestNotAwaitingApproval }
                 transient = ToolRequest(id: request.id, taskID: request.taskID, name: request.name, sideEffect: request.sideEffect, target: target, payload: "Open in browser")
             }
             let approval = Approval(toolRequestID: request.id, actionDigest: request.payloadDigest, decision: .approved)
             let taskStatus = try aggregateStatus(forTask: request.taskID, excluding: request.id, fallback: .running)
-            try uow.approveRequest(request, approval: approval, taskStatus: taskStatus, audits: [event(request, summary: "approval accepted", result: "approved", approvalID: approval.id)])
+            let approvalAudits = [event(request, summary: "approval accepted", result: "approved", approvalID: approval.id)]
+            if transient != nil {
+                guard let sqlite = uow as? SQLitePersistenceUnitOfWork else { throw TaskServiceCapabilityError.unavailable }
+                try sqlite.approveExactBrowser(request, approval: approval, taskStatus: taskStatus, audits: approvalAudits)
+            } else { try uow.approveRequest(request, approval: approval, taskStatus: taskStatus, audits: approvalAudits) }
+            if transient != nil, let ticket = BrowserURLTicketStore.Ticket(payload: request.payload) {
+                guard browserTickets.consumeBound(ticket, taskID: request.taskID, requestID: request.id) != nil else {
+                    guard let sqlite = uow as? SQLitePersistenceUnitOfWork else { throw TaskServiceCapabilityError.unavailable }
+                    let notStartedStatus = try aggregateStatus(forTask: request.taskID, excluding: request.id, fallback: .failed)
+                    try sqlite.finishExactBrowserNotStarted(request, taskStatus: notStartedStatus, audits: [event(request, summary: "browser open not started", result: "ticket expired before execution")])
+                    throw TaskServiceCapabilityError.unavailable
+                }
+            }
             return (request, approval, transient)
         } }
         let (request, approval, transient) = try exactGeneration.map { try exactBrowserGate.withCurrentGeneration($0, commitApproval) } ?? commitApproval()
@@ -747,6 +769,23 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
 
     private func execute(_ request: ToolRequest, approval: Approval? = nil, executionRequest: ToolRequest? = nil, exactGeneration: UInt64? = nil) async throws {
         var exactOpenReturned = false
+        let exactStart = ExactBrowserStartMarker()
+        let isExactRequest = executionRequest != nil && request.name == "browser_open" && BrowserURLTicketStore.Ticket(payload: request.payload) != nil
+        func clearProvenNotStarted() throws {
+            guard isExactRequest, !exactStart.started else { return }
+            do {
+                try lock.withLock {
+                    guard let sqlite = uow as? SQLitePersistenceUnitOfWork else { throw TaskServiceCapabilityError.unavailable }
+                    let task = try requiredTask(request.taskID)
+                    let next = task.status == .cancelled ? TaskStatus.cancelled : ((try? aggregateStatus(forTask: request.taskID, excluding: request.id, fallback: .failed)) ?? .failed)
+                    try sqlite.finishExactBrowserNotStarted(request, taskStatus: next, audits: [event(request, summary: "browser open not started", result: "The browser open did not start.")])
+                    browserUnknownEvents.removeValue(forKey: request.id)
+                }
+            } catch {
+                lock.withLock { recordBrowserUnknownLocked(request) }
+                throw error
+            }
+        }
         do {
             if let executionRequest {
                 guard executionRequest.id == request.id,
@@ -779,7 +818,10 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
             } else if let executionRequest, let browserOpen, request.name == "browser_open",
                       BrowserURLTicketStore.Ticket(payload: request.payload) != nil {
                 guard let exactGeneration else { throw BrowserOpenError.unavailable }
-                result = try await browserOpen.executeApprovedExact(executionRequest, gate: exactBrowserGate, generation: exactGeneration)
+                #if JARVIS_SAFARI_CLICK_TESTING
+                await testBeforeExactBrowserOpen()
+                #endif
+                result = try await browserOpen.executeApprovedExact(executionRequest, gate: exactBrowserGate, generation: exactGeneration, onStarted: { exactStart.markStarted() })
                 exactOpenReturned = true
                 #if JARVIS_SAFARI_CLICK_TESTING
                 await testAfterExactBrowserOpen()
@@ -792,7 +834,11 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
                 let taskStatus = try aggregateStatus(forTask: request.taskID, excluding: request.id, fallback: .running)
                 let auditResult = request.name == "safari_read" ? request.id.uuidString : bounded(result.summary)
                 let summary = request.name == "safari_read" ? "ephemeral tool result" : "tool result"
-                try uow.finishRequest(request, status: .completed, taskStatus: taskStatus, audits: [event(request, summary: summary, result: auditResult)])
+                let finishAudits = [event(request, summary: summary, result: auditResult)]
+                if exactOpenReturned {
+                    guard let sqlite = uow as? SQLitePersistenceUnitOfWork else { throw TaskServiceCapabilityError.unavailable }
+                    try sqlite.finishExactBrowserCompleted(request, taskStatus: taskStatus, audits: finishAudits)
+                } else { try uow.finishRequest(request, status: .completed, taskStatus: taskStatus, audits: finishAudits) }
                 if request.name == "safari_read" {
                     ephemeralResults.put(result.summary, taskID: request.taskID, requestID: request.id, digest: request.payloadDigest)
                 }
@@ -800,8 +846,13 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
             if let safariGeneration { try safariGate.withCurrentGeneration(safariGeneration, publish) }
             else { try publish() }
         } catch is CancellationError {
+            if isExactRequest && !exactStart.started { try clearProvenNotStarted() }
             // Cancellation transaction already sets request and task to cancelled; never add success/failure after it.
         } catch {
+            if isExactRequest && !exactStart.started {
+                try clearProvenNotStarted()
+                throw error
+            }
             let browserOutcomeUnknown: Bool
             if case BrowserOpenError.outcomeUnknown = error { browserOutcomeUnknown = true } else { browserOutcomeUnknown = exactOpenReturned }
             if browserOutcomeUnknown { lock.withLock { recordBrowserUnknownLocked(request) } }
