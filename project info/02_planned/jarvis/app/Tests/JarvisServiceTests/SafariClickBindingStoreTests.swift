@@ -39,6 +39,18 @@ final class SafariClickBindingStoreTests: XCTestCase {
         }
         XCTAssertEqual(succeeded, 16)
     }
+    func testWrongDigestsConsumeBoundTicket() async throws {
+        let store = SafariClickBindingStore(clock: { 1 })
+        let task = UUID(), request = UUID()
+        for badRequestDigest in [true, false] {
+            let value = await store.issue(.init(taskID: task, targetDigest: "target")); let token = try XCTUnwrap(value)
+            let bound = await store.bind(token: token, taskID: task, requestID: request, digest: "request")
+            XCTAssertTrue(bound)
+            let result = await store.consume(token: token, taskID: task, requestID: request, digest: badRequestDigest ? "wrong" : "request", targetDigest: badRequestDigest ? "target" : "wrong")
+            let replay = await store.consume(token: token, taskID: task, requestID: request, digest: "request", targetDigest: "target")
+            XCTAssertFalse(result); XCTAssertFalse(replay)
+        }
+    }
     func testExpiryAndCancellationPreventBinding() async throws {
         let clock = BindingClock(), task = UUID()
         let store = SafariClickBindingStore(lifetime: 5, clock: { clock.read() })
@@ -59,3 +71,22 @@ final class SafariClickBindingStoreTests: XCTestCase {
         XCTAssertFalse(result)
     }
 }
+
+#if os(macOS)
+import ApplicationServices
+extension SafariClickBindingStoreTests {
+    func testFailedBindingReleasesCapturedElement() async throws {
+        let task = UUID()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let ref = AXUIElementCreateSystemWide()
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let capture = SafariClickCapture { [candidate] }
+        let staged = SafariClickStagedCaptures(bindings: SafariClickBindingStore(clock: { 1 }))
+        let value = try await staged.stage(taskID: task, identity: identity, targetDigest: "target", capture: capture)
+        let token = try XCTUnwrap(value)
+        let bound = await staged.bind(token: token, taskID: UUID(), requestID: UUID(), digest: "digest")
+        XCTAssertFalse(bound)
+        do { try await capture.verify(expected: identity); XCTFail("failed binding retained reference") } catch { }
+    }
+}
+#endif
