@@ -116,6 +116,7 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     }
 
     public func submit(request: ToolRequest) async throws -> PolicyDecision {
+        guard request.name != "safari_click_experiment" else { throw TaskServiceCapabilityError.unavailable }
         try lock.withLock { try ensureRunning(request.taskID) }
         var decision = policy.evaluate(request, config: config)
         if request.name == "safari_read" {
@@ -151,6 +152,7 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
             guard let (request, status) = try requests.fetch(id: requestID), status == .pending else { throw TaskServiceError.requestNotAwaitingApproval }
             return request
         }
+        guard preliminary.name != "safari_click_experiment" else { throw TaskServiceCapabilityError.unavailable }
         if preliminary.name == "safari_read" {
             guard enableSafariRead, await safariCoordinator.preview(preliminary) != nil else { throw TaskServiceCapabilityError.unavailable }
         }

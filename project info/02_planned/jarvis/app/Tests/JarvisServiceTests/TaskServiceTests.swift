@@ -1219,3 +1219,21 @@ extension TaskServiceTests {
         }
     }
 }
+
+extension TaskServiceTests {
+    func testUnregisteredExperimentalClickCannotBeSubmittedOrApprovedAfterRestart() async throws {
+        let fixture = try Fixture()
+        let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: UnsafeAllowSafariPolicy(), requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
+        let task = try await service.createTask(title: "click")
+        let request = ToolRequest(taskID: task.id, name: "safari_click_experiment", sideEffect: .localWrite, target: "redacted", payload: UUID().uuidString)
+        await XCTAssertThrowsErrorAsync(try await service.submit(request: request))
+        XCTAssertNil(try fixture.requests.fetch(id: request.id))
+        try service.transition(taskID: task.id, to: .planning)
+        try service.transition(taskID: task.id, to: .running)
+        try SQLitePersistenceUnitOfWork(database: fixture.database).submitRequest(request, status: .pending, taskStatus: .awaitingApproval, audits: [])
+        let restarted = try fixture.makeService()
+        await XCTAssertThrowsErrorAsync(try await restarted.approve(requestID: request.id, digest: request.payloadDigest))
+        XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .pending)
+        XCTAssertTrue(try fixture.approvals.list().isEmpty)
+    }
+}
