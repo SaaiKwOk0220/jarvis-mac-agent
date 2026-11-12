@@ -12,6 +12,11 @@ import JarvisLLM
 final class ScriptedTaskService: TaskServiceAPI, @unchecked Sendable {
     private let lock = NSLock()
     private var recordedRequests: [ToolRequest] = []
+    private var exactEnabled = false
+    private var alternateExactReads = false
+    func setAlternatingExactReads() { lock.withLock { alternateExactReads = true; exactEnabled = false } }
+    func isExactBrowserEnabled() -> Bool { lock.withLock { if alternateExactReads { exactEnabled.toggle() }; return exactEnabled } }
+    func setExactBrowserEnabled(_ enabled: Bool) throws { lock.withLock { exactEnabled = enabled } }
     private var scriptedDecision: PolicyDecision
     private var scriptedTimeline: [TimelineEvent]
 
@@ -70,6 +75,28 @@ private func shellCall() -> LLMToolCall {
 }
 
 final class TaskServiceToolRunnerTests: XCTestCase {
+    func testBrowserToolUsesOnePermissionSnapshotPerCatalog() throws {
+        let service = ScriptedTaskService()
+        service.setAlternatingExactReads()
+        let runner = TaskServiceToolRunner(service: service, taskID: UUID())
+        let tool = try XCTUnwrap(runner.tools().first { $0.name == "browser_open" })
+        XCTAssertTrue(tool.description.contains("full address"))
+        XCTAssertTrue(try XCTUnwrap(tool.parameters["url"]).description.contains("path or query"))
+    }
+
+    func testBrowserToolDescriptionTracksLivePermission() throws {
+        let service = ScriptedTaskService()
+        let runner = TaskServiceToolRunner(service: service, taskID: UUID())
+        let before = try XCTUnwrap(runner.tools().first { $0.name == "browser_open" })
+        XCTAssertTrue(before.description.contains("origin"))
+        try service.setExactBrowserEnabled(true)
+        let enabled = try XCTUnwrap(runner.tools().first { $0.name == "browser_open" })
+        XCTAssertTrue(enabled.description.contains("full address"))
+        try service.setExactBrowserEnabled(false)
+        let disabled = try XCTUnwrap(runner.tools().first { $0.name == "browser_open" })
+        XCTAssertTrue(disabled.description.contains("origin"))
+    }
+
 
     /// The catalog advertised to the model is exactly Jarvis's four workers,
     /// so the LLM can only plan against capabilities the policy gate knows.

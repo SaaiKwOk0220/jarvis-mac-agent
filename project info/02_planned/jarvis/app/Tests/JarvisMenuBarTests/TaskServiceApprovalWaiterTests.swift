@@ -43,11 +43,13 @@ private extension NSLock {
 
 /// Builds a timeline event for one terminal outcome so each test only spells
 /// out the bits it actually cares about.
+private let waiterTestRequestID = UUID()
 private func terminalEvent(
     actionDigest: String,
     summary: String,
     result: String,
-    timestamp: Date = Date()
+    timestamp: Date = Date(),
+    requestID: UUID? = waiterTestRequestID
 ) -> TimelineEvent {
     TimelineEvent(
         id: UUID(),
@@ -58,7 +60,7 @@ private func terminalEvent(
         actionDigest: actionDigest,
         summary: summary,
         result: result,
-        approvalID: UUID()
+        approvalID: UUID(), requestID: requestID
     )
 }
 
@@ -79,7 +81,7 @@ final class TaskServiceApprovalWaiterTests: XCTestCase {
         )
 
         let resolution = try await waiter.waitForResolution(
-            requestID: UUID(),
+            requestID: waiterTestRequestID,
             payloadDigest: payloadDigest,
             taskID: UUID()
         )
@@ -102,7 +104,7 @@ final class TaskServiceApprovalWaiterTests: XCTestCase {
         )
 
         let resolution = try await waiter.waitForResolution(
-            requestID: UUID(),
+            requestID: waiterTestRequestID,
             payloadDigest: payloadDigest,
             taskID: UUID()
         )
@@ -125,7 +127,7 @@ final class TaskServiceApprovalWaiterTests: XCTestCase {
         )
 
         let resolution = try await waiter.waitForResolution(
-            requestID: UUID(),
+            requestID: waiterTestRequestID,
             payloadDigest: payloadDigest,
             taskID: UUID()
         )
@@ -146,12 +148,25 @@ final class TaskServiceApprovalWaiterTests: XCTestCase {
         )
 
         let resolution = try await waiter.waitForResolution(
-            requestID: UUID(),
+            requestID: waiterTestRequestID,
             payloadDigest: "digest-missing",
             taskID: UUID()
         )
 
         XCTAssertEqual(resolution, .timedOut)
         XCTAssertGreaterThanOrEqual(service.listCalls, 1, "poller must consult the timeline at least once")
+    }
+}
+
+extension TaskServiceApprovalWaiterTests {
+    func testUnknownBrowserOutcomeStopsSessionInsteadOfTreatingAsCancellation() async throws {
+        let requestID = UUID(), digest = "digest"
+        let service = StaticTimelineService(timeline: [
+            terminalEvent(actionDigest: "", summary: "task cancelled", result: "cancelled", requestID: nil),
+            terminalEvent(actionDigest: digest, summary: "browser open outcome unknown", result: "Check browser; do not retry automatically.", requestID: requestID)
+        ])
+        let waiter = TaskServiceApprovalWaiter(service: service, pollInterval: 0.01, timeout: 1)
+        let resolution = try await waiter.waitForResolution(requestID: requestID, payloadDigest: digest, taskID: UUID())
+        XCTAssertEqual(resolution, .failed(reason: "Check browser; do not retry automatically."))
     }
 }

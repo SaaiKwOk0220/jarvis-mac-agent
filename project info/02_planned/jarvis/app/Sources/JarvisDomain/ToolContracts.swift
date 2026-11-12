@@ -146,6 +146,15 @@ public protocol TaskServiceAPI: Sendable {
     func complete(taskID: UUID) async throws
     func listPendingApprovalRequests(taskID: UUID) async throws -> [PendingApprovalRequest]
     func listTimelineEvents(taskID: UUID) async throws -> [TimelineEvent]
+    func isExactBrowserEnabled() -> Bool
+    func setExactBrowserEnabled(_ enabled: Bool) throws
+}
+
+public enum TaskServiceCapabilityError: Error { case unavailable }
+
+public extension TaskServiceAPI {
+    func isExactBrowserEnabled() -> Bool { false }
+    func setExactBrowserEnabled(_ enabled: Bool) throws { throw TaskServiceCapabilityError.unavailable }
 }
 
 /// Outcome returned by `TaskServiceAPI.submit(request:)`. Declared in
@@ -182,11 +191,12 @@ public struct TimelineEvent: Codable, Equatable, Sendable, Identifiable {
     public let summary: String
     public let result: String
     public let approvalID: UUID?
+    public let requestID: UUID?
 
     public init(id: UUID, timestamp: Date, worker: String, target: String, sideEffect: SideEffect,
-                actionDigest: String, summary: String, result: String, approvalID: UUID?) {
+                actionDigest: String, summary: String, result: String, approvalID: UUID?, requestID: UUID? = nil) {
         self.id = id; self.timestamp = timestamp; self.worker = worker; self.target = target
         self.sideEffect = sideEffect; self.actionDigest = actionDigest; self.summary = summary
-        self.result = result; self.approvalID = approvalID
+        self.result = result; self.approvalID = approvalID; self.requestID = requestID
     }
 }

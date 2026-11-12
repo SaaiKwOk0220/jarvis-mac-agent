@@ -1,9 +1,18 @@
 import Foundation
+import CoreFoundation
 
 enum ExactBrowserExperiment {
     static let bundleID = "local.jarvis.browser-experiment"
     static func enabled(experimentalBuild: Bool, bundleID: String?, marker: Bool, optIn: String?) -> Bool {
         experimentalBuild && bundleID == Self.bundleID && marker && optIn == "1"
+    }
+    static var toggleAllowed: Bool {
+        #if JARVIS_EXACT_BROWSER_EXPERIMENT
+        guard let marker = Bundle.main.object(forInfoDictionaryKey: "JarvisBrowserExperiment") else { return false }
+        return Bundle.main.bundleIdentifier == bundleID && CFGetTypeID(marker as CFTypeRef) == CFBooleanGetTypeID() && (marker as? Bool == true)
+        #else
+        return false
+        #endif
     }
     static var current: Bool {
         #if JARVIS_EXACT_BROWSER_EXPERIMENT

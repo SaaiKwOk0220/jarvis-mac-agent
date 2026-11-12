@@ -2,7 +2,7 @@ name: swift-test
 
 on:
   pull_request:
-    branches: [main, feat/voice-conversation, feat/controlled-browser-open, feat/browser-exact-url]
+    branches: [main, feat/voice-conversation, feat/controlled-browser-open, feat/browser-exact-url, feat/exact-browser-experiment]
   push:
     branches: [main]
 
@@ -37,3 +37,7 @@ jobs:
 
       - name: Run swift test
         run: swift test --package-path 'project info/02_planned/jarvis/app'
+
+      - name: Run exact browser experiment tests
+        if: github.event_name == 'pull_request' && github.base_ref == 'feat/exact-browser-experiment' && github.head_ref == 'feat/exact-browser-toggle-port'
+        run: swift test --package-path 'project info/02_planned/jarvis/app' --scratch-path /tmp/jarvis-exact-browser-ci -Xswiftc -DJARVIS_EXACT_BROWSER_EXPERIMENT
