@@ -47,11 +47,12 @@ public struct BrowserOpenExecutor: ToolExecutor, Sendable {
               let url = BrowserOpenURL.validatedExact(request.target) else { throw BrowserOpenError.invalidRequest }
         try Task.checkCancellation()
         guard let exactOpener else { throw BrowserOpenError.unavailable }
+        let attempt = gate.pendingOpen(generation: generation)
         let opened = try await MainActor.run {
-            try gate.withCurrentGeneration(generation) {
-                guard !Task.isCancelled else { throw CancellationError() }
-                return exactOpener(url)
-            }
+            // Closing after the pending → started transition cannot revoke this
+            // open. AppKit runs outside the lock and may block or re-enter.
+            try gate.beginOpen(attempt)
+            return exactOpener(url)
         }
         guard opened else { throw BrowserOpenError.openFailed }
         return ToolResult(summary: "Browser open requested")

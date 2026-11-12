@@ -2891,3 +2891,31 @@ extension TaskServiceTests {
     }
     #endif
 }
+
+extension TaskServiceTests {
+    func testExactBrowserCloseDoesNotWaitForStartedOpener() async throws {
+        let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0), closed = DispatchSemaphore(value: 0)
+        let gate = ExactBrowserSessionGate()
+        gate.setEnabled(true)
+        let generation = try XCTUnwrap(gate.capture())
+        let executor = BrowserOpenExecutor(opener: { _ in false }, exactOpener: { _ in
+            entered.signal()
+            _ = release.wait(timeout: .now() + 5)
+            return true
+        })
+        let request = ToolRequest(taskID: UUID(), name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private", payload: "Open in browser")
+        let operation = Task.detached { try await executor.executeApprovedExact(request, gate: gate, generation: generation) }
+        let enteredWait = await withCheckedContinuation { continuation in
+            DispatchQueue.global().async { continuation.resume(returning: entered.wait(timeout: .now() + 2) == .success) }
+        }
+        XCTAssertTrue(enteredWait)
+        DispatchQueue.global().async { gate.setEnabled(false); closed.signal() }
+        let closeWait = await withCheckedContinuation { continuation in
+            DispatchQueue.global().async { continuation.resume(returning: closed.wait(timeout: .now() + 1) == .success) }
+        }
+        release.signal()
+        XCTAssertTrue(closeWait)
+        _ = try await operation.value
+        await XCTAssertThrowsErrorAsync(try await executor.executeApprovedExact(request, gate: gate, generation: generation))
+    }
+}
