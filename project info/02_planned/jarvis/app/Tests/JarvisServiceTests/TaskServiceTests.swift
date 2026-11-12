@@ -1884,6 +1884,127 @@ extension TaskServiceTests {
         await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: second.id, digest: second.payloadDigest))
         XCTAssertEqual(counter.value, 0)
     }
+    func testExperimentalClickTargetSelectionNeedsApprovalAndUsesExactInputs() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "select")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a?token=private", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        try fixture.service.enableExperimentalClickModeForTesting(allowed: true) { _, _ in counter.increment(); return .success }
+        fixture.service.installExperimentalClickTargetSelectorForTesting { role, title in
+            guard role == identity.role, title == identity.title else { throw TaskServiceCapabilityError.unavailable }
+            return (identity, SafariClickCapture { [candidate] })
+        }
+        let request = try await fixture.service.submitExperimentalSafariClick(taskID: task.id, role: "AXButton", title: "Open")
+        XCTAssertEqual(counter.value, 0)
+        let previews = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        XCTAssertEqual(previews.first?.target, identity.url)
+        try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest)
+        XCTAssertEqual(counter.value, 1)
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
+        XCTAssertEqual(counter.value, 1)
+    }
+    func testExperimentalClickTargetSelectionRejectsMissingOrAmbiguous() async throws {
+        for candidateCount in [0, 2] {
+            let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+            let task = try await fixture.service.createTask(title: "select")
+            let ref = AXUIElementCreateSystemWide()
+            let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+            let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+            try fixture.service.enableExperimentalClickModeForTesting(allowed: true) { _, _ in counter.increment(); return .success }
+            fixture.service.installExperimentalClickTargetSelectorForTesting { _, _ in (identity, SafariClickCapture { Array(repeating: candidate, count: candidateCount) }) }
+            await XCTAssertThrowsErrorAsync(try await fixture.service.submitExperimentalSafariClick(taskID: task.id, role: "AXButton", title: "Open"))
+            XCTAssertTrue(try fixture.requests.list(status: .pending).isEmpty)
+            XCTAssertEqual(counter.value, 0)
+        }
+    }
+    func testExperimentalClickRoutesRequireModeAndPersistedApproval() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "route")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        fixture.service.installExperimentalClickTargetSelectorForTesting { _, _ in (identity, SafariClickCapture { [candidate] }) }
+        let server = LoopbackServer(service: fixture.service)
+        let body = try JSONEncoder().encode(["role": "AXButton", "title": "Open"])
+        let path = "/tasks/\(task.id.uuidString)/safari-click"
+        let disabled = await server.handle(method: "POST", path: path, body: body, peerHost: "127.0.0.1")
+        XCTAssertNotEqual(disabled.status, 201)
+        try fixture.service.enableExperimentalClickModeForTesting(allowed: true) { _, _ in counter.increment(); return .success }
+        let submitted = await server.handle(method: "POST", path: path, body: body, peerHost: "127.0.0.1")
+        XCTAssertEqual(submitted.status, 201)
+        let request = try JSONDecoder().decode(ToolRequest.self, from: submitted.body)
+        XCTAssertEqual(counter.value, 0)
+        let approvalBody = try JSONEncoder().encode(["digest": request.payloadDigest])
+        let approved = await server.handle(method: "POST", path: "/requests/\(request.id.uuidString)/safari-click-approve", body: approvalBody, peerHost: "127.0.0.1")
+        XCTAssertEqual(approved.status, 204)
+        XCTAssertEqual(counter.value, 1)
+        let replay = await server.handle(method: "POST", path: "/requests/\(request.id.uuidString)/safari-click-approve", body: approvalBody, peerHost: "127.0.0.1")
+        XCTAssertNotEqual(replay.status, 204)
+        XCTAssertEqual(counter.value, 1)
+        let secondResponse = await server.handle(method: "POST", path: path, body: body, peerHost: "127.0.0.1")
+        let second = try JSONDecoder().decode(ToolRequest.self, from: secondResponse.body)
+        let cleanup = fixture.service.disableExperimentalClickMode()
+        _ = try await cleanup.value
+        let secondBody = try JSONEncoder().encode(["digest": second.payloadDigest])
+        let blocked = await server.handle(method: "POST", path: "/requests/\(second.id.uuidString)/safari-click-approve", body: secondBody, peerHost: "127.0.0.1")
+        XCTAssertNotEqual(blocked.status, 204)
+        XCTAssertEqual(counter.value, 1)
+    }
+    func testExperimentalClickApprovalWaitsForSafariFocusBeforePress() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "focus")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let provider = ExperimentalClickFocusFixture(candidate)
+        try fixture.service.enableExperimentalClickModeForTesting(allowed: true) { _, _ in counter.increment(); return .success }
+        fixture.service.installExperimentalClickTargetSelectorForTesting { _, _ in (identity, SafariClickCapture { try await provider.next() }) }
+        let request = try await fixture.service.submitExperimentalSafariClick(taskID: task.id, role: "AXButton", title: "Open")
+        try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest)
+        XCTAssertEqual(counter.value, 1)
+    }
+    func testExperimentalClickRouteReportsUnknownWithoutTargetLeak() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "route failure")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a?token=secret", role: "AXButton", title: "private title", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        fixture.service.installExperimentalClickTargetSelectorForTesting { _, _ in (identity, SafariClickCapture { [candidate] }) }
+        try fixture.service.enableExperimentalClickModeForTesting(allowed: true) { _, _ in counter.increment(); return .failure }
+        let server = LoopbackServer(service: fixture.service)
+        let body = try JSONEncoder().encode(["role": "AXButton", "title": "private title"])
+        let submitted = await server.handle(method: "POST", path: "/tasks/\(task.id.uuidString)/safari-click", body: body, peerHost: "127.0.0.1")
+        let request = try JSONDecoder().decode(ToolRequest.self, from: submitted.body)
+        let approvalBody = try JSONEncoder().encode(["digest": request.payloadDigest])
+        let response = await server.handle(method: "POST", path: "/requests/\(request.id.uuidString)/safari-click-approve", body: approvalBody, peerHost: "127.0.0.1")
+        XCTAssertEqual(response.status, 409)
+        let text = String(decoding: response.body, as: UTF8.self)
+        XCTAssertTrue(text.contains("结果未知"))
+        XCTAssertFalse(text.contains("secret"))
+        XCTAssertFalse(text.contains("private title"))
+        XCTAssertEqual(counter.value, 1)
+    }
+    func testExperimentalClickDisabledModeDoesNotInvokeSelectorDuringCleanup() async throws {
+        let fixture = try Fixture(), selections = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "selector disabled")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "cleanup waiting"), gate = ExperimentalClickVerificationGate(entered: entered, blockAt: 1)
+        try fixture.service.enableExperimentalClickModeForTesting(allowed: true) { _, _ in .success }
+        fixture.service.installExperimentalClickTargetSelectorForTesting { _, _ in
+            selections.increment()
+            return (identity, SafariClickCapture(beforeClear: { await gate.visit() }) { [candidate] })
+        }
+        _ = try await fixture.service.submitExperimentalSafariClick(taskID: task.id, role: "AXButton", title: "Open")
+        let cleanup = fixture.service.disableExperimentalClickMode()
+        await fulfillment(of: [entered], timeout: 2)
+        await XCTAssertThrowsErrorAsync(try await fixture.service.submitExperimentalSafariClick(taskID: task.id, role: "AXButton", title: "Open"))
+        XCTAssertEqual(selections.value, 1)
+        await gate.release()
+        _ = try await cleanup.value
+    }
     func testExperimentalSystemPressRunsOnlyAfterDurableApprovalAndOnce() async throws {
         let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
         let task = try await fixture.service.createTask(title: "system press test")
@@ -1989,6 +2110,30 @@ private final class ExperimentalAuthorizationCheckPause: @unchecked Sendable {
         lock.lock(); let shouldWait = armed; armed = false; lock.unlock()
         if shouldWait { entered.fulfill(); _ = release.wait(timeout: .now() + 5) }
         return true
+    }
+}
+private actor ExperimentalClickFocusFixture {
+    let candidate: SafariClickCandidate
+    var calls = 0
+    init(_ candidate: SafariClickCandidate) { self.candidate = candidate }
+    func next() throws -> [SafariClickCandidate] {
+        calls += 1
+        if calls == 2 || calls == 3 { throw SafariAXReadError.notFocused }
+        return [candidate]
+    }
+}
+#endif
+
+#if !JARVIS_SAFARI_CLICK_EXPERIMENT || !JARVIS_SAFARI_EXPERIMENT_BUILD
+extension TaskServiceTests {
+    func testExperimentalClickRoutesAreAbsentInDefaultBuild() async throws {
+        let fixture = try Fixture(), task = try await fixture.service.createTask(title: "default")
+        let server = LoopbackServer(service: fixture.service)
+        let body = try JSONEncoder().encode(["role": "AXButton", "title": "Open"])
+        let response = await server.handle(method: "POST", path: "/tasks/\(task.id.uuidString)/safari-click", body: body, peerHost: "127.0.0.1")
+        XCTAssertEqual(response.status, 404)
+        let approval = await server.handle(method: "POST", path: "/requests/\(UUID().uuidString)/safari-click-approve", body: Data(), peerHost: "127.0.0.1")
+        XCTAssertEqual(approval.status, 404)
     }
 }
 #endif

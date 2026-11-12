@@ -282,6 +282,36 @@ public final class ServiceClient: ObservableObject {
         }
     }
 
+    var experimentalClickApprovalAvailable: Bool {
+        if experimentalClickApprovalForTesting != nil { return true }
+        #if JARVIS_SAFARI_CLICK_EXPERIMENT && JARVIS_SAFARI_EXPERIMENT_BUILD
+        guard Bundle.main.bundleIdentifier == "local.jarvis.safari-click-experiment",
+              let marker = Bundle.main.object(forInfoDictionaryKey: "JarvisSafariClickExperiment") as? NSNumber,
+              CFGetTypeID(marker) == CFBooleanGetTypeID(), marker.boolValue else { return false }
+        return true
+        #else
+        return false
+        #endif
+    }
+    #if JARVIS_SAFARI_CLICK_EXPERIMENT && JARVIS_SAFARI_EXPERIMENT_BUILD
+    func submitExperimentalSafariClick(taskID: UUID, role: String, title: String) async throws -> ToolRequest {
+        guard experimentalClickApprovalAvailable else { throw ServiceClientError.unavailable }
+        var request = URLRequest(url: baseURL.appendingPathComponent("tasks/\(taskID.uuidString)/safari-click"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(["role": role, "title": title])
+        do {
+            let (data, response) = try await send(request)
+            try Self.validate(response: response, data: data)
+            let result = try Self.decoder.decode(ToolRequest.self, from: data)
+            _ = try? await refresh()
+            _ = try? await loadApprovalRequests(taskID: taskID)
+            return result
+        } catch let error as ServiceClientError { actionError = error.localizedDescription; throw error }
+        catch { actionError = ServiceClientError.unavailable.localizedDescription; throw ServiceClientError.unavailable }
+    }
+    #endif
+
     public func approve(_ request: ApprovalRequest) async throws {
         if request.kind == "safari_click_experiment" {
             let unknownMessage = "操作结果可能未知，请先检查页面，切勿自动重试。"
@@ -289,7 +319,7 @@ public final class ServiceClient: ObservableObject {
             if !experimentalApprovalCapacityAvailable { actionError = "未知结果记录已达上限，请先核实此前操作；当前会话暂停新的实验审批。"; throw ServiceClientError.unavailable }
             var handlerInvoked = false
             do {
-                guard isApprovalFresh(request), !request.digest.isEmpty, let handler = experimentalClickApprovalForTesting else { throw ServiceClientError.unavailable }
+                guard isApprovalFresh(request), !request.digest.isEmpty, experimentalClickApprovalAvailable else { throw ServiceClientError.unavailable }
                 if let refresh = experimentalClickRefreshForTesting {
                     let generation = beginApprovalRefresh(taskID: request.taskID)
                     let requests = try await refresh(request.taskID)
@@ -304,7 +334,16 @@ public final class ServiceClient: ObservableObject {
                 defer { endApprovalMutation(taskID: request.taskID) }
                 try Task.checkCancellation()
                 handlerInvoked = true
-                try await handler(request)
+                if let handler = experimentalClickApprovalForTesting {
+                    try await handler(request)
+                } else {
+                    #if JARVIS_SAFARI_CLICK_EXPERIMENT && JARVIS_SAFARI_EXPERIMENT_BUILD
+                    try await mutate(path: "/requests/\(request.id.uuidString)/safari-click-approve", body: ["digest": request.digest])
+                    _ = try await loadApprovalRequests(taskID: request.taskID)
+                    #else
+                    throw ServiceClientError.unavailable
+                    #endif
+                }
                 try Task.checkCancellation()
                 actionError = nil
                 return

@@ -27,7 +27,7 @@ struct ApprovalView: View {
                         VStack(alignment: .leading, spacing: 6) {
                             if isExperimentalClick(request) {
                                 Text(request.reason).font(.caption).fixedSize(horizontal: false, vertical: true)
-                                Text("完整网址与目标（可滚动查看；可能包含敏感参数）")
+                                Text("完整网址与目标（可滚动查看；可能包含敏感参数）。批准后请在 15 秒内切回原 Safari 窗口。")
                                     .font(.caption).foregroundStyle(.secondary)
                                 ScrollView([.horizontal, .vertical]) {
                                     VStack(alignment: .leading, spacing: 8) {
@@ -77,7 +77,7 @@ struct ApprovalView: View {
                             Button("Approve") {
                                 submit(.approve, request: request)
                             }
-                            .disabled(submittingRequestID != nil || !ApprovalPresentation(request: request, clickHandlerAvailable: client.experimentalClickApprovalForTesting != nil && client.isApprovalFresh(request)).canApprove || (isSafariRead(request) && !request.target.hasPrefix("https://")))
+                            .disabled(submittingRequestID != nil || !ApprovalPresentation(request: request, clickHandlerAvailable: client.experimentalClickApprovalAvailable && client.isApprovalFresh(request)).canApprove || (isSafariRead(request) && !request.target.hasPrefix("https://")))
                         }
                     }
                 }

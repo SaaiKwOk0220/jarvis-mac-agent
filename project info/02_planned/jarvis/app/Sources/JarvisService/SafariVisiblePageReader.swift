@@ -287,6 +287,11 @@ enum SafariClickCandidateProvider {
                       AXUIElementCopyAttributeValue(node, kAXEnabledAttribute as CFString, &rawEnabled) == .success,
                       let enabled = rawEnabled as? Bool else { throw SafariAXReadError.unavailable }
                 match = title == expected.title && enabled
+                if match {
+                    var actions: CFArray?
+                    guard AXUIElementCopyActionNames(node, &actions) == .success,
+                          let names = actions as? [String], names.contains(kAXPressAction as String) else { throw SafariAXReadError.unavailable }
+                }
             }
             var rawChildren: CFTypeRef?
             let status = AXUIElementCopyAttributeValue(node, kAXChildrenAttribute as CFString, &rawChildren)
@@ -309,4 +314,39 @@ enum SafariClickCandidateProvider {
         return results
     }
 }
+#if JARVIS_SAFARI_CLICK_EXPERIMENT && JARVIS_SAFARI_EXPERIMENT_BUILD
+/// User supplies only role/title. All window identity and URL data are observed
+/// from foreground Safari and revalidated around every candidate traversal.
+enum SafariClickTargetSelection {
+    static func select(role: String, title: String, authorization: @escaping @Sendable () -> Bool) async throws -> (SafariClickIdentity, SafariClickCapture) {
+        guard !role.isEmpty, role.utf8.count <= 128, !title.isEmpty, title.utf8.count <= 512 else { throw SafariAXReadError.unavailable }
+        let page = SafariAXTargetCapture()
+        let deadline = ContinuousClock.now.advanced(by: .seconds(15))
+        let target: SafariCapturedTarget
+        while true {
+            try Task.checkCancellation()
+            guard authorization() else { throw SafariAXReadError.permissionDenied }
+            do { target = try await page.capture(); break }
+            catch SafariAXReadError.notFocused {
+                guard ContinuousClock.now < deadline else { throw SafariAXReadError.focusTimedOut }
+                try await Task.sleep(for: .milliseconds(250))
+            }
+        }
+        guard authorization(), target.url.utf8.count <= 2048 else { throw SafariAXReadError.unavailable }
+        let identity = SafariClickIdentity(pid: target.processID, window: target.windowIdentity.uuidString,
+            url: target.url, role: role, title: title, enabled: true, requestDigest: "")
+        let capture = SafariClickCapture {
+            guard authorization() else { throw SafariAXReadError.permissionDenied }
+            try await page.verify(target)
+            guard authorization() else { throw SafariAXReadError.permissionDenied }
+            let candidates = try await SafariClickCandidateProvider.candidates(expected: identity)
+            guard authorization() else { throw SafariAXReadError.permissionDenied }
+            try await page.verify(target)
+            guard authorization() else { throw SafariAXReadError.permissionDenied }
+            return candidates
+        }
+        return (identity, capture)
+    }
+}
+#endif
 #endif

@@ -59,6 +59,10 @@ struct JarvisMenuBarApp: App {
             } else { Text("实验服务不可用") }
         }
         .defaultSize(width: 560, height: 320)
+        Window("请求 Safari 点击", id: "safari-click-request") {
+            SafariClickRequestView(client: client).frame(minWidth: 500, minHeight: 300)
+        }
+        .defaultSize(width: 560, height: 360)
         #endif
         Window("Welcome to Jarvis", id: "welcome") {
             WelcomeView()

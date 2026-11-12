@@ -38,6 +38,11 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     #if JARVIS_SAFARI_CLICK_EXPERIMENT
     private var systemClickAuthorization: ExperimentalSystemAuthorizationState?
     private var clickModeTransition = false
+    #if JARVIS_SAFARI_EXPERIMENT_BUILD
+    private var clickTargetSelector: @Sendable (String, String, @escaping @Sendable () -> Bool) async throws -> (SafariClickIdentity, SafariClickCapture) = { role, title, authorization in
+        try await SafariClickTargetSelection.select(role: role, title: title, authorization: authorization)
+    }
+    #endif
     #if JARVIS_SAFARI_CLICK_TESTING
     private var clickBeforeCommit: @Sendable () async -> Void = {}
     #endif
@@ -344,6 +349,18 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
         }
     }
     #if JARVIS_SAFARI_CLICK_TESTING
+    #if JARVIS_SAFARI_EXPERIMENT_BUILD
+    func installExperimentalClickTargetSelectorForTesting(_ selector: @escaping @Sendable (String, String) async throws -> (SafariClickIdentity, SafariClickCapture)) {
+        lock.withLock {
+            clickTargetSelector = { role, title, authorization in
+                guard authorization() else { throw TaskServiceCapabilityError.unavailable }
+                let result = try await selector(role, title)
+                guard authorization() else { throw TaskServiceCapabilityError.unavailable }
+                return result
+            }
+        }
+    }
+    #endif
     func enableExperimentalClickModeForTesting(allowed: Bool, beforeCommit: @escaping @Sendable () async -> Void = {}, _ action: @escaping @Sendable (AXUIElement, CFString) -> AXError) throws {
         guard allowed else { throw TaskServiceCapabilityError.unavailable }
         try beginClickModeEnable()
@@ -370,8 +387,23 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
         lock.withLock { if clickExperiment == nil { clickExperiment = ExperimentalClickCoordinator(lifetime: lifetime, clock: clock, action: action); clickAfterSubmit = afterSubmit } }
     }
 
+    #if JARVIS_SAFARI_CLICK_EXPERIMENT && JARVIS_SAFARI_EXPERIMENT_BUILD
+    /// Explicit user-selected role and title; PID, URL and window are captured internally.
+    public func submitExperimentalSafariClick(taskID: UUID, role: String, title: String) async throws -> ToolRequest {
+        guard !role.isEmpty, role.utf8.count <= 128, !title.isEmpty, title.utf8.count <= 512 else { throw TaskServiceCapabilityError.unavailable }
+        let state = lock.withLock { (clickExperiment, clickTargetSelector, systemClickAuthorization, !clickModeTransition) }
+        guard let click = state.0, let authorization = state.2, state.3, authorization.isAllowed() else { throw TaskServiceCapabilityError.unavailable }
+        let (identity, capture) = try await state.1(role, title, { authorization.isAllowed() })
+        guard authorization.isAllowed(), identity.role == role, identity.title == title, identity.enabled else { throw TaskServiceCapabilityError.unavailable }
+        return try await submitExperimentalClick(taskID: taskID, identity: identity, capture: capture, coordinator: click)
+    }
+    #endif
     func submitExperimentalClick(taskID: UUID, identity: SafariClickIdentity, capture: SafariClickCapture) async throws -> ToolRequest {
         guard let click = lock.withLock({ clickExperiment }) else { throw TaskServiceCapabilityError.unavailable }
+        return try await submitExperimentalClick(taskID: taskID, identity: identity, capture: capture, coordinator: click)
+    }
+    private func submitExperimentalClick(taskID: UUID, identity: SafariClickIdentity, capture: SafariClickCapture, coordinator click: ExperimentalClickCoordinator) async throws -> ToolRequest {
+        guard lock.withLock({ clickExperiment === click }) else { throw TaskServiceCapabilityError.unavailable }
         try lock.withLock { try ensureRunning(taskID) }
         let request = try await click.prepare(taskID: taskID, identity: identity, capture: capture)
         #if JARVIS_SAFARI_CLICK_EXPERIMENT && JARVIS_SAFARI_CLICK_TESTING
@@ -736,6 +768,16 @@ private actor ExperimentalClickCoordinator {
               inFlight.insert(request.id).inserted else { throw TaskServiceCapabilityError.unavailable }
         defer { inFlight.remove(request.id) }
         guard let transfer = await staged.consume(token: e.token, taskID: e.taskID, requestID: request.id, digest: e.digest, targetDigest: e.targetDigest) else { throw TaskServiceCapabilityError.unavailable }
+        let focusDeadline = ContinuousClock.now.advanced(by: .seconds(15))
+        while true {
+            try Task.checkCancellation()
+            guard authorization() else { throw TaskServiceCapabilityError.unavailable }
+            do { try await transfer.verify(expected: e.identity); break }
+            catch SafariAXReadError.notFocused {
+                guard ContinuousClock.now < focusDeadline else { throw SafariAXReadError.focusTimedOut }
+                try await Task.sleep(for: .milliseconds(250))
+            }
+        }
         try await transfer.perform(expected: e.identity, beforeAction: beforeStart, authorizeStart: authorizeStart, action: action)
     }
     @discardableResult func cancel(requestID: UUID) async -> SafariClickCancellationResult {
