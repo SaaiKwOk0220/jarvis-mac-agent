@@ -76,7 +76,17 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
         var output: [PendingApprovalRequest] = []
         for (request, reason) in pending {
             if request.name == "safari_click_experiment" {
-                output.append(PendingApprovalRequest(id: request.id, taskID: request.taskID, reason: reason, target: "实验点击", payload: "此实验请求无法在当前界面审批，请拒绝此请求后重新发起。", digest: request.payloadDigest))
+                #if os(macOS)
+                let preview = await lock.withLock({ clickExperiment })?.preview(request)
+                #else
+                let preview: (origin: String, role: String, title: String, enabled: Bool)? = nil
+                #endif
+                if let preview {
+                    let payload = "元素类型：\(preview.role)\n元素标题：\(preview.title)\n状态：\(preview.enabled ? "已启用" : "未启用")\n风险：点击可能改变网页或触发操作；执行前会再次检查目标。"
+                    output.append(PendingApprovalRequest(id: request.id, taskID: request.taskID, reason: reason, target: preview.origin, payload: payload, digest: request.payloadDigest))
+                } else {
+                    output.append(PendingApprovalRequest(id: request.id, taskID: request.taskID, reason: reason, target: "实验点击", payload: "此实验请求的目标已失效或不可用，请拒绝此请求后重新发起。", digest: request.payloadDigest))
+                }
             } else if request.name == "safari_read" {
                 let exactURL = await safariCoordinator.preview(request) ?? "Capture expired; reject and try again."
                 output.append(PendingApprovalRequest(id: request.id, taskID: request.taskID, reason: reason, target: exactURL, payload: "Read accessibility text from this captured Safari window", digest: request.payloadDigest))
@@ -529,6 +539,25 @@ private actor ExperimentalClickCoordinator {
             guard let remaining else { await cancel(requestID: requestID); return }
             do { try await Task.sleep(for: .seconds(remaining)) } catch { await cancel(requestID: requestID); return }
         }
+    }
+    func preview(_ request: ToolRequest) async -> (origin: String, role: String, title: String, enabled: Bool)? {
+        guard let entry = entries[request.id], entry.taskID == request.taskID,
+              entry.digest == request.payloadDigest, request.payload == entry.token.uuidString,
+              !inFlight.contains(request.id) else { return nil }
+        let remaining = await staged.remaining(token: entry.token)
+        guard remaining != nil, !Task.isCancelled, let current = entries[request.id],
+              current.token == entry.token, current.digest == request.payloadDigest,
+              current.taskID == request.taskID, !inFlight.contains(request.id) else { return nil }
+        guard let parts = URLComponents(string: entry.identity.url),
+              let scheme = parts.scheme?.lowercased(), ["http", "https"].contains(scheme),
+              let host = parts.host, !host.isEmpty else { return nil }
+        var origin = URLComponents()
+        origin.scheme = scheme; origin.host = host; origin.port = parts.port
+        guard let originString = origin.string else { return nil }
+        func display(_ value: String) -> String {
+            value.unicodeScalars.map { CharacterSet.controlCharacters.contains($0) ? " " : String($0) }.joined()
+        }
+        return (originString, display(entry.identity.role), display(entry.identity.title), entry.identity.enabled)
     }
     func contains(_ request: ToolRequest) -> Bool {
         guard let e = entries[request.id] else { return false }
