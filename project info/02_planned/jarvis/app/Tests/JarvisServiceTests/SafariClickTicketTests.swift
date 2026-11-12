@@ -254,7 +254,7 @@ extension SafariClickTicketTests {
         let token = try await coordinator.prepare(requestID: id, identity: identity)
         let approval = Task { try await coordinator.approve(token: token, requestID: id, digest: "digest") }
         await fulfillment(of: [entered], timeout: 2)
-        do { try await approval.value; XCTFail("must time out") } catch { }
+        do { try await approval.value; XCTFail("must time out") } catch SafariPressTimeout.timeoutBeforeStart { }
         _ = try await coordinator.prepare(requestID: UUID(), identity: identity)
         blocking.release.signal()
         try await Task.sleep(for: .milliseconds(100))
@@ -291,7 +291,7 @@ extension SafariClickTicketTests {
         let token = try await coordinator.prepare(requestID: id, identity: identity)
         let approval = Task { try await coordinator.approve(token: token, requestID: id, digest: "digest") }
         await fulfillment(of: [entered], timeout: 2)
-        do { try await approval.value; XCTFail("blocked action must time out") } catch { }
+        do { try await approval.value; XCTFail("blocked action must time out") } catch SafariPressTimeout.actionOutcomeUnknown { }
         let next = try await coordinator.prepare(requestID: UUID(), identity: identity)
         do { try await coordinator.approve(token: next, requestID: UUID(), digest: "digest"); XCTFail("mismatched request") } catch { }
         let nextID = UUID()
