@@ -1556,6 +1556,29 @@ extension TaskServiceTests {
             XCTAssertNil(data.range(of: Data("JARVIS_TITLE_PRIVATE_9234".utf8)))
         }
     }
+    func testExperimentalClickDoublePersistenceFailureCannotReplayAfterServiceRestart() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("jarvis-click-restart-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = directory.appendingPathComponent("test.sqlite").path
+        let fixture = try Fixture(path: path), action = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "click")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "target", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        await fixture.service.installExperimentalClickForTesting(action: { _, _ in action.increment(); return .success })
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        try fixture.database.write { db in try db.execute(sql: "CREATE TRIGGER reject_finish BEFORE UPDATE ON tool_requests WHEN NEW.status IN ('completed', 'failed') BEGIN SELECT RAISE(ABORT, 'test'); END") }
+        do { try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest); XCTFail("write failure") }
+        catch SafariPressFailure.actionOutcomeUnknown { }
+        catch { XCTFail("expected unknown: \(error)") }
+        XCTAssertEqual(action.value, 1)
+        let restarted = try Fixture(path: path)
+        await restarted.service.installExperimentalClickForTesting(action: { _, _ in action.increment(); return .success })
+        await XCTAssertThrowsErrorAsync(try await restarted.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
+        XCTAssertEqual(action.value, 1)
+        XCTAssertEqual(try restarted.requests.fetch(id: request.id)?.1, .executing)
+    }
     func testExperimentalClickWrongDigestRevokesTicket() async throws {
         let (fixture, _, request, action) = try await experimentalFixture()
         await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: "wrong"))

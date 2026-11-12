@@ -93,6 +93,13 @@ public final class ServiceClient: ObservableObject {
     private var approvalGeneration: [UUID: UInt64] = [:]
     @Published private var approvalMutationCount: [UUID: Int] = [:]
     @Published private var failedExperimentalApprovals: Set<UUID> = []
+    @Published private var inFlightExperimentalApprovals: Set<UUID> = []
+    var experimentalApprovalCapacityForTesting: Int = 128
+    private var experimentalApprovalCapacity: Int { min(max(experimentalApprovalCapacityForTesting, 0), 128) }
+    private var experimentalApprovalCapacityAvailable: Bool {
+        failedExperimentalApprovals.count + inFlightExperimentalApprovals.count < experimentalApprovalCapacity
+    }
+    var experimentalClickCapacityReached: Bool { !experimentalApprovalCapacityAvailable }
     private var baseURL: URL
     private var authorizationToken: String?
     private let session: URLSession
@@ -244,7 +251,8 @@ public final class ServiceClient: ObservableObject {
         beginApprovalRefresh(taskID: taskID)
     }
     func isApprovalFresh(_ request: ApprovalRequest) -> Bool {
-        guard let now = approvalTime(), !failedExperimentalApprovals.contains(request.id), approvalMutationCount[request.taskID, default: 0] == 0, let freshness = approvalFreshness[request.id], freshness.taskID == request.taskID,
+        guard let now = approvalTime(), experimentalApprovalCapacityAvailable,
+              !failedExperimentalApprovals.contains(request.id), !inFlightExperimentalApprovals.contains(request.id), approvalMutationCount[request.taskID, default: 0] == 0, let freshness = approvalFreshness[request.id], freshness.taskID == request.taskID,
               freshness.digest == request.digest, now < freshness.deadline, approvalGeneration[request.taskID] == freshness.generation,
               approvalRequests[request.id] == request, request.previewAvailable == true else { return false }
         return true
@@ -278,6 +286,7 @@ public final class ServiceClient: ObservableObject {
         if request.kind == "safari_click_experiment" {
             let unknownMessage = "操作结果可能未知，请先检查页面，切勿自动重试。"
             if failedExperimentalApprovals.contains(request.id) { actionError = unknownMessage; throw ServiceClientError.unavailable }
+            if !experimentalApprovalCapacityAvailable { actionError = "未知结果记录已达上限，请先核实此前操作；当前会话暂停新的实验审批。"; throw ServiceClientError.unavailable }
             var handlerInvoked = false
             do {
                 guard isApprovalFresh(request), !request.digest.isEmpty, let handler = experimentalClickApprovalForTesting else { throw ServiceClientError.unavailable }
@@ -288,7 +297,9 @@ public final class ServiceClient: ObservableObject {
                     commitApprovalRefresh(requests, taskID: request.taskID, generation: generation)
                 } else { _ = try await loadApprovalRequests(taskID: request.taskID) }
                 try Task.checkCancellation()
-                guard isApprovalFresh(request) else { throw ServiceClientError.unavailable }
+                guard isApprovalFresh(request), experimentalApprovalCapacityAvailable else { throw ServiceClientError.unavailable }
+                inFlightExperimentalApprovals.insert(request.id)
+                defer { inFlightExperimentalApprovals.remove(request.id) }
                 beginApprovalMutation(taskID: request.taskID)
                 defer { endApprovalMutation(taskID: request.taskID) }
                 try Task.checkCancellation()

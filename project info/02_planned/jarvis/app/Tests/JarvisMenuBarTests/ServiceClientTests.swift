@@ -825,6 +825,45 @@ extension ServiceClientTests {
         do { try await client.approve(request); XCTFail("repeat accepted") } catch { }
         XCTAssertEqual(calls, 1)
     }
+    func testExperimentalApprovalUnknownCapacityFailsClosedWithoutEviction() async throws {
+        let client = ServiceClient(), taskID = UUID()
+        client.experimentalApprovalCapacityForTesting = 2
+        var calls = 0
+        client.experimentalClickApprovalForTesting = { _ in calls += 1; throw ServiceClientError.unavailable }
+        for _ in 0..<2 {
+            let request = ApprovalRequest(id: UUID(), taskID: taskID, reason: "test", target: "https://example.com/a", payload: "target", digest: "digest", kind: "safari_click_experiment", previewAvailable: true)
+            client.applyApprovalRequests([request], taskID: taskID)
+            client.experimentalClickRefreshForTesting = { _ in [request] }
+            do { try await client.approve(request); XCTFail("failure expected") } catch { }
+            client.applyApprovalRequests([request], taskID: taskID)
+            XCTAssertFalse(client.isApprovalFresh(request))
+        }
+        let third = ApprovalRequest(id: UUID(), taskID: taskID, reason: "test", target: "https://example.com/b", payload: "target", digest: "digest", kind: "safari_click_experiment", previewAvailable: true)
+        client.applyApprovalRequests([third], taskID: taskID)
+        client.experimentalClickRefreshForTesting = { _ in [third] }
+        XCTAssertFalse(client.isApprovalFresh(third))
+        do { try await client.approve(third); XCTFail("capacity exceeded") } catch { }
+        XCTAssertEqual(calls, 2)
+    }
+    func testExperimentalApprovalCapacityReservesInFlightSlot() async throws {
+        let client = ServiceClient(), taskA = UUID(), taskB = UUID()
+        client.experimentalApprovalCapacityForTesting = 1
+        let first = ApprovalRequest(id: UUID(), taskID: taskA, reason: "test", target: "https://example.com/a", payload: "target", digest: "a", kind: "safari_click_experiment", previewAvailable: true)
+        let second = ApprovalRequest(id: UUID(), taskID: taskB, reason: "test", target: "https://example.com/b", payload: "target", digest: "b", kind: "safari_click_experiment", previewAvailable: true)
+        client.applyApprovalRequests([first], taskID: taskA)
+        client.applyApprovalRequests([second], taskID: taskB)
+        client.experimentalClickRefreshForTesting = { id in id == taskA ? [first] : [second] }
+        let entered = expectation(description: "first started"), pause = ApprovalRefreshPause(entered: entered)
+        var calls = 0
+        client.experimentalClickApprovalForTesting = { _ in calls += 1; await pause.wait() }
+        let firstTask = Task { try await client.approve(first) }
+        await fulfillment(of: [entered], timeout: 2)
+        XCTAssertFalse(client.isApprovalFresh(second))
+        do { try await client.approve(second); XCTFail("capacity exceeded") } catch { }
+        XCTAssertEqual(calls, 1)
+        pause.release()
+        try await firstTask.value
+    }
     func testExperimentalApprovalUsesOnlyInjectedFakeHandler() async throws {
         let client = ServiceClient()
         let request = ApprovalRequest(id: UUID(), taskID: UUID(), reason: "test", target: "https://example.com", payload: "target", digest: "digest", kind: "safari_click_experiment", previewAvailable: true)

@@ -63,6 +63,10 @@ struct ApprovalView: View {
                                 .font(.caption).foregroundStyle(.secondary)
                         }.frame(maxWidth: .infinity, alignment: .leading)
                     }
+                    if isExperimentalClick(request) && client.experimentalClickCapacityReached {
+                        Text("未知结果记录已达上限，请先核实此前操作；当前会话暂停新的实验审批。")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
                     HStack {
                         Button("Reject", role: .destructive) {
                             submit(.reject, request: request)
