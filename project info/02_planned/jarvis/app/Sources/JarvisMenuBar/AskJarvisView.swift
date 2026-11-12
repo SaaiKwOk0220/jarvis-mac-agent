@@ -152,7 +152,7 @@ struct AskJarvisView: View {
     @State private var activeSubmittedGoal: String?
     @State private var isVisible = false
     @State private var voiceWillAutoSubmit = false
-    @State private var followLatest = false
+    @State private var followLatest = true
     @State private var showVoiceDiagnostics = false
     @State private var modelDiagnostic: OllamaDiagnostic?
     @State private var checkingModel = false
