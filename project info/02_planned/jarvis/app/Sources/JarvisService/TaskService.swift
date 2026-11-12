@@ -15,7 +15,8 @@ public protocol DemoTaskServiceAPI: TaskServiceAPI {
 
 public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     // Remains disabled until the approval, cancellation and executor paths are verified end-to-end.
-    private let exactBrowserEnabled: Bool
+    private let exactBrowserAllowed: Bool
+    private let exactBrowserGate = ExactBrowserSessionGate()
     private let tasks: any TaskRepository
     private let audits: any AuditRepository
     private let requests: any ToolRequestRepository
@@ -34,7 +35,7 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     private let lock = NSLock()
     private var executions: [UUID: Task<Void, Error>] = [:]
 
-    public init(taskRepository: any TaskRepository, auditRepository: any AuditRepository, policy: any PolicyEvaluator, policyConfig: PolicyConfig = .init(), executor: any ToolExecutor = NoOpToolExecutor(), terminal: TerminalToolExecutor? = nil, webFetch: WebFetchToolExecutor? = nil, screenshot: ScreenshotToolExecutor? = nil, accessibility: AccessibilityQueryToolExecutor? = nil, browserOpen: BrowserOpenExecutor? = nil, requestRepository: (any ToolRequestRepository)? = nil, approvalRepository: (any ApprovalRepository)? = nil, unitOfWork: (any PersistenceUnitOfWork)? = nil, exactBrowserEnabled: Bool = false, browserTicketLifetime: TimeInterval = 300) throws {
+    public init(taskRepository: any TaskRepository, auditRepository: any AuditRepository, policy: any PolicyEvaluator, policyConfig: PolicyConfig = .init(), executor: any ToolExecutor = NoOpToolExecutor(), terminal: TerminalToolExecutor? = nil, webFetch: WebFetchToolExecutor? = nil, screenshot: ScreenshotToolExecutor? = nil, accessibility: AccessibilityQueryToolExecutor? = nil, browserOpen: BrowserOpenExecutor? = nil, requestRepository: (any ToolRequestRepository)? = nil, approvalRepository: (any ApprovalRepository)? = nil, unitOfWork: (any PersistenceUnitOfWork)? = nil, exactBrowserEnabled: Bool = false, browserTicketLifetime: TimeInterval = 300, allowExactBrowserToggle: Bool = false) throws {
         guard let sqliteTasks = taskRepository as? SQLiteTaskRepository,
               let sqliteAudits = auditRepository as? SQLiteAuditRepository,
               sqliteTasks.database === sqliteAudits.database else { throw TaskServiceError.incompatiblePersistence }
@@ -51,7 +52,13 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
             guard let sqlite = unitOfWork as? SQLitePersistenceUnitOfWork, sqlite.database === database else { throw TaskServiceError.incompatiblePersistence }
             self.uow = sqlite
         } else { self.uow = SQLitePersistenceUnitOfWork(database: database) }
-        self.exactBrowserEnabled = exactBrowserEnabled; self.browserTickets = BrowserURLTicketStore(lifetime: browserTicketLifetime)
+        self.browserTickets = BrowserURLTicketStore(lifetime: browserTicketLifetime)
+        #if JARVIS_EXACT_BROWSER_EXPERIMENT || JARVIS_COMBINED_EXPERIMENT
+        self.exactBrowserAllowed = exactBrowserEnabled || allowExactBrowserToggle
+        self.exactBrowserGate.setEnabled(exactBrowserEnabled)
+        #else
+        self.exactBrowserAllowed = false
+        #endif
         self.tasks = taskRepository; self.audits = auditRepository; self.policy = policy; self.config = policyConfig; self.executor = executor; self.terminal = terminal; self.webFetch = webFetch; self.screenshot = screenshot; self.accessibility = accessibility; self.browserOpen = browserOpen
     }
 
@@ -69,8 +76,10 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
                 })?.result) ?? "Approval requested by policy"
                 let redactedPayload = redactSecrets(request.payload)
                 let target: String
-                if let ticket = BrowserURLTicketStore.Ticket(payload: request.payload), request.name == "browser_open" {
-                    target = browserTickets.peekBound(ticket, taskID: request.taskID, requestID: request.id) ?? "[目标已失效，请拒绝此请求后重新请求]"
+                if request.name == "browser_open", let ticket = BrowserURLTicketStore.Ticket(payload: request.payload) {
+                    if let generation = exactBrowserGate.capture() {
+                        target = (try? exactBrowserGate.withCurrentGeneration(generation) { browserTickets.peekBound(ticket, taskID: request.taskID, requestID: request.id) }) ?? "[目标已失效，请拒绝此请求后重新请求]"
+                    } else { target = "[目标已失效，请拒绝此请求后重新请求]" }
                 } else { target = request.target }
                 return PendingApprovalRequest(id: request.id, taskID: request.taskID, reason: reason,
                     target: target, payload: redactedPayload == request.payload ? redactedPayload : "[REDACTED]", digest: request.payloadDigest)
@@ -90,6 +99,12 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
         }
     }
 
+    public func isExactBrowserEnabled() -> Bool { exactBrowserGate.capture() != nil }
+    public func setExactBrowserEnabled(_ enabled: Bool) throws {
+        guard !enabled || exactBrowserAllowed else { throw TaskServiceCapabilityError.unavailable }
+        exactBrowserGate.setEnabled(enabled) { if !enabled { browserTickets.revokeAll() } }
+    }
+
     public func submitDemoApproval(taskID: UUID) async throws {
         guard let directory = config.approvedDirectories.first else { throw TaskServiceError.incompatiblePersistence }
         let target = URL(fileURLWithPath: directory).appendingPathComponent("Jarvis demo draft.txt").path
@@ -100,13 +115,23 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
 
     public func submit(request: ToolRequest) async throws -> PolicyDecision {
         try lock.withLock { try ensureRunning(request.taskID) }
-        if exactBrowserEnabled, request.name == "browser_open", BrowserOpenURL.validated(request.target) == nil,
-           BrowserOpenURL.validatedExact(request.target) != nil,
-           request.sideEffect == .externalSend, request.payload == "Open in browser", request.scope == nil {
+        if request.name == "browser_open", BrowserOpenURL.validated(request.target) == nil,
+           BrowserOpenURL.validatedExact(request.target) != nil {
+            guard let exactGeneration = exactBrowserGate.capture() else {
+                let reason = "invalid browser destination"
+                try lock.withLock {
+                    try requireRunning(request.taskID)
+                    let task = try requiredTask(request.taskID)
+                    try uow.transition(taskID: task.id, from: task.status, to: .blocked, audits: [event(request, summary: "tool request received", result: "received"), event(request, summary: "policy denied", result: reason)])
+                }
+                return .deny(reason: reason)
+            }
+            guard request.sideEffect == .externalSend, request.payload == "Open in browser", request.scope == nil else { throw BrowserURLTicketError.invalidRequest }
             guard let policy = policy as? Policy,
                   case .requireApproval(let reason) = policy.evaluateExactBrowserDestination(request) else {
                 throw BrowserURLTicketError.invalidRequest
             }
+            return try exactBrowserGate.withCurrentGeneration(exactGeneration) {
             let ticket = browserTickets.issue(url: request.target)
             do {
                 let stored = try browserTickets.persistableRequest(request, ticket: ticket)
@@ -117,6 +142,7 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
                 }
                 return .requireApproval(reason: reason)
             } catch { browserTickets.revoke(id: ticket.id); throw error }
+            }
         }
         let decision = policy.evaluate(request, config: config)
         switch decision {
@@ -142,7 +168,13 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     }
 
     public func approve(requestID: UUID, digest: String) async throws {
-        let pair = try lock.withLock { () throws -> (ToolRequest, ToolRequest?) in
+        let preliminary = try lock.withLock { () throws -> ToolRequest in
+            guard let (request, status) = try requests.fetch(id: requestID), status == .pending else { throw TaskServiceError.requestNotAwaitingApproval }
+            return request
+        }
+        let exactGeneration = BrowserURLTicketStore.Ticket(payload: preliminary.payload) != nil && preliminary.name == "browser_open" ? exactBrowserGate.capture() : nil
+        if preliminary.name == "browser_open", BrowserURLTicketStore.Ticket(payload: preliminary.payload) != nil, exactGeneration == nil { throw TaskServiceCapabilityError.unavailable }
+        let commitApproval = { [self] in try lock.withLock { () throws -> (ToolRequest, ToolRequest?) in
             guard let (request, status) = try requests.fetch(id: requestID), status == .pending else { throw TaskServiceError.requestNotAwaitingApproval }
             guard validateApproval(request: request, approvalDigest: digest) else { try audits.append(event(request, summary: "approval rejected", result: "digest mismatch")); throw TaskServiceError.approvalDigestMismatch }
             var transient: ToolRequest?
@@ -155,8 +187,9 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
             let taskStatus = try aggregateStatus(forTask: request.taskID, excluding: request.id, fallback: .running)
             try uow.approveRequest(request, approval: approval, taskStatus: taskStatus, audits: [event(request, summary: "approval accepted", result: "approved", approvalID: approval.id)])
             return (request, transient)
-        }
-        startExecution(pair.0, executionRequest: pair.1)
+        } }
+        let pair = try exactGeneration.map { try exactBrowserGate.withCurrentGeneration($0, commitApproval) } ?? commitApproval()
+        startExecution(pair.0, executionRequest: pair.1, exactGeneration: exactGeneration)
     }
 
     public func reject(requestID: UUID) async throws {
@@ -209,13 +242,13 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
         }
     }
 
-    private func startExecution(_ request: ToolRequest, executionRequest: ToolRequest? = nil) {
+    private func startExecution(_ request: ToolRequest, executionRequest: ToolRequest? = nil, exactGeneration: UInt64? = nil) {
         let gate = ExecutionGate()
         let job: Task<Void, Error> = Task { [weak self] in
             await gate.wait()
             defer { self?.removeExecution(request.id) }
             guard let self else { return }
-            try await self.execute(request, executionRequest: executionRequest)
+            try await self.execute(request, executionRequest: executionRequest, exactGeneration: exactGeneration)
         }
         lock.withLock { executions[request.id] = job }
         gate.open()
@@ -250,7 +283,7 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     /// failure + nothing else outstanding → `.failed`.
     // The stored request is authoritative for status and audit.  A separate
     // transient request may be supplied to the executor after approval.
-    private func execute(_ request: ToolRequest, executionRequest: ToolRequest? = nil) async throws {
+    private func execute(_ request: ToolRequest, executionRequest: ToolRequest? = nil, exactGeneration: UInt64? = nil) async throws {
         do {
             if let executionRequest {
                 guard executionRequest.id == request.id,
@@ -273,7 +306,8 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
             let result: ToolResult
             if let executionRequest, let browserOpen, request.name == "browser_open",
                BrowserURLTicketStore.Ticket(payload: request.payload) != nil {
-                result = try await browserOpen.executeApprovedExact(executionRequest)
+                guard let exactGeneration else { throw BrowserOpenError.unavailable }
+                result = try await browserOpen.executeApprovedExact(executionRequest, gate: exactBrowserGate, generation: exactGeneration)
             } else {
                 result = try await picked.execute(executionRequest ?? request)
             }

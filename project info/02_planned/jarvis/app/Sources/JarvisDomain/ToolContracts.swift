@@ -146,6 +146,15 @@ public protocol TaskServiceAPI: Sendable {
     func complete(taskID: UUID) async throws
     func listPendingApprovalRequests(taskID: UUID) async throws -> [PendingApprovalRequest]
     func listTimelineEvents(taskID: UUID) async throws -> [TimelineEvent]
+    func isExactBrowserEnabled() -> Bool
+    func setExactBrowserEnabled(_ enabled: Bool) throws
+}
+
+public enum TaskServiceCapabilityError: Error { case unavailable }
+
+public extension TaskServiceAPI {
+    func isExactBrowserEnabled() -> Bool { false }
+    func setExactBrowserEnabled(_ enabled: Bool) throws { throw TaskServiceCapabilityError.unavailable }
 }
 
 /// Outcome returned by `TaskServiceAPI.submit(request:)`. Declared in
