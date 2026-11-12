@@ -99,8 +99,8 @@ fileprivate final class SafariClickRevocationGate: @unchecked Sendable {
         let current = state.load(ordering: .acquiring)
         return current == 2 || current == 4 ? .alreadyStarted : .idle
     }
-    func run(_ action: () -> AXError) -> AXError {
-        guard state.compareExchange(expected: 1, desired: 2, ordering: .acquiringAndReleasing).exchanged else { return .failure }
+    func run(authorizeStart: (@Sendable () -> Bool) -> Bool = { $0() }, _ action: () -> AXError) -> AXError {
+        guard authorizeStart({ self.state.compareExchange(expected: 1, desired: 2, ordering: .acquiringAndReleasing).exchanged }) else { return .failure }
         defer { _ = state.compareExchange(expected: 2, desired: 4, ordering: .acquiringAndReleasing) }
         return action()
     }
@@ -127,6 +127,7 @@ actor SafariClickTransferredCapture {
     /// Experimental action path; only explicitly injected test actions are used.
     func perform(expected: SafariClickIdentity, timeout: TimeInterval = 3,
                  beforeAction: @escaping @Sendable () -> Void = {},
+                 authorizeStart: @escaping @Sendable (@Sendable () -> Bool) -> Bool = { $0() },
                  action: @escaping @Sendable (AXUIElement, CFString) -> AXError) async throws {
         let gate = self.gate, clock = bindings.clock, deadline = self.deadline
         do {
@@ -138,7 +139,7 @@ actor SafariClickTransferredCapture {
                 onTimeout: { gate.revoke() == .alreadyStarted ? .actionOutcomeUnknown : .timeoutBeforeStart },
                 onActionFailure: { gate.hasStarted() ? .actionOutcomeUnknown : .beforeStartRejected },
                 beforeAction: beforeAction) { element, operation in
-                    gate.run {
+                    gate.run(authorizeStart: authorizeStart) {
                         let now = clock()
                         guard now.isFinite, now >= baseline, now < deadline else { return .failure }
                         return action(element, operation)

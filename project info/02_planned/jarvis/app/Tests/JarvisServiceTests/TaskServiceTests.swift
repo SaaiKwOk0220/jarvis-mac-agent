@@ -1724,6 +1724,43 @@ extension TaskServiceTests {
         block.release.signal()
         _ = try? await approval.value
     }
+    func testExperimentalSystemPressRevocationBeforeAtomicStartCannotBeRevived() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter(), flags = ExperimentalSystemAuthorization()
+        let task = try await fixture.service.createTask(title: "atomic start")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "before atomic start"), block = ExperimentalClickBlockingAction(entered)
+        await fixture.service.installExperimentalSystemClickForTesting(authorization: { flags.allowed }, beforeStart: { block.run() }) { _, _ in counter.increment(); return .success }
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let attempt = Task { try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest) }
+        await fulfillment(of: [entered], timeout: 2)
+        flags.revoke(permission: false)
+        let started = try await fixture.service.experimentalSystemClickAuthorizationRevokedForTesting()
+        XCTAssertFalse(started)
+        flags.restore()
+        block.release.signal()
+        do { try await attempt.value; XCTFail("revoked action succeeded") } catch { }
+        XCTAssertEqual(counter.value, 0)
+    }
+    func testExperimentalSystemPressRevocationBetweenCheckAndCASNeverStarts() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "check then start")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "authorization check waiting")
+        let gate = ExperimentalAuthorizationCheckPause(entered)
+        await fixture.service.installExperimentalSystemClickForTesting(authorization: { gate.check() }, beforeStart: { gate.arm() }) { _, _ in counter.increment(); return .success }
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let attempt = Task { try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest) }
+        await fulfillment(of: [entered], timeout: 2)
+        let started = try await fixture.service.experimentalSystemClickAuthorizationRevokedForTesting()
+        XCTAssertFalse(started)
+        gate.release.signal()
+        do { try await attempt.value; XCTFail("revoked action succeeded") } catch { }
+        XCTAssertEqual(counter.value, 0)
+    }
     func testExperimentalSystemPressRunsOnlyAfterDurableApprovalAndOnce() async throws {
         let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
         let task = try await fixture.service.createTask(title: "system press test")
@@ -1817,5 +1854,18 @@ private final class ExperimentalSystemAuthorization: @unchecked Sendable {
     var allowed: Bool { lock.lock(); defer { lock.unlock() }; return optedIn && permission }
     func revoke(permission: Bool) { lock.lock(); defer { lock.unlock() }; if permission { self.permission = false } else { optedIn = false } }
     func restore() { lock.lock(); defer { lock.unlock() }; optedIn = true; permission = true }
+}
+private final class ExperimentalAuthorizationCheckPause: @unchecked Sendable {
+    private let lock = NSLock()
+    private var armed = false
+    let entered: XCTestExpectation
+    let release = DispatchSemaphore(value: 0)
+    init(_ entered: XCTestExpectation) { self.entered = entered }
+    func arm() { lock.lock(); defer { lock.unlock() }; armed = true }
+    func check() -> Bool {
+        lock.lock(); let shouldWait = armed; armed = false; lock.unlock()
+        if shouldWait { entered.fulfill(); _ = release.wait(timeout: .now() + 5) }
+        return true
+    }
 }
 #endif
