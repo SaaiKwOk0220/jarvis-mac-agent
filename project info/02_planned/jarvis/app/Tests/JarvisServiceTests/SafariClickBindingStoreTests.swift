@@ -74,6 +74,14 @@ final class SafariClickBindingStoreTests: XCTestCase {
 
 #if os(macOS)
 import ApplicationServices
+private actor EarlyWakeSleeper {
+    var calls = 0
+    func sleep(_ duration: Duration) async throws {
+        calls += 1
+        if calls == 1 { return }
+        try await Task.sleep(for: duration)
+    }
+}
 private actor BindingGate {
     let entered: XCTestExpectation
     var continuation: CheckedContinuation<Void, Never>?
@@ -82,6 +90,24 @@ private actor BindingGate {
     func release() { continuation?.resume(); continuation = nil }
 }
 extension SafariClickBindingStoreTests {
+    func testAutomaticExpiryUsesTicketDeadlineAfterEarlyWake() async throws {
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let ref = AXUIElementCreateSystemWide()
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        for lifetime in [0.1, 0.25] {
+            let sleeper = EarlyWakeSleeper()
+            let staged = SafariClickStagedCaptures(bindings: SafariClickBindingStore(lifetime: lifetime), sleep: { try await sleeper.sleep($0) })
+            let capture = SafariClickCapture { [candidate] }
+            let token = try await staged.stage(taskID: UUID(), identity: identity, targetDigest: "target", capture: capture)
+            XCTAssertNotNil(token)
+            try await Task.sleep(for: .milliseconds(30))
+            try await capture.verify(expected: identity)
+            try await Task.sleep(for: .seconds(lifetime + 0.1))
+            do { try await capture.verify(expected: identity); XCTFail("expired capture retained") } catch { }
+            let calls = await sleeper.calls
+            XCTAssertGreaterThanOrEqual(calls, 2)
+        }
+    }
     func testExpiredCapturesAreReleasedRepeatedly() async throws {
         let clock = BindingClock(), task = UUID()
         let bindings = SafariClickBindingStore(lifetime: 5, clock: { clock.read() })
