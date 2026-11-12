@@ -1808,7 +1808,8 @@ extension TaskServiceTests {
         let fixture = try Fixture(), flags = ExperimentalSystemAuthorization()
         await fixture.service.installExperimentalSystemClickForTesting(authorization: { flags.allowed }) { _, _ in .success }
         flags.revoke(permission: true)
-        XCTAssertTrue(fixture.service.isExperimentalClickModeEnabled)
+        XCTAssertFalse(fixture.service.isExperimentalClickModeEnabled)
+        XCTAssertTrue(fixture.service.isExperimentalClickCleanupRequired)
         let cleanup = fixture.service.disableExperimentalClickMode()
         _ = try await cleanup.value
         XCTAssertFalse(fixture.service.isExperimentalClickModeEnabled)
@@ -1848,6 +1849,40 @@ extension TaskServiceTests {
         XCTAssertTrue(try fixture.audit.events(for: actualTask.id).contains { $0.result == "action outcome unknown; do not retry automatically" })
         block.release.signal()
         _ = try? await approval.value
+    }
+    func testExperimentalClickModePermissionLossCannotRevivePendingTicket() async throws {
+        let fixture = try Fixture(), flags = ExperimentalSystemAuthorization(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "permission revoked")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        await fixture.service.installExperimentalSystemClickForTesting(authorization: { flags.allowed }) { _, _ in counter.increment(); return .success }
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        flags.revoke(permission: true)
+        XCTAssertFalse(fixture.service.isExperimentalClickModeEnabled)
+        XCTAssertTrue(fixture.service.isExperimentalClickCleanupRequired)
+        flags.restore()
+        XCTAssertFalse(fixture.service.isExperimentalClickModeEnabled)
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
+        let cleanup = fixture.service.disableExperimentalClickMode()
+        _ = try await cleanup.value
+        XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .rejected)
+        XCTAssertEqual(counter.value, 0)
+    }
+    func testExperimentalClickModeObservedPermissionLossInvalidatesOtherPending() async throws {
+        let fixture = try Fixture(), flags = ExperimentalSystemAuthorization(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "permission revoked")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        await fixture.service.installExperimentalSystemClickForTesting(authorization: { flags.allowed }) { _, _ in counter.increment(); return .success }
+        let first = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let second = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        flags.revoke(permission: true)
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: first.id, digest: first.payloadDigest))
+        flags.restore()
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: second.id, digest: second.payloadDigest))
+        XCTAssertEqual(counter.value, 0)
     }
     func testExperimentalSystemPressRunsOnlyAfterDurableApprovalAndOnce() async throws {
         let fixture = try Fixture(), counter = ExperimentalClickActionCounter()

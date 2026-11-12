@@ -19,17 +19,7 @@ struct SafariClickModeView: View {
             Text(message).foregroundStyle(.secondary)
             Button(cleanupRequired ? "重试清理" : (enabled ? "关闭实验模式" : "开启实验模式")) {
                 if enabled || cleanupRequired {
-                    // This call synchronously revokes before starting asynchronous cleanup.
-                    let cleanup = service.disableExperimentalClickMode()
-                    enabled = false; busy = true
-                    Task {
-                        do {
-                            let started = try await cleanup.value
-                            cleanupRequired = false
-                            message = started ? "已关闭；已有动作可能已开始，结果未知，请先检查页面。" : "实验模式已关闭。"
-                        } catch { cleanupRequired = true; message = "已撤销授权，但清理未完成，请重试清理并检查实验记录。" }
-                        busy = false
-                    }
+                    beginCleanup(permissionLost: false)
                 } else {
                     do { try service.enableExperimentalClickMode(); enabled = true; message = "实验模式已开启。" }
                     catch { enabled = false; message = "无法开启：请检查实验应用身份和辅助功能权限。" }
@@ -38,9 +28,42 @@ struct SafariClickModeView: View {
             Spacer()
         }
         .padding(24)
-        .onAppear {
-            enabled = service.isExperimentalClickModeEnabled
-            cleanupRequired = service.isExperimentalClickCleanupRequired
+        .onAppear { refreshStatus() }
+        .task {
+            while !Task.isCancelled {
+                refreshStatus()
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    private func refreshStatus() {
+        guard !busy else { return }
+        let current = service.isExperimentalClickModeEnabled
+        let needsCleanup = service.isExperimentalClickCleanupRequired
+        let newlyLost = needsCleanup && !cleanupRequired
+        enabled = current
+        cleanupRequired = needsCleanup
+        if newlyLost { beginCleanup(permissionLost: true) }
+    }
+
+    private func beginCleanup(permissionLost: Bool) {
+        // Revocation happens synchronously, before the asynchronous cleanup starts.
+        let cleanup = service.disableExperimentalClickMode()
+        enabled = false
+        busy = true
+        message = permissionLost ? "辅助功能权限失效，正在撤销并清理实验请求。" : "正在关闭实验模式。"
+        Task {
+            do {
+                let started = try await cleanup.value
+                cleanupRequired = false
+                if started { message = "授权已撤销；已有动作可能已开始，结果未知，请先检查页面。" }
+                else { message = permissionLost ? "辅助功能权限失效，实验模式已关闭。" : "实验模式已关闭。" }
+            } catch {
+                cleanupRequired = true
+                message = "已撤销授权，但清理未完成，请重试清理并检查实验记录。"
+            }
+            busy = false
         }
     }
 }

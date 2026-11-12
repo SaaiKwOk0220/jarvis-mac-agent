@@ -306,11 +306,17 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
             clickModeTransition = true
         }
     }
+    /// Querying status also permanently revokes this generation if a live check fails.
+    private func refreshClickAuthorizationLocked() -> ExperimentalSystemAuthorizationState? {
+        guard let state = systemClickAuthorization else { return nil }
+        if !state.isAllowed() { state.revoke() }
+        return state
+    }
     public var isExperimentalClickModeEnabled: Bool {
-        lock.withLock { !clickModeTransition && !(systemClickAuthorization?.isRevoked ?? true) }
+        lock.withLock { !clickModeTransition && !(refreshClickAuthorizationLocked()?.isRevoked ?? true) }
     }
     public var isExperimentalClickCleanupRequired: Bool {
-        lock.withLock { !clickModeTransition && (systemClickAuthorization?.isRevoked ?? false) }
+        lock.withLock { !clickModeTransition && (refreshClickAuthorizationLocked()?.isRevoked ?? false) }
     }
     /// Revocation is synchronous with the switch action; database cleanup is awaited separately.
     public func disableExperimentalClickMode() -> Task<Bool, Error> {
@@ -781,11 +787,12 @@ private final class ExperimentalSystemAuthorizationState: @unchecked Sendable {
     var isRevoked: Bool { lock.withLock { revoked } }
     func revoke() { lock.withLock { revoked = true } }
     func beginIfAllowed(_ start: @Sendable () -> Bool) -> Bool {
-        guard liveCheck() else { return false }
+        guard liveCheck() else { revoke(); return false }
         return lock.withLock { !revoked && start() }
     }
     func isAllowed() -> Bool {
-        guard lock.withLock({ !revoked }), liveCheck() else { return false }
+        guard lock.withLock({ !revoked }) else { return false }
+        guard liveCheck() else { revoke(); return false }
         return lock.withLock { !revoked }
     }
 }
