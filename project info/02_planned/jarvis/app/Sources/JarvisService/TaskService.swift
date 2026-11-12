@@ -35,6 +35,9 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     private let ephemeralResults = EphemeralToolResultStore()
     #if os(macOS)
     private var clickExperiment: ExperimentalClickCoordinator?
+    #if JARVIS_SAFARI_CLICK_EXPERIMENT
+    private var systemClickAuthorization: ExperimentalSystemAuthorizationState?
+    #endif
     private var clickAfterSubmit: @Sendable () async -> Void = {}
     #endif
     private let lock = NSLock()
@@ -238,27 +241,58 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
         return false
         #endif
     }
-    private func installExperimentalSystemClick(optedIn: Bool, systemAction: @escaping @Sendable (AXUIElement, CFString) -> AXError = { element, operation in
+    private func installExperimentalSystemClick(optedIn: @escaping @Sendable () -> Bool, systemAction: @escaping @Sendable (AXUIElement, CFString) -> AXError = { element, operation in
         AXUIElementPerformAction(element, operation)
     }) {
-        guard Self.experimentalSystemClickGate(bundleID: Bundle.main.bundleIdentifier,
-            marker: Bundle.main.object(forInfoDictionaryKey: "JarvisSafariClickExperiment"),
-            optedIn: optedIn, trusted: AXIsProcessTrusted()) else { return }
-        installExperimentalSystemClickCore(systemAction: systemAction)
+        let authorization: @Sendable () -> Bool = {
+            Self.experimentalSystemClickGate(bundleID: Bundle.main.bundleIdentifier,
+                marker: Bundle.main.object(forInfoDictionaryKey: "JarvisSafariClickExperiment"),
+                optedIn: optedIn(), trusted: AXIsProcessTrusted())
+        }
+        guard authorization() else { return }
+        installExperimentalSystemClickCore(authorization: authorization, systemAction: systemAction)
     }
-    private func installExperimentalSystemClickCore(systemAction: @escaping @Sendable (AXUIElement, CFString) -> AXError) {
+    private func installExperimentalSystemClickCore(authorization: @escaping @Sendable () -> Bool,
+        beforeSystemCheck: @escaping @Sendable () -> Void = {}, systemAction: @escaping @Sendable (AXUIElement, CFString) -> AXError) {
         lock.withLock {
             guard clickExperiment == nil else { return }
-            clickExperiment = ExperimentalClickCoordinator(lifetime: 60, clock: { ProcessInfo.processInfo.systemUptime }) { element, operation in
+            let state = ExperimentalSystemAuthorizationState(liveCheck: authorization)
+            systemClickAuthorization = state
+            clickExperiment = ExperimentalClickCoordinator(lifetime: 60, clock: { ProcessInfo.processInfo.systemUptime }, authorization: { state.isAllowed() }) { element, operation in
                 guard CFEqual(operation, kAXPressAction as CFString) else { return .failure }
+                beforeSystemCheck()
+                guard state.isAllowed() else { return .failure }
                 return systemAction(element, kAXPressAction as CFString)
             }
         }
     }
+    /// A future opt-in/permission observer must invoke this on every revocation.
+    /// Synchronously prevents later action starts before crossing any actor boundary.
+    private func revokeExperimentalSystemClickAuthorization() async throws -> Bool {
+        let pair = lock.withLock { () -> (ExperimentalSystemAuthorizationState?, ExperimentalClickCoordinator?) in
+            systemClickAuthorization?.revoke()
+            return (systemClickAuthorization, clickExperiment)
+        }
+        guard pair.0 != nil, let click = pair.1 else { return false }
+        let started = await click.revokeAll()
+        do {
+            for (taskID, requestIDs) in started {
+                for requestID in requestIDs {
+                    try lock.withLock { try audits.append(event(taskID: taskID, summary: "experimental click authorization revoked after start", result: "action outcome unknown; do not retry automatically", requestID: requestID)) }
+                }
+                await click.acknowledgeStarts(taskID: taskID, requestIDs: requestIDs)
+            }
+        } catch { throw SafariPressFailure.actionOutcomeUnknown }
+        return !started.isEmpty
+    }
     #if JARVIS_SAFARI_CLICK_TESTING
+    func experimentalSystemClickAuthorizationRevokedForTesting() async throws -> Bool {
+        try await revokeExperimentalSystemClickAuthorization()
+    }
     /// Fake injection is only present when the explicit test macro is set.
-    func installExperimentalSystemClickForTesting(_ systemAction: @escaping @Sendable (AXUIElement, CFString) -> AXError) async {
-        installExperimentalSystemClickCore(systemAction: systemAction)
+    func installExperimentalSystemClickForTesting(authorization: @escaping @Sendable () -> Bool = { true },
+        beforeSystemCheck: @escaping @Sendable () -> Void = {}, _ systemAction: @escaping @Sendable (AXUIElement, CFString) -> AXError) async {
+        installExperimentalSystemClickCore(authorization: authorization, beforeSystemCheck: beforeSystemCheck, systemAction: systemAction)
     }
     static func experimentalSystemClickGateForTesting(bundleID: String?, marker: Any?, optedIn: Bool, trusted: Bool) -> Bool {
         experimentalSystemClickGate(bundleID: bundleID, marker: marker, optedIn: optedIn, trusted: trusted)
@@ -552,25 +586,33 @@ private actor ExperimentalClickCoordinator {
     private struct Entry { let taskID: UUID; let token: UUID; let targetDigest: String; let identity: SafariClickIdentity; let digest: String }
     private let staged: SafariClickStagedCaptures
     private let action: @Sendable (AXUIElement, CFString) -> AXError
+    private let authorization: @Sendable () -> Bool
     private var entries: [UUID: Entry] = [:]
     private var generation: [UUID: UInt64] = [:]
     private var preparing = 0
+    private var preparingTasks: [UUID: Int] = [:]
     private var inFlight: Set<UUID> = []
     private var unrecordedStarts: [UUID: Set<UUID>] = [:]
     private var cancelling: [UUID: (Task<SafariClickCancellationResult, Never>, UUID)] = [:]
-    init(lifetime: TimeInterval, clock: @escaping @Sendable () -> TimeInterval, action: @escaping @Sendable (AXUIElement, CFString) -> AXError) {
+    init(lifetime: TimeInterval, clock: @escaping @Sendable () -> TimeInterval, authorization: @escaping @Sendable () -> Bool = { true }, action: @escaping @Sendable (AXUIElement, CFString) -> AXError) {
         self.staged = SafariClickStagedCaptures(bindings: SafariClickBindingStore(lifetime: lifetime, clock: clock))
+        self.authorization = authorization
         self.action = action
     }
     func prepare(taskID: UUID, identity: SafariClickIdentity, capture: SafariClickCapture) async throws -> ToolRequest {
-        guard entries.count + preparing < 32 else { throw TaskServiceCapabilityError.unavailable }
+        guard authorization(), entries.count + preparing < 32 else { throw TaskServiceCapabilityError.unavailable }
         preparing += 1
-        defer { preparing -= 1 }
+        preparingTasks[taskID, default: 0] += 1
+        defer {
+            preparing -= 1
+            let count = preparingTasks[taskID, default: 0]
+            if count <= 1 { preparingTasks.removeValue(forKey: taskID) } else { preparingTasks[taskID] = count - 1 }
+        }
         let current = generation[taskID, default: 0], target = UUID().uuidString
         guard let token = try await staged.stage(taskID: taskID, identity: identity, targetDigest: target, capture: capture) else { throw TaskServiceCapabilityError.unavailable }
         let request = ToolRequest(taskID: taskID, name: "safari_click_experiment", sideEffect: .localWrite, target: "redacted Safari target", payload: token.uuidString)
         let bound = await staged.bind(token: token, taskID: taskID, requestID: request.id, digest: request.payloadDigest)
-        guard bound, !Task.isCancelled, generation[taskID, default: 0] == current else { await staged.cancel(token: token); throw TaskServiceCapabilityError.unavailable }
+        guard bound, authorization(), !Task.isCancelled, generation[taskID, default: 0] == current else { await staged.cancel(token: token); throw TaskServiceCapabilityError.unavailable }
         entries[request.id] = Entry(taskID: taskID, token: token, targetDigest: target, identity: identity, digest: request.payloadDigest)
         Task { [weak self] in await self?.expire(requestID: request.id, token: token) }
         return request
@@ -584,10 +626,12 @@ private actor ExperimentalClickCoordinator {
         }
     }
     func preview(_ request: ToolRequest) async -> (url: String, role: String, title: String, enabled: Bool)? {
+        guard authorization() else { await cancel(requestID: request.id); return nil }
         guard let entry = entries[request.id], entry.taskID == request.taskID,
               entry.digest == request.payloadDigest, request.payload == entry.token.uuidString,
               !inFlight.contains(request.id) else { return nil }
         let remaining = await staged.remaining(token: entry.token)
+        guard authorization() else { await cancel(requestID: request.id); return nil }
         guard remaining != nil, !Task.isCancelled, let current = entries[request.id],
               current.token == entry.token, current.digest == request.payloadDigest,
               current.taskID == request.taskID, !inFlight.contains(request.id) else { return nil }
@@ -607,6 +651,7 @@ private actor ExperimentalClickCoordinator {
         return (display(url), display(role), display(title), entry.identity.enabled)
     }
     func perform(_ request: ToolRequest) async throws {
+        guard authorization() else { await cancel(requestID: request.id); throw TaskServiceCapabilityError.unavailable }
         guard let e = entries[request.id], e.taskID == request.taskID, e.digest == request.payloadDigest,
               inFlight.insert(request.id).inserted else { throw TaskServiceCapabilityError.unavailable }
         defer { inFlight.remove(request.id) }
@@ -634,9 +679,35 @@ private actor ExperimentalClickCoordinator {
         for id in ids { await cancel(requestID: id) }
         return Array(unrecordedStarts[taskID, default: []])
     }
+    func revokeAll() async -> [(UUID, [UUID])] {
+        let taskIDs = Set(entries.values.map(\.taskID))
+            .union(cancelling.values.map { $0.1 })
+            .union(preparingTasks.keys)
+            .union(unrecordedStarts.keys)
+        var started: [(UUID, [UUID])] = []
+        for taskID in taskIDs {
+            let ids = await cancel(taskID: taskID)
+            if !ids.isEmpty { started.append((taskID, ids)) }
+        }
+        return started
+    }
     func acknowledgeStarts(taskID: UUID, requestIDs: [UUID]) {
         unrecordedStarts[taskID]?.subtract(requestIDs)
         if unrecordedStarts[taskID]?.isEmpty == true { unrecordedStarts.removeValue(forKey: taskID) }
+    }
+}
+#endif
+
+#if os(macOS) && JARVIS_SAFARI_CLICK_EXPERIMENT
+private final class ExperimentalSystemAuthorizationState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var revoked = false
+    private let liveCheck: @Sendable () -> Bool
+    init(liveCheck: @escaping @Sendable () -> Bool) { self.liveCheck = liveCheck }
+    func revoke() { lock.withLock { revoked = true } }
+    func isAllowed() -> Bool {
+        guard lock.withLock({ !revoked }), liveCheck() else { return false }
+        return lock.withLock { !revoked }
     }
 }
 #endif
