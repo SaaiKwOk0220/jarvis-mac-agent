@@ -204,7 +204,18 @@ struct AskJarvisView: View {
         }
         .background(LinearGradient(colors: [Color(red: 0.025, green: 0.055, blue: 0.09), Color(red: 0.015, green: 0.025, blue: 0.045)], startPoint: .topLeading, endPoint: .bottomTrailing))
         .preferredColorScheme(.dark)
-        .onAppear { isVisible = true; refreshVoiceDrafts() }
+        #if JARVIS_SAFARI_EXPERIMENT_BUILD || JARVIS_COMBINED_EXPERIMENT
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            accessibilityTrusted = AccessibilityPermissionRequest.isTrusted()
+        }
+        #endif
+        .onAppear {
+            isVisible = true
+            refreshVoiceDrafts()
+            #if JARVIS_SAFARI_EXPERIMENT_BUILD || JARVIS_COMBINED_EXPERIMENT
+            accessibilityTrusted = AccessibilityPermissionRequest.isTrusted()
+            #endif
+        }
         .onChange(of: voice.errorMessage) { _, message in
             if message != nil { conversation.stop(); autoSubmit.cancel() }
         }
