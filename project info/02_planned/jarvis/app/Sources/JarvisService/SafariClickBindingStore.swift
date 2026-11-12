@@ -16,10 +16,11 @@ actor SafariClickBindingStore {
     private let lifetime: TimeInterval
     private let beforeIssue: @Sendable () async -> Void
     private let beforeConsume: @Sendable () async -> Void
+    private let beforeDeadlineCheck: @Sendable () async -> Void
     private var lastTime: TimeInterval?
     private var entries: [UUID: Entry] = [:]
-    init(lifetime: TimeInterval = 60, clock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }, beforeIssue: @escaping @Sendable () async -> Void = {}, beforeConsume: @escaping @Sendable () async -> Void = {}) {
-        self.lifetime = lifetime; self.clock = clock; self.beforeIssue = beforeIssue; self.beforeConsume = beforeConsume
+    init(lifetime: TimeInterval = 60, clock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }, beforeIssue: @escaping @Sendable () async -> Void = {}, beforeConsume: @escaping @Sendable () async -> Void = {}, beforeDeadlineCheck: @escaping @Sendable () async -> Void = {}) {
+        self.lifetime = lifetime; self.clock = clock; self.beforeIssue = beforeIssue; self.beforeConsume = beforeConsume; self.beforeDeadlineCheck = beforeDeadlineCheck
     }
     private func now() -> TimeInterval? {
         let value = clock()
@@ -50,7 +51,7 @@ actor SafariClickBindingStore {
         guard entry.snapshot.taskID == taskID && entry.requestID == requestID && entry.requestDigest == digest && entry.snapshot.targetDigest == targetDigest else { return nil }
         return entry.expires
     }
-    func isBefore(_ deadline: TimeInterval) -> Bool { guard let time = now() else { return false }; return time < deadline }
+    func isBefore(_ deadline: TimeInterval) async -> Bool { await beforeDeadlineCheck(); guard let time = now() else { return false }; return time < deadline }
     func remaining(deadline: TimeInterval) -> TimeInterval? { guard let time = now(), time < deadline else { return nil }; return deadline - time }
     func purgeExpired() -> [UUID] {
         guard let time = now() else { let ids = Array(entries.keys); entries.removeAll(); return ids }
@@ -79,10 +80,11 @@ actor SafariClickTransferredCapture {
     }
     func invalidate() async { valid = false; await capture.clear() }
     func verify(expected: SafariClickIdentity) async throws {
-        guard valid else { throw SafariClickCapture.CaptureError.changed }
-        guard await bindings.isBefore(deadline) else { await invalidate(); throw SafariClickCapture.CaptureError.changed }
+        let initialTimeValid = await bindings.isBefore(deadline)
+        guard valid, !Task.isCancelled, initialTimeValid else { await invalidate(); throw SafariClickCapture.CaptureError.changed }
         try await capture.verify(expected: expected)
-        guard valid, !Task.isCancelled, await bindings.isBefore(deadline) else { await invalidate(); throw SafariClickCapture.CaptureError.changed }
+        let finalTimeValid = await bindings.isBefore(deadline)
+        guard valid, !Task.isCancelled, finalTimeValid else { await invalidate(); throw SafariClickCapture.CaptureError.changed }
     }
 }
 /// Experimental capture binding only; not connected to TaskService or AX actions.

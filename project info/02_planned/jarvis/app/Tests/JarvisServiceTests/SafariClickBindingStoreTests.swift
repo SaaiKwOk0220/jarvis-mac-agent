@@ -82,6 +82,17 @@ private actor EarlyWakeSleeper {
         try await Task.sleep(for: duration)
     }
 }
+private actor DeadlineCheckGate {
+    let entered: XCTestExpectation
+    var calls = 0
+    var continuation: CheckedContinuation<Void, Never>?
+    init(_ entered: XCTestExpectation) { self.entered = entered }
+    func check() async {
+        calls += 1
+        if calls == 2 { await withCheckedContinuation { continuation = $0; entered.fulfill() } }
+    }
+    func release() { continuation?.resume(); continuation = nil }
+}
 private actor BindingGate {
     let entered: XCTestExpectation
     var continuation: CheckedContinuation<Void, Never>?
@@ -153,6 +164,29 @@ extension SafariClickBindingStoreTests {
         do { _ = try await task.value; XCTFail("cancelled stage") } catch { }
         do { try await capture.verify(expected: identity); XCTFail("cancelled reference retained") } catch { }
     }
+    func testInvalidateWhileFinalDeadlineCheckSuspendsFailsClosed() async throws {
+        let entered = expectation(description: "final deadline check")
+        let gate = DeadlineCheckGate(entered)
+        let taskID = UUID(), request = UUID()
+        let bindings = SafariClickBindingStore(clock: { 1 }, beforeDeadlineCheck: { await gate.check() })
+        let staged = SafariClickStagedCaptures(bindings: bindings)
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let ref = AXUIElementCreateSystemWide()
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let capture = SafariClickCapture { [candidate] }
+        let value = try await staged.stage(taskID: taskID, identity: identity, targetDigest: "target", capture: capture)
+        let token = try XCTUnwrap(value)
+        let bound = await staged.bind(token: token, taskID: taskID, requestID: request, digest: "digest")
+        XCTAssertTrue(bound)
+        let value2 = await staged.consume(token: token, taskID: taskID, requestID: request, digest: "digest", targetDigest: "target")
+        let transfer = try XCTUnwrap(value2)
+        let verification = Task { try await transfer.verify(expected: identity) }
+        await fulfillment(of: [entered], timeout: 2)
+        await transfer.invalidate()
+        await gate.release()
+        do { try await verification.value; XCTFail("invalidated transfer verified") } catch { }
+    }
+
     func testTransferredCaptureExpiresAtOriginalDeadline() async throws {
         let clock = BindingClock(), task = UUID(), request = UUID()
         let bindings = SafariClickBindingStore(lifetime: 5, clock: { clock.read() })
