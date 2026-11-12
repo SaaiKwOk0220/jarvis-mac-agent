@@ -226,6 +226,28 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     }
 
     #if os(macOS)
+    #if JARVIS_SAFARI_CLICK_EXPERIMENT
+    /// Unregistered experiment: this installer is private and has no production caller.
+    /// The system function is reachable only through the durable approval coordinator.
+    private func installExperimentalSystemClick(systemAction: @escaping @Sendable (AXUIElement, CFString) -> AXError = { element, operation in
+        AXUIElementPerformAction(element, operation)
+    }) {
+        lock.withLock {
+            guard clickExperiment == nil else { return }
+            clickExperiment = ExperimentalClickCoordinator(lifetime: 60, clock: { ProcessInfo.processInfo.systemUptime }) { element, operation in
+                guard CFEqual(operation, kAXPressAction as CFString) else { return .failure }
+                return systemAction(element, kAXPressAction as CFString)
+            }
+        }
+    }
+    #if JARVIS_SAFARI_CLICK_TESTING
+    /// Available only in explicit test builds; never register this in the application.
+    func installExperimentalSystemClickForTesting(_ systemAction: @escaping @Sendable (AXUIElement, CFString) -> AXError) async {
+        installExperimentalSystemClick(systemAction: systemAction)
+    }
+    #endif
+    #endif
+
     /// Explicitly injected laboratory path. Never installed by the application.
     func installExperimentalClickForTesting(lifetime: TimeInterval = 60, clock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }, afterSubmit: @escaping @Sendable () async -> Void = {}, action: @escaping @Sendable (AXUIElement, CFString) -> AXError) async {
         lock.withLock { if clickExperiment == nil { clickExperiment = ExperimentalClickCoordinator(lifetime: lifetime, clock: clock, action: action); clickAfterSubmit = afterSubmit } }
