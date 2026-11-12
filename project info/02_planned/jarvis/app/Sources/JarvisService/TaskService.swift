@@ -37,6 +37,10 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     private var clickExperiment: ExperimentalClickCoordinator?
     #if JARVIS_SAFARI_CLICK_EXPERIMENT
     private var systemClickAuthorization: ExperimentalSystemAuthorizationState?
+    private var clickModeTransition = false
+    #if JARVIS_SAFARI_CLICK_TESTING
+    private var clickBeforeCommit: @Sendable () async -> Void = {}
+    #endif
     #endif
     private var clickAfterSubmit: @Sendable () async -> Void = {}
     #endif
@@ -285,7 +289,62 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
         } catch { throw SafariPressFailure.actionOutcomeUnknown }
         return !started.isEmpty
     }
+    /// Only available in a deliberately compiled click experiment. Opening the
+    /// settings view does not enable this; a user must explicitly request it.
+    public func enableExperimentalClickMode() throws {
+        guard Self.experimentalSystemClickGate(bundleID: Bundle.main.bundleIdentifier,
+            marker: Bundle.main.object(forInfoDictionaryKey: "JarvisSafariClickExperiment"),
+            optedIn: true, trusted: AXIsProcessTrusted()) else { throw TaskServiceCapabilityError.unavailable }
+        try beginClickModeEnable()
+        defer { lock.withLock { clickModeTransition = false } }
+        installExperimentalSystemClick(optedIn: { true })
+        guard lock.withLock({ systemClickAuthorization != nil }) else { throw TaskServiceCapabilityError.unavailable }
+    }
+    private func beginClickModeEnable() throws {
+        try lock.withLock {
+            guard !clickModeTransition, clickExperiment == nil, systemClickAuthorization == nil else { throw TaskServiceCapabilityError.unavailable }
+            clickModeTransition = true
+        }
+    }
+    public var isExperimentalClickModeEnabled: Bool {
+        lock.withLock { !clickModeTransition && !(systemClickAuthorization?.isRevoked ?? true) }
+    }
+    public var isExperimentalClickCleanupRequired: Bool {
+        lock.withLock { !clickModeTransition && (systemClickAuthorization?.isRevoked ?? false) }
+    }
+    /// Revocation is synchronous with the switch action; database cleanup is awaited separately.
+    public func disableExperimentalClickMode() -> Task<Bool, Error> {
+        let accepted = lock.withLock { () -> Bool in
+            guard !clickModeTransition else { return false }
+            clickModeTransition = true
+            systemClickAuthorization?.revoke()
+            return true
+        }
+        guard accepted else { return Task { throw TaskServiceCapabilityError.unavailable } }
+        return Task {
+            defer { lock.withLock { clickModeTransition = false } }
+            let alreadyStarted = try await revokeExperimentalSystemClickAuthorization()
+            try lock.withLock {
+                for (request, _) in try requests.list(status: .pending) where request.name == "safari_click_experiment" {
+                    let rejection = Approval(toolRequestID: request.id, actionDigest: request.payloadDigest, decision: .rejected)
+                    let status = try aggregateStatus(forTask: request.taskID, excluding: request.id, fallback: .running)
+                    try uow.rejectRequest(request, approval: rejection, taskStatus: status,
+                        audits: [event(request, summary: "experimental click mode disabled", result: "cancelled", approvalID: rejection.id)])
+                }
+                clickExperiment = nil
+                systemClickAuthorization = nil
+            }
+            return alreadyStarted
+        }
+    }
     #if JARVIS_SAFARI_CLICK_TESTING
+    func enableExperimentalClickModeForTesting(allowed: Bool, beforeCommit: @escaping @Sendable () async -> Void = {}, _ action: @escaping @Sendable (AXUIElement, CFString) -> AXError) throws {
+        guard allowed else { throw TaskServiceCapabilityError.unavailable }
+        try beginClickModeEnable()
+        defer { lock.withLock { clickModeTransition = false } }
+        installExperimentalSystemClickCore(authorization: { true }, systemAction: action)
+        lock.withLock { clickBeforeCommit = beforeCommit }
+    }
     func experimentalSystemClickAuthorizationRevokedForTesting() async throws -> Bool {
         try await revokeExperimentalSystemClickAuthorization()
     }
@@ -309,11 +368,18 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
         guard let click = lock.withLock({ clickExperiment }) else { throw TaskServiceCapabilityError.unavailable }
         try lock.withLock { try ensureRunning(taskID) }
         let request = try await click.prepare(taskID: taskID, identity: identity, capture: capture)
+        #if JARVIS_SAFARI_CLICK_EXPERIMENT && JARVIS_SAFARI_CLICK_TESTING
+        await lock.withLock { clickBeforeCommit }()
+        #endif
         var submitted = false
         do {
             try Task.checkCancellation()
             try lock.withLock {
                 try requireRunning(taskID)
+                guard clickExperiment === click else { throw TaskServiceCapabilityError.unavailable }
+                #if JARVIS_SAFARI_CLICK_EXPERIMENT
+                if let state = systemClickAuthorization, !state.isAllowed() { throw TaskServiceCapabilityError.unavailable }
+                #endif
                 try uow.submitRequest(request, status: .pending, taskStatus: .awaitingApproval,
                     audits: [event(request, summary: "experimental click requested", result: "approval required")])
             }
@@ -352,6 +418,10 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
             try Task.checkCancellation()
             request = try lock.withLock {
                 guard let (request, status) = try requests.fetch(id: requestID), status == .pending else { throw TaskServiceError.requestNotAwaitingApproval }
+                guard clickExperiment === click else { throw TaskServiceCapabilityError.unavailable }
+                #if JARVIS_SAFARI_CLICK_EXPERIMENT
+                if let state = systemClickAuthorization, !state.isAllowed() { throw TaskServiceCapabilityError.unavailable }
+                #endif
                 guard validateApproval(request: request, approvalDigest: digest) else { throw TaskServiceError.approvalDigestMismatch }
                 let approval = Approval(toolRequestID: request.id, actionDigest: request.payloadDigest, decision: .approved)
                 let taskStatus = try aggregateStatus(forTask: request.taskID, excluding: request.id, fallback: .running)
@@ -708,6 +778,7 @@ private final class ExperimentalSystemAuthorizationState: @unchecked Sendable {
     private var revoked = false
     private let liveCheck: @Sendable () -> Bool
     init(liveCheck: @escaping @Sendable () -> Bool) { self.liveCheck = liveCheck }
+    var isRevoked: Bool { lock.withLock { revoked } }
     func revoke() { lock.withLock { revoked = true } }
     func beginIfAllowed(_ start: @Sendable () -> Bool) -> Bool {
         guard liveCheck() else { return false }

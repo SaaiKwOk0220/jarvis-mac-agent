@@ -1761,6 +1761,94 @@ extension TaskServiceTests {
         do { try await attempt.value; XCTFail("revoked action succeeded") } catch { }
         XCTAssertEqual(counter.value, 0)
     }
+    func testExperimentalClickModeDisableRevokesPendingAndReenableUsesNewGeneration() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "mode")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        try fixture.service.enableExperimentalClickModeForTesting(allowed: true) { _, _ in counter.increment(); return .success }
+        let first = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        XCTAssertTrue(fixture.service.isExperimentalClickModeEnabled)
+        let cleanup = fixture.service.disableExperimentalClickMode()
+        try await cleanup.value
+        XCTAssertFalse(fixture.service.isExperimentalClickModeEnabled)
+        XCTAssertEqual(try fixture.requests.fetch(id: first.id)?.1, .rejected)
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: first.id, digest: first.payloadDigest))
+        try fixture.service.enableExperimentalClickModeForTesting(allowed: true) { _, _ in counter.increment(); return .success }
+        let second = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        try await fixture.service.approveExperimentalClick(requestID: second.id, digest: second.payloadDigest)
+        XCTAssertEqual(counter.value, 1)
+    }
+    func testExperimentalClickModeCannotEnableWithoutAuthorization() throws {
+        let fixture = try Fixture()
+        XCTAssertThrowsError(try fixture.service.enableExperimentalClickModeForTesting(allowed: false) { _, _ in XCTFail("must not execute"); return .success })
+    }
+    func testExperimentalClickModeCleanupFailureCanBeRetried() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "cleanup")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        try fixture.service.enableExperimentalClickModeForTesting(allowed: true) { _, _ in counter.increment(); return .success }
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        try fixture.database.write { db in try db.execute(sql: "CREATE TRIGGER reject_mode_cleanup BEFORE INSERT ON approvals BEGIN SELECT RAISE(ABORT, 'test'); END") }
+        let first = fixture.service.disableExperimentalClickMode()
+        do { _ = try await first.value; XCTFail("expected cleanup failure") } catch { }
+        XCTAssertTrue(fixture.service.isExperimentalClickCleanupRequired)
+        XCTAssertThrowsError(try fixture.service.enableExperimentalClickModeForTesting(allowed: true) { _, _ in .success })
+        try fixture.database.write { db in try db.execute(sql: "DROP TRIGGER reject_mode_cleanup") }
+        let retry = fixture.service.disableExperimentalClickMode()
+        _ = try await retry.value
+        XCTAssertFalse(fixture.service.isExperimentalClickCleanupRequired)
+        XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .rejected)
+        XCTAssertEqual(counter.value, 0)
+    }
+    func testExperimentalClickModeCanBeDisabledAfterPermissionLoss() async throws {
+        let fixture = try Fixture(), flags = ExperimentalSystemAuthorization()
+        await fixture.service.installExperimentalSystemClickForTesting(authorization: { flags.allowed }) { _, _ in .success }
+        flags.revoke(permission: true)
+        XCTAssertTrue(fixture.service.isExperimentalClickModeEnabled)
+        let cleanup = fixture.service.disableExperimentalClickMode()
+        _ = try await cleanup.value
+        XCTAssertFalse(fixture.service.isExperimentalClickModeEnabled)
+    }
+    func testExperimentalClickModeOldPreparedRequestCannotCommitAfterReenable() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "mode race")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "prepared"), gate = ExperimentalClickVerificationGate(entered: entered, blockAt: 1)
+        try fixture.service.enableExperimentalClickModeForTesting(allowed: true, beforeCommit: { await gate.visit() }) { _, _ in counter.increment(); return .success }
+        let submit = Task { try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] }) }
+        await fulfillment(of: [entered], timeout: 2)
+        let cleanup = fixture.service.disableExperimentalClickMode()
+        _ = try await cleanup.value
+        try fixture.service.enableExperimentalClickModeForTesting(allowed: true) { _, _ in counter.increment(); return .success }
+        await gate.release()
+        do { _ = try await submit.value; XCTFail("old generation committed") } catch { }
+        XCTAssertTrue(try fixture.requests.list(status: .pending).filter { $0.0.taskID == task.id }.isEmpty)
+        XCTAssertEqual(counter.value, 0)
+    }
+    func testExperimentalClickModeDisableAfterStartReportsUnknown() async throws {
+        let fixture = try Fixture()
+        let actualTask = try await fixture.service.createTask(title: "mode started")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "action started"), block = ExperimentalClickBlockingAction(entered)
+        try fixture.service.enableExperimentalClickModeForTesting(allowed: true) { _, _ in block.run(); return .success }
+        let request = try await fixture.service.submitExperimentalClick(taskID: actualTask.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let approval = Task { try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest) }
+        await fulfillment(of: [entered], timeout: 2)
+        let cleanup = fixture.service.disableExperimentalClickMode()
+        let started = try await cleanup.value
+        XCTAssertTrue(started)
+        XCTAssertTrue(try fixture.audit.events(for: actualTask.id).contains { $0.result == "action outcome unknown; do not retry automatically" })
+        block.release.signal()
+        _ = try? await approval.value
+    }
     func testExperimentalSystemPressRunsOnlyAfterDurableApprovalAndOnce() async throws {
         let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
         let task = try await fixture.service.createTask(title: "system press test")
