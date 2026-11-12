@@ -57,12 +57,12 @@ enum SpeechCallbackBridge {
         }
     }
 
-    nonisolated static func tap(gate: AudioRequestGate, monitor: AudioPauseMonitor? = nil, vad: OptionalLiveVAD? = nil, drainGate: VADTapDrainGate? = nil) -> @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void {
+    nonisolated static func tap(gate: AudioRequestGate, monitor: AudioPauseMonitor? = nil, vad: OptionalLiveVAD? = nil, drainGate: VADTapDrainGate? = nil, tapDiagnostics: AudioTapDiagnostics? = nil) -> @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void {
         return { @Sendable buffer, _ in
             guard drainGate?.enter() ?? true else { return }
             defer { drainGate?.leave() }
-            if gate.append(buffer) { monitor?.observe(buffer); vad?.submit(buffer) }
-            else { vad?.signalLoss() }
+            if gate.append(buffer) { tapDiagnostics?.accept(at: DispatchTime.now().uptimeNanoseconds); monitor?.observe(buffer); vad?.submit(buffer) }
+            else { tapDiagnostics?.lost(); vad?.signalLoss() }
         }
     }
 
@@ -169,6 +169,8 @@ struct VoiceDiagnosticSnapshot: Equatable {
     var formatSupported: Bool?
     var aboveThreshold: Bool?
     var silenceSeconds: Double = 0
+    var tapFresh: Bool = false
+    var tapLosses: UInt64 = 0
 }
 
 /// Consumes buffer samples synchronously on the tap; it never retains a buffer.
@@ -237,9 +239,16 @@ final class AudioPauseMonitor: @unchecked Sendable {
     private var hasTap = false
     private var monitor: AudioPauseMonitor?
     private var optionalVAD: OptionalLiveVAD?
+    private var tapDiagnostics: AudioTapDiagnostics?
     private var diagnosticsEnabled = false
     func setDiagnosticsEnabled(_ enabled: Bool) { diagnosticsEnabled = enabled; monitor?.setDiagnosticsEnabled(enabled) }
-    func diagnosticSnapshot() -> VoiceDiagnosticSnapshot? { monitor?.diagnosticSnapshot() }
+    func diagnosticSnapshot() -> VoiceDiagnosticSnapshot? {
+        guard let tapDiagnostics else { return nil }
+        var result = monitor?.diagnosticSnapshot() ?? VoiceDiagnosticSnapshot()
+        let tap = tapDiagnostics.snapshot(now: DispatchTime.now().uptimeNanoseconds)
+        result.tapFresh = tap.fresh; result.tapLosses = tap.losses
+        return result
+    }
     func clearDiagnostics() { setDiagnosticsEnabled(false); monitor?.clearDiagnostics(); monitor = nil }
 
     var isOnDeviceSupported: Bool { recognizer?.isAvailable == true && recognizer?.supportsOnDeviceRecognition == true }
@@ -271,6 +280,8 @@ final class AudioPauseMonitor: @unchecked Sendable {
         request.requiresOnDeviceRecognition = true
         request.shouldReportPartialResults = true
         let gate = AudioRequestGate(request)
+        let tapDiagnostics = AudioTapDiagnostics()
+        self.tapDiagnostics = tapDiagnostics
         self.audioGate = gate
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
@@ -289,12 +300,12 @@ final class AudioPauseMonitor: @unchecked Sendable {
                 onSilence: onSilence)
             optionalVAD = vad
             vad.start()
-            input.installTap(onBus: 0, bufferSize: 1024, format: format, block: SpeechCallbackBridge.tap(gate: gate, vad: vad, drainGate: vad.tapGate))
+            input.installTap(onBus: 0, bufferSize: 1024, format: format, block: SpeechCallbackBridge.tap(gate: gate, vad: vad, drainGate: vad.tapGate, tapDiagnostics: tapDiagnostics))
         } else {
             let monitor = AudioPauseMonitor(pauseDuration: VoiceEndpointSettings.pauseSeconds(), onSilence: onSilence)
             self.monitor = monitor
             monitor.setDiagnosticsEnabled(diagnosticsEnabled)
-            input.installTap(onBus: 0, bufferSize: 1024, format: format, block: SpeechCallbackBridge.tap(gate: gate, monitor: monitor))
+            input.installTap(onBus: 0, bufferSize: 1024, format: format, block: SpeechCallbackBridge.tap(gate: gate, monitor: monitor, tapDiagnostics: tapDiagnostics))
         }
         hasTap = true
         recognitionTask = recognizer.recognitionTask(with: request, resultHandler: SpeechCallbackBridge.recognition(onText: onText, onFailure: onFailure, onFinish: onFinish))
@@ -309,6 +320,7 @@ final class AudioPauseMonitor: @unchecked Sendable {
     }
 
     func finish() {
+        tapDiagnostics = nil
         engine.stop()
         optionalVAD?.stop()
         optionalVAD = nil

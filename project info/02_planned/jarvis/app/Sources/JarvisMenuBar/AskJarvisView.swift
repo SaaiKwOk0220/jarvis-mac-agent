@@ -436,6 +436,9 @@ struct AskJarvisView: View {
         VStack(alignment: .leading, spacing: 12) {
             DisclosureGroup("诊断与技术信息") {
             Toggle("显示语音诊断（仅此窗口）", isOn: $showVoiceDiagnostics).font(.caption)
+            if showVoiceDiagnostics {
+                Text("音频数据：\(voiceDiagnostic?.tapFresh == true ? "近期收到" : "未知") · 应用接收拒绝次数：\(AudioTapDiagnostics.lossLabel(voiceDiagnostic?.tapLosses))").font(.caption)
+            }
             if showVoiceDiagnostics && VADBuildAccess.currentAllowed && optionalVADEnabled {
                 Text("实验性语音检测不提供能量诊断；切换将在下次录音时生效。")
                     .font(.caption).foregroundStyle(.secondary)
