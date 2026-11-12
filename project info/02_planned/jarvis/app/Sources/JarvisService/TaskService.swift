@@ -390,8 +390,8 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     #endif
 
     /// Explicitly injected laboratory path. Never installed by the application.
-    func installExperimentalClickForTesting(lifetime: TimeInterval = 60, clock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }, afterSubmit: @escaping @Sendable () async -> Void = {}, action: @escaping @Sendable (AXUIElement, CFString) -> AXError) async {
-        lock.withLock { if clickExperiment == nil { clickExperiment = ExperimentalClickCoordinator(lifetime: lifetime, clock: clock, action: action); clickAfterSubmit = afterSubmit } }
+    func installExperimentalClickForTesting(lifetime: TimeInterval = 60, clock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }, focusTimeout: Duration = .seconds(15), afterSubmit: @escaping @Sendable () async -> Void = {}, action: @escaping @Sendable (AXUIElement, CFString) -> AXError) async {
+        lock.withLock { if clickExperiment == nil { clickExperiment = ExperimentalClickCoordinator(lifetime: lifetime, clock: clock, focusTimeout: focusTimeout, action: action); clickAfterSubmit = afterSubmit } }
     }
 
     #if JARVIS_SAFARI_CLICK_EXPERIMENT && JARVIS_SAFARI_EXPERIMENT_BUILD
@@ -504,7 +504,7 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
                     case .timeoutBeforeStart, .beforeStartRejected: confirmedNotStarted = true
                     case .actionOutcomeUnknown: confirmedNotStarted = false
                     }
-                } else { confirmedNotStarted = false }
+                } else { confirmedNotStarted = !actionCompleted && error is ConfirmedClickPreflightFailure }
                 if confirmedNotStarted, let sqlite = uow as? SQLitePersistenceUnitOfWork {
                     try sqlite.finishExperimentalClickNotStarted(request, taskStatus: .failed, audits: [audit])
                 } else {
@@ -514,6 +514,7 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
             }) ?? false
             if recorded { await click.acknowledgeStarts(taskID: request.taskID, requestIDs: [requestID]) }
             if actionCompleted { throw SafariPressFailure.actionOutcomeUnknown }
+            if let preflight = error as? ConfirmedClickPreflightFailure { throw preflight.underlying }
             throw error
         }
     }
@@ -711,11 +712,18 @@ private final class ExecutionGate: @unchecked Sendable {
 private extension NSLock { func withLock<T>(_ body: () throws -> T) rethrows -> T { lock(); defer { unlock() }; return try body() } }
 
 #if os(macOS)
+/// Constructed only at the preflight boundary after the exact gate proves
+/// pending -> revoked (or was already irrevocably revoked before start).
+private struct ConfirmedClickPreflightFailure: Error {
+    let underlying: any Error
+}
+
 private actor ExperimentalClickCoordinator {
     private struct Entry { let taskID: UUID; let token: UUID; let targetDigest: String; let identity: SafariClickIdentity; let digest: String }
     private let staged: SafariClickStagedCaptures
     private let action: @Sendable (AXUIElement, CFString) -> AXError
     private let authorization: @Sendable () -> Bool
+    private let focusTimeout: Duration
     private let beforeStart: @Sendable () -> Void
     private let authorizeStart: @Sendable (@Sendable () -> Bool) -> Bool
     private var entries: [UUID: Entry] = [:]
@@ -725,9 +733,10 @@ private actor ExperimentalClickCoordinator {
     private var inFlight: Set<UUID> = []
     private var unrecordedStarts: [UUID: Set<UUID>] = [:]
     private var cancelling: [UUID: (Task<SafariClickCancellationResult, Never>, UUID)] = [:]
-    init(lifetime: TimeInterval, clock: @escaping @Sendable () -> TimeInterval, authorization: @escaping @Sendable () -> Bool = { true }, beforeStart: @escaping @Sendable () -> Void = {}, authorizeStart: @escaping @Sendable (@Sendable () -> Bool) -> Bool = { $0() }, action: @escaping @Sendable (AXUIElement, CFString) -> AXError) {
+    init(lifetime: TimeInterval, clock: @escaping @Sendable () -> TimeInterval, focusTimeout: Duration = .seconds(15), authorization: @escaping @Sendable () -> Bool = { true }, beforeStart: @escaping @Sendable () -> Void = {}, authorizeStart: @escaping @Sendable (@Sendable () -> Bool) -> Bool = { $0() }, action: @escaping @Sendable (AXUIElement, CFString) -> AXError) {
         self.staged = SafariClickStagedCaptures(bindings: SafariClickBindingStore(lifetime: lifetime, clock: clock))
         self.authorization = authorization
+        self.focusTimeout = focusTimeout
         self.beforeStart = beforeStart
         self.authorizeStart = authorizeStart
         self.action = action
@@ -789,15 +798,22 @@ private actor ExperimentalClickCoordinator {
               inFlight.insert(request.id).inserted else { throw TaskServiceCapabilityError.unavailable }
         defer { inFlight.remove(request.id) }
         guard let transfer = await staged.consume(token: e.token, taskID: e.taskID, requestID: request.id, digest: e.digest, targetDigest: e.targetDigest) else { throw TaskServiceCapabilityError.unavailable }
-        let focusDeadline = ContinuousClock.now.advanced(by: .seconds(15))
-        while true {
-            try Task.checkCancellation()
-            guard authorization() else { throw TaskServiceCapabilityError.unavailable }
-            do { try await transfer.verify(expected: e.identity); break }
-            catch SafariAXReadError.notFocused {
-                guard ContinuousClock.now < focusDeadline else { throw SafariAXReadError.focusTimedOut }
-                try await Task.sleep(for: .milliseconds(250))
+        let focusDeadline = ContinuousClock.now.advanced(by: focusTimeout)
+        do {
+            while true {
+                try Task.checkCancellation()
+                guard authorization() else { throw TaskServiceCapabilityError.unavailable }
+                do { try await transfer.verify(expected: e.identity); break }
+                catch SafariAXReadError.notFocused {
+                    guard ContinuousClock.now < focusDeadline else { throw SafariAXReadError.focusTimedOut }
+                    try await Task.sleep(for: .milliseconds(250))
+                }
             }
+        } catch {
+            if let failure = error as? SafariPressFailure, case .actionOutcomeUnknown = failure { throw error }
+            if await transfer.revokeProvingNotStarted() { throw ConfirmedClickPreflightFailure(underlying: error) }
+            // A missing/started proof is never downgraded to a pre-start error.
+            throw SafariPressFailure.actionOutcomeUnknown
         }
         try await transfer.perform(expected: e.identity, beforeAction: beforeStart, authorizeStart: authorizeStart, action: action)
     }

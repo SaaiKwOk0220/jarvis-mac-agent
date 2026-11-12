@@ -1713,6 +1713,86 @@ extension TaskServiceTests {
         await first.value
         await second.value
     }
+    func testExperimentalClickFocusPreflightTimeoutClearsBarrier() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "focus timeout")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let provider = ExperimentalPreflightFailureProvider(candidate, unknown: false)
+        await fixture.service.installExperimentalClickForTesting(focusTimeout: .zero, action: { _, _ in counter.increment(); return .success })
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { try await provider.next() })
+        do { try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest); XCTFail("expected focus timeout") }
+        catch SafariAXReadError.focusTimedOut { }
+        catch { XCTFail("unexpected: \(error)") }
+        XCTAssertFalse(try SQLitePersistenceUnitOfWork(database: fixture.database).hasExperimentalClickBarrier())
+        XCTAssertEqual(counter.value, 0)
+        let nextTask = try await fixture.service.createTask(title: "after focus timeout")
+        let next = try await fixture.service.submitExperimentalClick(taskID: nextTask.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        try await fixture.service.approveExperimentalClick(requestID: next.id, digest: next.payloadDigest)
+        XCTAssertEqual(counter.value, 1)
+    }
+    func testExperimentalClickFocusPreflightFailureWriteKeepsBarrier() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "focus failure")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let provider = ExperimentalPreflightFailureProvider(candidate, unknown: false)
+        await fixture.service.installExperimentalClickForTesting(focusTimeout: .zero, action: { _, _ in counter.increment(); return .success })
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { try await provider.next() })
+        try fixture.database.write { db in try db.execute(sql: "CREATE TRIGGER fail_preflight_finish BEFORE UPDATE ON tool_requests WHEN NEW.status = 'failed' BEGIN SELECT RAISE(ABORT, 'test'); END") }
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
+        XCTAssertTrue(try SQLitePersistenceUnitOfWork(database: fixture.database).hasExperimentalClickBarrier())
+        XCTAssertEqual(counter.value, 0)
+    }
+    func testExperimentalClickPreflightUnknownNeverClearsBarrier() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "unknown")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let provider = ExperimentalPreflightFailureProvider(candidate, unknown: true)
+        await fixture.service.installExperimentalClickForTesting(focusTimeout: .zero, action: { _, _ in counter.increment(); return .success })
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { try await provider.next() })
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
+        XCTAssertTrue(try SQLitePersistenceUnitOfWork(database: fixture.database).hasExperimentalClickBarrier())
+        XCTAssertEqual(counter.value, 0)
+    }
+    func testExperimentalClickPreflightTaskCancellationRevokesGateBeforeClearingBarrier() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "preflight cancellation")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "verification waiting"), gate = ExperimentalClickVerificationGate(entered: entered)
+        await fixture.service.installExperimentalClickForTesting(action: { _, _ in counter.increment(); return .success })
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { await gate.visit(); return [candidate] })
+        let approval = Task { try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest) }
+        await fulfillment(of: [entered], timeout: 2)
+        approval.cancel()
+        await gate.release()
+        do { try await approval.value; XCTFail("cancelled approval succeeded") } catch { }
+        XCTAssertFalse(try SQLitePersistenceUnitOfWork(database: fixture.database).hasExperimentalClickBarrier())
+        XCTAssertEqual(counter.value, 0)
+    }
+    func testExperimentalClickPreflightCancelledTaskKeepsBarrier() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "cancel task")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "verification waiting"), gate = ExperimentalClickVerificationGate(entered: entered)
+        await fixture.service.installExperimentalClickForTesting(action: { _, _ in counter.increment(); return .success })
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { await gate.visit(); return [candidate] })
+        let approval = Task { try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest) }
+        await fulfillment(of: [entered], timeout: 2)
+        try await fixture.service.cancel(taskID: task.id)
+        await gate.release()
+        do { try await approval.value; XCTFail("cancelled task succeeded") } catch { }
+        XCTAssertTrue(try SQLitePersistenceUnitOfWork(database: fixture.database).hasExperimentalClickBarrier())
+        XCTAssertEqual(counter.value, 0)
+    }
     func testExperimentalClickWrongDigestRevokesTicket() async throws {
         let (fixture, _, request, action) = try await experimentalFixture()
         await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: "wrong"))
@@ -1739,6 +1819,18 @@ extension TaskServiceTests {
         try fixture.database.write { db in try db.execute(sql: "DROP TRIGGER reject_click_approval") }
         await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
         XCTAssertEqual(action.value, 0)
+    }
+}
+private actor ExperimentalPreflightFailureProvider {
+    let candidate: SafariClickCandidate
+    let unknown: Bool
+    var calls = 0
+    init(_ candidate: SafariClickCandidate, unknown: Bool) { self.candidate = candidate; self.unknown = unknown }
+    func next() throws -> [SafariClickCandidate] {
+        calls += 1
+        if calls == 1 { return [candidate] }
+        if unknown { throw SafariPressFailure.actionOutcomeUnknown }
+        throw SafariAXReadError.notFocused
     }
 }
 private actor ExperimentalClickVerificationGate {

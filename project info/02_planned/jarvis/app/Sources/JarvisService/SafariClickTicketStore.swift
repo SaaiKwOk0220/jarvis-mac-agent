@@ -99,6 +99,12 @@ fileprivate final class SafariClickRevocationGate: @unchecked Sendable {
         let current = state.load(ordering: .acquiring)
         return current == 2 || current == 4 ? .alreadyStarted : .idle
     }
+    /// State 3 is reachable only by winning pending -> revoked; it never
+    /// transitions back to pending or started. State 0 is deliberately unknown.
+    func revokeProvingNotStarted() -> Bool {
+        if state.compareExchange(expected: 1, desired: 3, ordering: .acquiringAndReleasing).exchanged { return true }
+        return state.load(ordering: .acquiring) == 3
+    }
     func run(authorizeStart: (@Sendable () -> Bool) -> Bool = { $0() }, _ action: () -> AXError) -> AXError {
         guard authorizeStart({ self.state.compareExchange(expected: 1, desired: 2, ordering: .acquiringAndReleasing).exchanged }) else { return .failure }
         defer { _ = state.compareExchange(expected: 2, desired: 4, ordering: .acquiringAndReleasing) }
@@ -117,6 +123,11 @@ actor SafariClickTransferredCapture {
         self.capture = capture; self.bindings = bindings; self.deadline = deadline; self.gate = gate
     }
     func invalidate() async { valid = false; _ = gate.revoke(); await capture.clear() }
+    /// Synchronously and permanently closes this exact transfer's start gate.
+    func revokeProvingNotStarted() -> Bool {
+        valid = false
+        return gate.revokeProvingNotStarted()
+    }
     func verify(expected: SafariClickIdentity) async throws {
         let initialTimeValid = await bindings.isBefore(deadline)
         guard valid, !Task.isCancelled, initialTimeValid else { await invalidate(); throw SafariClickCapture.CaptureError.changed }

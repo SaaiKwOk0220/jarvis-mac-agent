@@ -276,6 +276,43 @@ extension SafariClickBindingStoreTests {
         XCTAssertEqual(action.value, 1)
     }
 
+    func testPreflightProofRejectsAlreadyStartedAction() async throws {
+        let taskID = UUID(), requestID = UUID()
+        let staged = SafariClickStagedCaptures(bindings: SafariClickBindingStore())
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let ref = AXUIElementCreateSystemWide()
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let tokenValue = try await staged.stage(taskID: taskID, identity: identity, targetDigest: "target", capture: SafariClickCapture { [candidate] })
+        let token = try XCTUnwrap(tokenValue)
+        let bound = await staged.bind(token: token, taskID: taskID, requestID: requestID, digest: "digest")
+        XCTAssertTrue(bound)
+        let transferValue = await staged.consume(token: token, taskID: taskID, requestID: requestID, digest: "digest", targetDigest: "target")
+        let transfer = try XCTUnwrap(transferValue)
+        let entered = expectation(description: "action started"), block = BindingWorkerBlocker(entered)
+        let action = Task { try await transfer.perform(expected: identity, action: { _, _ in block.wait(); return .success }) }
+        await fulfillment(of: [entered], timeout: 2)
+        let proof = await transfer.revokeProvingNotStarted()
+        XCTAssertFalse(proof)
+        block.release.signal()
+        try await action.value
+    }
+    func testPreflightProofRecognizesPermanentlyRevokedGate() async throws {
+        let taskID = UUID(), requestID = UUID()
+        let staged = SafariClickStagedCaptures(bindings: SafariClickBindingStore())
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let ref = AXUIElementCreateSystemWide()
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let tokenValue = try await staged.stage(taskID: taskID, identity: identity, targetDigest: "target", capture: SafariClickCapture { [candidate] })
+        let token = try XCTUnwrap(tokenValue)
+        let bound = await staged.bind(token: token, taskID: taskID, requestID: requestID, digest: "digest")
+        XCTAssertTrue(bound)
+        let transferValue = await staged.consume(token: token, taskID: taskID, requestID: requestID, digest: "digest", targetDigest: "target")
+        let transfer = try XCTUnwrap(transferValue)
+        await transfer.invalidate()
+        let proof = await transfer.revokeProvingNotStarted()
+        XCTAssertTrue(proof)
+        do { try await transfer.perform(expected: identity, action: { _, _ in XCTFail("revoked action executed"); return .success }); XCTFail("replay") } catch { }
+    }
     func testTransferredCaptureSimulationRunsOnlyOnce() async throws {
         let task = UUID(), request = UUID()
         let staged = SafariClickStagedCaptures(bindings: SafariClickBindingStore(clock: { 1 }))
