@@ -79,11 +79,11 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
                 #if os(macOS)
                 let preview = await lock.withLock({ clickExperiment })?.preview(request)
                 #else
-                let preview: (origin: String, role: String, title: String, enabled: Bool)? = nil
+                let preview: (url: String, role: String, title: String, enabled: Bool)? = nil
                 #endif
                 if let preview {
-                    let payload = "元素类型：\(preview.role)\n元素标题：\(preview.title)\n状态：\(preview.enabled ? "已启用" : "未启用")\n风险：点击可能改变网页或触发操作；执行前会再次检查目标。"
-                    output.append(PendingApprovalRequest(id: request.id, taskID: request.taskID, reason: reason, target: preview.origin, payload: payload, digest: request.payloadDigest))
+                    let payload = "元素类型：\(preview.role)\n元素标题：\(preview.title)\n状态：\(preview.enabled ? "已启用" : "未启用")\n风险：点击可能改变网页或触发操作；执行前会再次检查目标。完整网址可能包含敏感参数，请注意保护。"
+                    output.append(PendingApprovalRequest(id: request.id, taskID: request.taskID, reason: reason, target: preview.url, payload: payload, digest: request.payloadDigest))
                 } else {
                     output.append(PendingApprovalRequest(id: request.id, taskID: request.taskID, reason: reason, target: "实验点击", payload: "此实验请求的目标已失效或不可用，请拒绝此请求后重新发起。", digest: request.payloadDigest))
                 }
@@ -269,7 +269,10 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
                   request.name == "safari_click_experiment" else { throw TaskServiceError.requestNotAwaitingApproval }
             return request
         }
-        guard await click.contains(preliminary) else { throw TaskServiceCapabilityError.unavailable }
+        guard await click.preview(preliminary) != nil else {
+            await click.cancel(requestID: requestID)
+            throw TaskServiceCapabilityError.unavailable
+        }
         let request: ToolRequest
         do {
             try Task.checkCancellation()
@@ -540,7 +543,7 @@ private actor ExperimentalClickCoordinator {
             do { try await Task.sleep(for: .seconds(remaining)) } catch { await cancel(requestID: requestID); return }
         }
     }
-    func preview(_ request: ToolRequest) async -> (origin: String, role: String, title: String, enabled: Bool)? {
+    func preview(_ request: ToolRequest) async -> (url: String, role: String, title: String, enabled: Bool)? {
         guard let entry = entries[request.id], entry.taskID == request.taskID,
               entry.digest == request.payloadDigest, request.payload == entry.token.uuidString,
               !inFlight.contains(request.id) else { return nil }
@@ -548,20 +551,20 @@ private actor ExperimentalClickCoordinator {
         guard remaining != nil, !Task.isCancelled, let current = entries[request.id],
               current.token == entry.token, current.digest == request.payloadDigest,
               current.taskID == request.taskID, !inFlight.contains(request.id) else { return nil }
-        guard let parts = URLComponents(string: entry.identity.url),
-              let scheme = parts.scheme?.lowercased(), ["http", "https"].contains(scheme),
-              let host = parts.host, !host.isEmpty else { return nil }
-        var origin = URLComponents()
-        origin.scheme = scheme; origin.host = host; origin.port = parts.port
-        guard let originString = origin.string else { return nil }
+        let url = entry.identity.url, role = entry.identity.role, title = entry.identity.title
+        guard url.utf8.count <= 2048, role.utf8.count <= 128, title.utf8.count <= 512,
+              let parts = URLComponents(string: url), let scheme = parts.scheme?.lowercased(),
+              ["http", "https"].contains(scheme), let host = parts.host, !host.isEmpty else { return nil }
         func display(_ value: String) -> String {
-            value.unicodeScalars.map { CharacterSet.controlCharacters.contains($0) ? " " : String($0) }.joined()
+            value.unicodeScalars.map { scalar in
+                let category = scalar.properties.generalCategory
+                if category == .control || category == .format {
+                    return String(format: "\\u{%04X}", scalar.value)
+                }
+                return scalar.value == 92 ? "\\\\" : String(scalar)
+            }.joined()
         }
-        return (originString, display(entry.identity.role), display(entry.identity.title), entry.identity.enabled)
-    }
-    func contains(_ request: ToolRequest) -> Bool {
-        guard let e = entries[request.id] else { return false }
-        return e.taskID == request.taskID && e.digest == request.payloadDigest
+        return (display(url), display(role), display(title), entry.identity.enabled)
     }
     func perform(_ request: ToolRequest) async throws {
         guard let e = entries[request.id], e.taskID == request.taskID, e.digest == request.payloadDigest,

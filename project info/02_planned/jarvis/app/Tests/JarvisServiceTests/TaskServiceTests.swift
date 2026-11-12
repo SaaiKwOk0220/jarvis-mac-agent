@@ -1444,7 +1444,7 @@ extension TaskServiceTests {
         let (fixture, task, request, _) = try await experimentalFixture()
         let previews = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
         let preview = try XCTUnwrap(previews.first)
-        XCTAssertEqual(preview.target, "https://example.com")
+        XCTAssertEqual(preview.target, "https://example.com/private")
         XCTAssertTrue(preview.payload.contains("AXButton"))
         XCTAssertTrue(preview.payload.contains("Secret"))
         XCTAssertTrue(preview.payload.contains("启用"))
@@ -1468,7 +1468,7 @@ extension TaskServiceTests {
         await fixture.service.installExperimentalClickForTesting(lifetime: 5, clock: { clock.read() }, action: { _, _ in action.increment(); return .success })
         let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
         let previews = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
-        XCTAssertEqual(previews[0].target, "https://example.com:8443")
+        XCTAssertEqual(previews[0].target, "https://example.com:8443/private")
         let restarted = try fixture.makeService()
         let afterRestart = try await restarted.listPendingApprovalRequests(taskID: task.id)
         XCTAssertTrue(afterRestart[0].payload.contains("失效"))
@@ -1479,6 +1479,41 @@ extension TaskServiceTests {
         try await fixture.service.reject(requestID: request.id)
         let afterRejection = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
         XCTAssertTrue(afterRejection.isEmpty)
+    }
+    func testExperimentalClickPreviewShowsExactDistinctURLsAndEscapesControls() async throws {
+        let fixture = try Fixture()
+        let actualTask = try await fixture.service.createTask(title: "click")
+        let ref = AXUIElementCreateSystemWide()
+        let url = "https://example.com/a?secret=one"
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: url, role: "AXButton", title: "Safe\u{202E}Danger\nNext", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        await fixture.service.installExperimentalClickForTesting(action: { _, _ in .success })
+        _ = try await fixture.service.submitExperimentalClick(taskID: actualTask.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        var other = identity
+        other.url = "https://example.com/b?secret=two"
+        let otherCandidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: other)
+        _ = try await fixture.service.submitExperimentalClick(taskID: actualTask.id, identity: other, capture: SafariClickCapture { [otherCandidate] })
+        let previews = try await fixture.service.listPendingApprovalRequests(taskID: actualTask.id)
+        XCTAssertEqual(Set(previews.map(\.target)), Set([url, other.url]))
+        XCTAssertTrue(previews[0].payload.contains("\\u{202E}"))
+        XCTAssertTrue(previews[0].payload.contains("\\u{000A}"))
+        XCTAssertFalse(previews[0].payload.contains("\u{202E}"))
+        let allStored = String(describing: try fixture.requests.list(status: .pending)) + String(describing: try fixture.audit.events(for: actualTask.id))
+        XCTAssertFalse(allStored.contains("secret=one"))
+        XCTAssertFalse(allStored.contains("secret=two"))
+        XCTAssertFalse(allStored.contains("Danger"))
+    }
+    func testExperimentalClickPreviewRejectsOverlongTitle() async throws {
+        let fixture = try Fixture()
+        let actualTask = try await fixture.service.createTask(title: "click")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: String(repeating: "x", count: 600), enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        await fixture.service.installExperimentalClickForTesting(action: { _, _ in .success })
+        let request = try await fixture.service.submitExperimentalClick(taskID: actualTask.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let previews = try await fixture.service.listPendingApprovalRequests(taskID: actualTask.id)
+        XCTAssertTrue(previews[0].payload.contains("失效"))
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
     }
     func testExperimentalClickWrongDigestRevokesTicket() async throws {
         let (fixture, _, request, action) = try await experimentalFixture()
