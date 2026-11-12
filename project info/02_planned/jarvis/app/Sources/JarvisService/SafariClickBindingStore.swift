@@ -86,6 +86,14 @@ actor SafariClickTransferredCapture {
         let finalTimeValid = await bindings.isBefore(deadline)
         guard valid, !Task.isCancelled, finalTimeValid else { await invalidate(); throw SafariClickCapture.CaptureError.changed }
     }
+    /// Simulation only: no AX action is registered or performed by this path.
+    func simulateOnce(expected: SafariClickIdentity, action: @Sendable () async -> Void) async throws {
+        try await verify(expected: expected)
+        guard valid, !Task.isCancelled else { throw SafariClickCapture.CaptureError.changed }
+        valid = false
+        await action()
+        await capture.clear()
+    }
 }
 /// Experimental capture binding only; not connected to TaskService or AX actions.
 actor SafariClickStagedCaptures {

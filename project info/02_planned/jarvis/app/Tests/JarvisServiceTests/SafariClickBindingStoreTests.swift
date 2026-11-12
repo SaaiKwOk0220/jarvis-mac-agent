@@ -82,6 +82,10 @@ private actor EarlyWakeSleeper {
         try await Task.sleep(for: duration)
     }
 }
+private actor SimulationCounter {
+    var count = 0
+    func increment() { count += 1 }
+}
 private actor DeadlineCheckGate {
     let entered: XCTestExpectation
     var calls = 0
@@ -185,6 +189,26 @@ extension SafariClickBindingStoreTests {
         await transfer.invalidate()
         await gate.release()
         do { try await verification.value; XCTFail("invalidated transfer verified") } catch { }
+    }
+
+    func testTransferredCaptureSimulationRunsOnlyOnce() async throws {
+        let task = UUID(), request = UUID()
+        let staged = SafariClickStagedCaptures(bindings: SafariClickBindingStore(clock: { 1 }))
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let ref = AXUIElementCreateSystemWide()
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let capture = SafariClickCapture { [candidate] }
+        let value = try await staged.stage(taskID: task, identity: identity, targetDigest: "target", capture: capture)
+        let token = try XCTUnwrap(value)
+        let bound = await staged.bind(token: token, taskID: task, requestID: request, digest: "digest")
+        XCTAssertTrue(bound)
+        let value2 = await staged.consume(token: token, taskID: task, requestID: request, digest: "digest", targetDigest: "target")
+        let transferred = try XCTUnwrap(value2)
+        let counter = SimulationCounter()
+        try await transferred.simulateOnce(expected: identity) { await counter.increment() }
+        do { try await transferred.simulateOnce(expected: identity) { await counter.increment() }; XCTFail("replay") } catch { }
+        let count = await counter.count
+        XCTAssertEqual(count, 1)
     }
 
     func testTransferredCaptureExpiresAtOriginalDeadline() async throws {
