@@ -21,13 +21,13 @@ final class AccessibilityQueryToolExecutorTests: XCTestCase {
             taskID: UUID(),
             name: "ax_query",
             sideEffect: .read,
-            target: "com.apple.Safari",
+            target: "com.apple.finder",
             payload: ""
         )
 
         let result = try await executor.execute(request)
 
-        XCTAssertTrue(result.summary.contains("com.apple.Safari"),
+        XCTAssertTrue(result.summary.contains("com.apple.finder"),
             "summary must name the inspected target; got: \(result.summary)")
         XCTAssertTrue(result.summary.contains("AXWindow \"Safari\""),
             "summary must carry the role + title line; got: \(result.summary)")
@@ -45,7 +45,7 @@ final class AccessibilityQueryToolExecutorTests: XCTestCase {
             taskID: UUID(),
             name: "ax_query",
             sideEffect: .localWrite,
-            target: "com.apple.Safari",
+            target: "com.apple.finder",
             payload: ""
         )
 
@@ -72,7 +72,7 @@ final class AccessibilityQueryToolExecutorTests: XCTestCase {
             taskID: UUID(),
             name: "ax_query",
             sideEffect: .read,
-            target: "com.apple.Safari",
+            target: "com.apple.finder",
             payload: "{\"maxDepth\": 6}"
         )
 
@@ -95,7 +95,7 @@ final class AccessibilityQueryToolExecutorTests: XCTestCase {
             taskID: UUID(),
             name: "ax_query",
             sideEffect: .read,
-            target: "com.apple.Safari",
+            target: "com.apple.finder",
             payload: ""
         )
 
@@ -123,5 +123,15 @@ private final class AXQueryRecorder: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return recorded.last
+    }
+}
+
+extension AccessibilityQueryToolExecutorTests {
+    func testExecutorRejectsSafariAndPIDBeforeQuery() async throws {
+        let executor = AccessibilityQueryToolExecutor(query: { _ in XCTFail("query must not run"); return "" })
+        for target in ["com.apple.Safari", "com.apple.safari", "1234"] {
+            let request = ToolRequest(taskID: UUID(), name: "ax_query", sideEffect: .read, target: target, payload: "")
+            do { _ = try await executor.execute(request); XCTFail("target must be rejected") } catch { }
+        }
     }
 }

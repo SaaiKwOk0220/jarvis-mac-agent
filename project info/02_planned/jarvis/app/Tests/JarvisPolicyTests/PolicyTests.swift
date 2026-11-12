@@ -216,3 +216,21 @@ final class PolicyTests: XCTestCase {
         }
     }
 }
+
+extension PolicyTests {
+    func testGenericAccessibilityCannotBypassSafariReadApproval() {
+        let request = ToolRequest(taskID: UUID(), name: "ax_query", sideEffect: .read,
+                                  target: "com.apple.Safari", payload: "{}")
+        let config = PolicyConfig(applicationBundleIDs: ["com.apple.Safari"])
+        XCTAssertEqual(Policy(allowSafariRead: true).evaluate(request, config: config),
+                       .deny(reason: "Safari requires the approved Safari read flow"))
+    }
+}
+
+extension PolicyTests {
+    func testAccessibilityRejectsPIDEvenWhenCurrentDirectoryApproved() {
+        let request = ToolRequest(taskID: UUID(), name: "ax_query", sideEffect: .read, target: "1234", payload: "")
+        let config = PolicyConfig(approvedDirectories: [FileManager.default.currentDirectoryPath], applicationBundleIDs: ["com.apple.finder"])
+        guard case .deny = Policy().evaluate(request, config: config) else { return XCTFail("PID must never pass the file-read policy") }
+    }
+}
