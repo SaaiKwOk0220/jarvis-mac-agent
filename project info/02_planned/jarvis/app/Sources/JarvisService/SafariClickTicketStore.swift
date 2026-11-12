@@ -226,6 +226,7 @@ actor SafariClickStagedCaptures {
             catch { await cancel(token: token); return }
         }
     }
+    func remaining(token: UUID) async -> TimeInterval? { await bindings.remaining(token: token) }
     func bind(token: UUID, taskID: UUID, requestID: UUID, digest: String) async -> Bool {
         guard captures[token] != nil else { return false }
         let success = await bindings.bind(token: token, taskID: taskID, requestID: requestID, digest: digest)

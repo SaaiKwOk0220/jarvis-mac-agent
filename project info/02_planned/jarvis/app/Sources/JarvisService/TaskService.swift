@@ -1,4 +1,7 @@
 import Foundation
+#if os(macOS)
+import ApplicationServices
+#endif
 import JarvisDomain
 import JarvisPersistence
 import JarvisPolicy
@@ -30,6 +33,9 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     private let safariCoordinator = SafariReadCoordinator()
     var safariCaptureFactory: @Sendable () -> any SafariTargetCapturing = { SafariAXTargetCapture() }
     private let ephemeralResults = EphemeralToolResultStore()
+    #if os(macOS)
+    private var clickExperiment: ExperimentalClickCoordinator?
+    #endif
     private let lock = NSLock()
     private var executions: [UUID: Task<Void, Error>] = [:]
 
@@ -168,6 +174,9 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     }
 
     public func reject(requestID: UUID) async throws {
+        #if os(macOS)
+        if let click = lock.withLock({ clickExperiment }) { await click.cancel(requestID: requestID) }
+        #endif
         let rejected: ToolRequest = try lock.withLock {
             guard let (request, status) = try requests.fetch(id: requestID), status == .pending else { throw TaskServiceError.requestNotAwaitingApproval }
             let approval = Approval(toolRequestID: request.id, actionDigest: request.payloadDigest, decision: .rejected)
@@ -179,6 +188,9 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     }
 
     public func cancel(taskID: UUID) async throws {
+        #if os(macOS)
+        if let click = lock.withLock({ clickExperiment }) { await click.cancel(taskID: taskID) }
+        #endif
         try lock.withLock {
             let task = try requiredTask(taskID)
             if task.status == .cancelled || task.status == .completed || task.status == .failed {
@@ -192,6 +204,72 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
         }
         await safariCoordinator.clear(taskID: taskID)
     }
+
+    #if os(macOS)
+    /// Explicitly injected laboratory path. Never installed by the application.
+    func installExperimentalClickForTesting(lifetime: TimeInterval = 60, clock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }, action: @escaping @Sendable (AXUIElement, CFString) -> AXError) async {
+        lock.withLock { if clickExperiment == nil { clickExperiment = ExperimentalClickCoordinator(lifetime: lifetime, clock: clock, action: action) } }
+    }
+
+    func submitExperimentalClick(taskID: UUID, identity: SafariClickIdentity, capture: SafariClickCapture) async throws -> ToolRequest {
+        guard let click = lock.withLock({ clickExperiment }) else { throw TaskServiceCapabilityError.unavailable }
+        try lock.withLock { try ensureRunning(taskID) }
+        let request = try await click.prepare(taskID: taskID, identity: identity, capture: capture)
+        do {
+            try Task.checkCancellation()
+            try lock.withLock {
+                try requireRunning(taskID)
+                try uow.submitRequest(request, status: .pending, taskStatus: .awaitingApproval,
+                    audits: [event(request, summary: "experimental click requested", result: "approval required")])
+            }
+            try Task.checkCancellation()
+            return request
+        } catch { await click.cancel(requestID: request.id); throw error }
+    }
+
+    func approveExperimentalClick(requestID: UUID, digest: String) async throws {
+        guard let click = lock.withLock({ clickExperiment }) else { throw TaskServiceCapabilityError.unavailable }
+        let preliminary = try lock.withLock { () throws -> ToolRequest in
+            guard let (request, status) = try requests.fetch(id: requestID), status == .pending,
+                  request.name == "safari_click_experiment" else { throw TaskServiceError.requestNotAwaitingApproval }
+            return request
+        }
+        guard await click.contains(preliminary) else { throw TaskServiceCapabilityError.unavailable }
+        let request: ToolRequest
+        do {
+            try Task.checkCancellation()
+            request = try lock.withLock {
+                guard let (request, status) = try requests.fetch(id: requestID), status == .pending else { throw TaskServiceError.requestNotAwaitingApproval }
+                guard validateApproval(request: request, approvalDigest: digest) else { throw TaskServiceError.approvalDigestMismatch }
+                let approval = Approval(toolRequestID: request.id, actionDigest: request.payloadDigest, decision: .approved)
+                let taskStatus = try aggregateStatus(forTask: request.taskID, excluding: request.id, fallback: .running)
+                try uow.approveRequest(request, approval: approval, taskStatus: taskStatus,
+                    audits: [event(request, summary: "experimental click approved", result: "approved", approvalID: approval.id)])
+                return request
+            }
+        } catch { await click.cancel(requestID: requestID); throw error }
+        do {
+            try Task.checkCancellation()
+            try await click.perform(request)
+            try lock.withLock {
+                guard let task = try tasks.fetch(id: request.taskID), task.status != .cancelled else { return }
+                let status = try aggregateStatus(forTask: request.taskID, excluding: request.id, fallback: .running)
+                try uow.finishRequest(request, status: .completed, taskStatus: status, audits: [event(request, summary: "experimental click completed", result: "completed")])
+            }
+        } catch {
+            await click.cancel(requestID: requestID)
+            try? lock.withLock {
+                guard let task = try tasks.fetch(id: request.taskID), task.status != .cancelled else { return }
+                let result = (error as? SafariPressFailure).map { failure in
+                    if case .actionOutcomeUnknown = failure { return "action outcome unknown; do not retry automatically" }
+                    return "action not completed"
+                } ?? "action not completed"
+                try uow.finishRequest(request, status: .failed, taskStatus: .failed, audits: [event(request, summary: "experimental click failed", result: result)])
+            }
+            throw error
+        }
+    }
+    #endif
 
     public func takeEphemeralToolResult(taskID: UUID, requestID: UUID, digest: String) async throws -> String? {
         try lock.withLock {
@@ -210,6 +288,9 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     /// `TaskServiceError.illegalTransition`. Use this after a multi-request
     /// workflow finishes all of its tool runs to record the task as done.
     public func complete(taskID: UUID) async throws {
+        #if os(macOS)
+        if let click = lock.withLock({ clickExperiment }) { await click.cancel(taskID: taskID) }
+        #endif
         try lock.withLock {
             let task = try requiredTask(taskID)
             guard task.status != .cancelled && task.status != .completed && task.status != .failed else {
@@ -380,3 +461,62 @@ private final class ExecutionGate: @unchecked Sendable {
     }
 }
 private extension NSLock { func withLock<T>(_ body: () throws -> T) rethrows -> T { lock(); defer { unlock() }; return try body() } }
+
+#if os(macOS)
+private actor ExperimentalClickCoordinator {
+    private struct Entry { let taskID: UUID; let token: UUID; let targetDigest: String; let identity: SafariClickIdentity; let digest: String }
+    private let staged: SafariClickStagedCaptures
+    private let action: @Sendable (AXUIElement, CFString) -> AXError
+    private var entries: [UUID: Entry] = [:]
+    private var generation: [UUID: UInt64] = [:]
+    private var preparing = 0
+    private var inFlight: Set<UUID> = []
+    init(lifetime: TimeInterval, clock: @escaping @Sendable () -> TimeInterval, action: @escaping @Sendable (AXUIElement, CFString) -> AXError) {
+        self.staged = SafariClickStagedCaptures(bindings: SafariClickBindingStore(lifetime: lifetime, clock: clock))
+        self.action = action
+    }
+    func prepare(taskID: UUID, identity: SafariClickIdentity, capture: SafariClickCapture) async throws -> ToolRequest {
+        guard entries.count + preparing < 32 else { throw TaskServiceCapabilityError.unavailable }
+        preparing += 1
+        defer { preparing -= 1 }
+        let current = generation[taskID, default: 0], target = UUID().uuidString
+        guard let token = try await staged.stage(taskID: taskID, identity: identity, targetDigest: target, capture: capture) else { throw TaskServiceCapabilityError.unavailable }
+        let request = ToolRequest(taskID: taskID, name: "safari_click_experiment", sideEffect: .localWrite, target: "redacted Safari target", payload: token.uuidString)
+        let bound = await staged.bind(token: token, taskID: taskID, requestID: request.id, digest: request.payloadDigest)
+        guard bound, !Task.isCancelled, generation[taskID, default: 0] == current else { await staged.cancel(token: token); throw TaskServiceCapabilityError.unavailable }
+        entries[request.id] = Entry(taskID: taskID, token: token, targetDigest: target, identity: identity, digest: request.payloadDigest)
+        Task { [weak self] in await self?.expire(requestID: request.id, token: token) }
+        return request
+    }
+    private func expire(requestID: UUID, token: UUID) async {
+        while entries[requestID] != nil && !inFlight.contains(requestID) {
+            let remaining = await staged.remaining(token: token)
+            guard entries[requestID] != nil, !inFlight.contains(requestID) else { return }
+            guard let remaining else { await cancel(requestID: requestID); return }
+            do { try await Task.sleep(for: .seconds(remaining)) } catch { await cancel(requestID: requestID); return }
+        }
+    }
+    func contains(_ request: ToolRequest) -> Bool {
+        guard let e = entries[request.id] else { return false }
+        return e.taskID == request.taskID && e.digest == request.payloadDigest
+    }
+    func perform(_ request: ToolRequest) async throws {
+        guard let e = entries[request.id], e.taskID == request.taskID, e.digest == request.payloadDigest,
+              inFlight.insert(request.id).inserted else { throw TaskServiceCapabilityError.unavailable }
+        defer { inFlight.remove(request.id) }
+        guard let transfer = await staged.consume(token: e.token, taskID: e.taskID, requestID: request.id, digest: e.digest, targetDigest: e.targetDigest) else { throw TaskServiceCapabilityError.unavailable }
+        try await transfer.perform(expected: e.identity, action: action)
+        entries.removeValue(forKey: request.id)
+        await staged.cancel(token: e.token)
+    }
+    func cancel(requestID: UUID) async {
+        guard let entry = entries.removeValue(forKey: requestID) else { return }
+        await staged.cancel(token: entry.token)
+    }
+    func cancel(taskID: UUID) async {
+        generation[taskID, default: 0] &+= 1
+        let ids = entries.filter { $0.value.taskID == taskID }.map(\.key)
+        for id in ids { await cancel(requestID: id) }
+    }
+}
+#endif
