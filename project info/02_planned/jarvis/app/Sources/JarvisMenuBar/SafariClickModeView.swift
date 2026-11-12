@@ -22,7 +22,12 @@ struct SafariClickModeView: View {
                     beginCleanup(permissionLost: false)
                 } else {
                     do { try service.enableExperimentalClickMode(); enabled = true; message = "实验模式已开启。" }
-                    catch { enabled = false; message = "无法开启：请检查实验应用身份和辅助功能权限。" }
+                    catch {
+                        enabled = false
+                        message = service.isExperimentalClickBarrierBlocking
+                            ? "已有点击正在进行或结果未确认，实验审批已暂停。请等待或核对页面和实验记录；当前版本没有解除入口。"
+                            : "无法开启：请检查实验应用身份和辅助功能权限。"
+                    }
                 }
             }.disabled(busy)
             Spacer()
@@ -40,6 +45,9 @@ struct SafariClickModeView: View {
     private func refreshStatus() {
         guard !busy else { return }
         let current = service.isExperimentalClickModeEnabled
+        if service.isExperimentalClickBarrierBlocking {
+            message = "已有点击正在进行或结果未确认，实验审批已暂停。请等待或核对页面和实验记录；当前版本没有解除入口。"
+        }
         let needsCleanup = service.isExperimentalClickCleanupRequired
         let newlyLost = needsCleanup && !cleanupRequired
         enabled = current

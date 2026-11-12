@@ -296,7 +296,14 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     }
     /// Only available in a deliberately compiled click experiment. Opening the
     /// settings view does not enable this; a user must explicitly request it.
+    public var isExperimentalClickBarrierBlocking: Bool {
+        lock.withLock {
+            guard let sqlite = uow as? SQLitePersistenceUnitOfWork else { return true }
+            return (try? sqlite.hasExperimentalClickBarrier()) ?? true
+        }
+    }
     public func enableExperimentalClickMode() throws {
+        guard !isExperimentalClickBarrierBlocking else { throw ExperimentalClickBarrierError.unresolved }
         guard Self.experimentalSystemClickGate(bundleID: Bundle.main.bundleIdentifier,
             marker: Bundle.main.object(forInfoDictionaryKey: "JarvisSafariClickExperiment"),
             optedIn: true, trusted: AXIsProcessTrusted()) else { throw TaskServiceCapabilityError.unavailable }
@@ -463,7 +470,8 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
                 guard validateApproval(request: request, approvalDigest: digest) else { throw TaskServiceError.approvalDigestMismatch }
                 let approval = Approval(toolRequestID: request.id, actionDigest: request.payloadDigest, decision: .approved)
                 let taskStatus = try aggregateStatus(forTask: request.taskID, excluding: request.id, fallback: .running)
-                try uow.approveRequest(request, approval: approval, taskStatus: taskStatus,
+                guard let sqlite = uow as? SQLitePersistenceUnitOfWork else { throw TaskServiceError.incompatiblePersistence }
+                try sqlite.approveExperimentalClick(request, approval: approval, taskStatus: taskStatus,
                     audits: [event(request, summary: "experimental click approved", result: "approved", approvalID: approval.id)])
                 return request
             }
@@ -476,7 +484,8 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
             try lock.withLock {
                 guard let task = try tasks.fetch(id: request.taskID), task.status != .cancelled else { return }
                 let status = try aggregateStatus(forTask: request.taskID, excluding: request.id, fallback: .running)
-                try uow.finishRequest(request, status: .completed, taskStatus: status, audits: [event(request, summary: "experimental click completed", result: "completed")])
+                guard let sqlite = uow as? SQLitePersistenceUnitOfWork else { throw TaskServiceError.incompatiblePersistence }
+                try sqlite.finishExperimentalClickCompleted(request, taskStatus: status, audits: [event(request, summary: "experimental click completed", result: "completed")])
             }
             await click.cancel(requestID: requestID)
             await click.acknowledgeStarts(taskID: request.taskID, requestIDs: [requestID])
@@ -488,7 +497,19 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
                 if actionCompleted { result = "action outcome unknown; do not retry automatically" }
                 else if let failure = error as? SafariPressFailure, case .actionOutcomeUnknown = failure { result = "action outcome unknown; do not retry automatically" }
                 else { result = "action not completed" }
-                try uow.finishRequest(request, status: .failed, taskStatus: .failed, audits: [event(request, summary: "experimental click failed", result: result)])
+                let audit = event(request, summary: "experimental click failed", result: result)
+                let confirmedNotStarted: Bool
+                if !actionCompleted, let failure = error as? SafariPressFailure {
+                    switch failure {
+                    case .timeoutBeforeStart, .beforeStartRejected: confirmedNotStarted = true
+                    case .actionOutcomeUnknown: confirmedNotStarted = false
+                    }
+                } else { confirmedNotStarted = false }
+                if confirmedNotStarted, let sqlite = uow as? SQLitePersistenceUnitOfWork {
+                    try sqlite.finishExperimentalClickNotStarted(request, taskStatus: .failed, audits: [audit])
+                } else {
+                    try uow.finishRequest(request, status: .failed, taskStatus: .failed, audits: [audit])
+                }
                 return true
             }) ?? false
             if recorded { await click.acknowledgeStarts(taskID: request.taskID, requestIDs: [requestID]) }

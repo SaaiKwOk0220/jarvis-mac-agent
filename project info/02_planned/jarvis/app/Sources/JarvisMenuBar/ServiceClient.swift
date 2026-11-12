@@ -353,7 +353,10 @@ public final class ServiceClient: ObservableObject {
                 throw CancellationError()
             } catch let error as ServiceClientError {
                 if handlerInvoked { failedExperimentalApprovals.insert(request.id) }
-                actionError = handlerInvoked ? unknownMessage : error.localizedDescription
+                if case let .http(_, message) = error,
+                   message == "已有点击正在进行或结果未确认，请等待或核对页面和实验记录；当前版本没有解除入口。" {
+                    actionError = message
+                } else { actionError = handlerInvoked ? unknownMessage : error.localizedDescription }
                 throw error
             } catch {
                 if handlerInvoked { failedExperimentalApprovals.insert(request.id) }

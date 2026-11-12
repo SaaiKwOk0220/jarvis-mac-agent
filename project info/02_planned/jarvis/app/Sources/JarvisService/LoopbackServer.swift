@@ -4,6 +4,7 @@ import Security
 import Network
 import JarvisDomain
 import JarvisPolicy
+import JarvisPersistence
 
 public struct LoopbackResponse: Sendable {
     public let status: Int
@@ -163,6 +164,9 @@ public final class LoopbackServer: @unchecked Sendable {
             }
         } catch {
             #if JARVIS_SAFARI_CLICK_EXPERIMENT && JARVIS_SAFARI_EXPERIMENT_BUILD
+            if error is ExperimentalClickBarrierError {
+                return self.error(status: 409, message: "已有点击正在进行或结果未确认，请等待或核对页面和实验记录；当前版本没有解除入口。")
+            }
             if let failure = error as? SafariPressFailure, case .actionOutcomeUnknown = failure {
                 return self.error(status: 409, message: "操作结果未知，请先检查页面，切勿自动重试。")
             }
