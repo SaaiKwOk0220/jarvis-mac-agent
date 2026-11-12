@@ -622,9 +622,9 @@ private final class PCMTestCollector: @unchecked Sendable {
         XCTAssertNil(low.endpointSeconds)
     }
 
-    func testStalePartialFallsBackWithoutSending() async throws {
+    func testUnchangedPartialDoesNotEndRecording() async throws {
         let backend = FakeVoiceBackend()
-        let voice = VoiceCoordinator(backend: backend, stalePartialLimit: .milliseconds(40))
+        let voice = VoiceCoordinator(backend: backend, stalePartialNoticeDelay: .milliseconds(40))
         var sent: [String] = []
         await voice.start(autoSubmit: { sent.append($0) })
         backend.handler?("第一句")
@@ -632,12 +632,16 @@ private final class PCMTestCollector: @unchecked Sendable {
         backend.handler?("更新的第一句")
         try await Task.sleep(for: .milliseconds(25))
         XCTAssertTrue(voice.isRecording)
-        try await Task.sleep(for: .milliseconds(40))
-        XCTAssertTrue(voice.isFinishing)
-        backend.finishHandler?(true)
-        XCTAssertEqual(voice.transcript, "更新的第一句")
+        try await Task.sleep(for: .milliseconds(60))
+        XCTAssertTrue(voice.isRecording)
+        XCTAssertFalse(voice.isFinishing)
+        XCTAssertNotNil(voice.stalePartialNotice)
+        backend.handler?("新的文字")
+        XCTAssertNil(voice.stalePartialNotice)
+        XCTAssertEqual(voice.transcript, "新的文字")
         XCTAssertTrue(sent.isEmpty)
-        XCTAssertNotNil(voice.errorMessage)
+        XCTAssertNil(voice.errorMessage)
+        voice.stop()
     }
 
     func testVoiceQualityLabelsAndPreviewDoesNotOpenMicrophone() async {

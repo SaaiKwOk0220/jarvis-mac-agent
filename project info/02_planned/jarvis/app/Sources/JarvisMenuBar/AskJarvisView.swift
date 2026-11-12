@@ -386,6 +386,7 @@ struct AskJarvisView: View {
                     if voice.isFinishing { Text("正在完成转写…") }
                 }
                 if let error = voice.errorMessage { Text(error).foregroundStyle(.red).font(.caption) }
+                if let notice = voice.stalePartialNotice { Text(notice).foregroundStyle(.secondary).font(.caption) }
                 if let pending = autoSubmit.pendingText {
                     VStack(alignment: .leading) {
                         Text("即将运行：\(pending)").lineLimit(2).truncationMode(.tail)

@@ -156,12 +156,13 @@ struct VoiceDraftPrefix {
     @Published private(set) var isFinishing = false
     @Published private(set) var transcript = ""
     @Published private(set) var errorMessage: String?
+    @Published private(set) var stalePartialNotice: String?
     @Published private(set) var needsConfirmation = false
     private let backend: any VoiceBackend
     private let speaker: (any VoiceSpeaker)?
     private let recordingLimit: Duration?
-    private let stalePartialLimit: Duration
-    private var stalePartialTimeout: Task<Void, Never>?
+    private let stalePartialNoticeDelay: Duration
+    private var stalePartialNoticeTask: Task<Void, Never>?
     private var speakerGeneration = 0
     private var generation = 0
     private var finishTimeout: Task<Void, Never>?
@@ -173,8 +174,8 @@ struct VoiceDraftPrefix {
     func clearDiagnostics() { (backend as? OnDeviceSpeechBackend)?.clearDiagnostics(); diagnosticReason = nil }
     private var autoSubmit: (@MainActor @Sendable (String) -> Void)?
 
-    init(backend: any VoiceBackend, speaker: (any VoiceSpeaker)? = nil, recordingLimit: Duration? = nil, stalePartialLimit: Duration = .seconds(12)) {
-        self.backend = backend; self.speaker = speaker; self.recordingLimit = recordingLimit; self.stalePartialLimit = stalePartialLimit
+    init(backend: any VoiceBackend, speaker: (any VoiceSpeaker)? = nil, recordingLimit: Duration? = nil, stalePartialNoticeDelay: Duration = .seconds(12)) {
+        self.backend = backend; self.speaker = speaker; self.recordingLimit = recordingLimit; self.stalePartialNoticeDelay = stalePartialNoticeDelay
     }
 
     func start(onTranscript: (@MainActor @Sendable (String) -> Void)? = nil,
@@ -203,15 +204,13 @@ struct VoiceDraftPrefix {
                 // a useful partial. Do not erase the user's only transcript.
                 guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
                 if self.transcript != text {
-                    self.stalePartialTimeout?.cancel()
-                    self.stalePartialTimeout = Task { [weak self] in
+                    self.stalePartialNotice = nil
+                    self.stalePartialNoticeTask?.cancel()
+                    self.stalePartialNoticeTask = Task { [weak self] in
                         guard let self else { return }
-                        try? await Task.sleep(for: self.stalePartialLimit)
+                        try? await Task.sleep(for: self.stalePartialNoticeDelay)
                         guard !Task.isCancelled, self.generation == current, self.isRecording else { return }
-                        self.automaticFinish = false
-                        self.diagnosticReason = "转写长时间未更新"
-                        self.errorMessage = "未检测到可靠停顿，请检查转写并手动运行。"
-                        self.finishRecording()
+                        self.stalePartialNotice = "转写暂未更新，仍在录音；可继续说话或手动停止。"
                     }
                 }
                 self.transcript = text
@@ -280,6 +279,7 @@ struct VoiceDraftPrefix {
 
     func finishRecording() {
         guard isRecording else { return }
+        stalePartialNoticeTask?.cancel(); stalePartialNoticeTask = nil; stalePartialNotice = nil
         if diagnosticReason == nil { diagnosticReason = "手动结束录音" }
         isRecording = false
         isFinishing = true
@@ -297,9 +297,9 @@ struct VoiceDraftPrefix {
     }
 
     func stop() {
+        stalePartialNoticeTask?.cancel(); stalePartialNoticeTask = nil; stalePartialNotice = nil
         if diagnosticReason == nil && (isRecording || isStarting || isFinishing) { diagnosticReason = "手动停止" }
         generation += 1
-        stalePartialTimeout?.cancel(); stalePartialTimeout = nil
         recordingTimeout?.cancel(); recordingTimeout = nil
         automaticFinish = false
         autoSubmit = nil
