@@ -2925,3 +2925,89 @@ extension TaskServiceTests {
         await XCTAssertThrowsErrorAsync(try await executor.executeApprovedExact(request, gate: gate, generation: generation))
     }
 }
+
+extension TaskServiceTests {
+    func testExactBrowserFailureAfterStartReportsUnknownOutcome() async throws {
+        let gate = ExactBrowserSessionGate()
+        gate.setEnabled(true)
+        let generation = try XCTUnwrap(gate.capture())
+        let executor = BrowserOpenExecutor(opener: { _ in false }, exactOpener: { _ in false })
+        let request = ToolRequest(taskID: UUID(), name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private?secret=1", payload: "Open in browser")
+        do {
+            _ = try await executor.executeApprovedExact(request, gate: gate, generation: generation)
+            XCTFail("expected unknown outcome")
+        } catch BrowserOpenError.outcomeUnknown { }
+        catch { XCTFail("unexpected error: \(error)") }
+    }
+
+    func testExactBrowserCancellationAfterStartReportsUnknownOutcome() async throws {
+        let gate = ExactBrowserSessionGate()
+        gate.setEnabled(true)
+        let generation = try XCTUnwrap(gate.capture())
+        let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        let executor = BrowserOpenExecutor(opener: { _ in false }, exactOpener: { _ in
+            entered.signal()
+            return await withCheckedContinuation { continuation in
+                DispatchQueue.global().async { continuation.resume(returning: release.wait(timeout: .now() + 5) == .success) }
+            }
+        })
+        let request = ToolRequest(taskID: UUID(), name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private", payload: "Open in browser")
+        let operation = Task { try await executor.executeApprovedExact(request, gate: gate, generation: generation) }
+        let didStart = await withCheckedContinuation { continuation in
+            DispatchQueue.global().async { continuation.resume(returning: entered.wait(timeout: .now() + 2) == .success) }
+        }
+        XCTAssertTrue(didStart)
+        operation.cancel()
+        release.signal()
+        do { _ = try await operation.value; XCTFail("expected unknown outcome") }
+        catch BrowserOpenError.outcomeUnknown { }
+        catch { XCTFail("unexpected error: \(error)") }
+    }
+}
+
+#if JARVIS_EXACT_BROWSER_EXPERIMENT || JARVIS_COMBINED_EXPERIMENT
+extension TaskServiceTests {
+    func testStartedBrowserFailureReportsUnknownWithoutLeakingURL() async throws {
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { _ in false }, exactOpener: { _ in false }), exactBrowserEnabled: true)
+        let task = try await fixture.service.createTask(title: "open")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private?secret=private-token", payload: "Open in browser")
+        _ = try await fixture.service.submit(request: request)
+        let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        let item = try XCTUnwrap(pending.first)
+        try await fixture.service.approve(requestID: item.id, digest: item.digest)
+        try await fixture.waitForRequest(id: item.id, status: .failed)
+        let events = try fixture.audit.events(for: task.id)
+        let failure = try XCTUnwrap(events.first { $0.summary == "tool failure" })
+        XCTAssertTrue(failure.result.contains("outcome is unknown"))
+        XCTAssertTrue(failure.result.contains("do not retry automatically"))
+        XCTAssertTrue(events.allSatisfy { !$0.result.contains("private-token") && !$0.target.contains("private-token") })
+    }
+    func testCancelledStartedBrowserRecordsUnknownOutcomeWithoutLeakingURL() async throws {
+        let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        let executor = BrowserOpenExecutor(opener: { _ in false }, exactOpener: { _ in
+            entered.signal()
+            return await withCheckedContinuation { continuation in
+                DispatchQueue.global().async { continuation.resume(returning: release.wait(timeout: .now() + 5) == .success) }
+            }
+        })
+        let fixture = try Fixture(browserOpen: executor, exactBrowserEnabled: true)
+        let task = try await fixture.service.createTask(title: "open")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private?secret=private-token", payload: "Open in browser")
+        _ = try await fixture.service.submit(request: request)
+        let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        let item = try XCTUnwrap(pending.first)
+        try await fixture.service.approve(requestID: item.id, digest: item.digest)
+        let didStart = await withCheckedContinuation { continuation in
+            DispatchQueue.global().async { continuation.resume(returning: entered.wait(timeout: .now() + 2) == .success) }
+        }
+        XCTAssertTrue(didStart)
+        try await fixture.service.cancel(taskID: task.id)
+        release.signal()
+        await fixture.service.waitForTrackedExecution(item.id)
+        let events = try fixture.audit.events(for: task.id)
+        let warning = try XCTUnwrap(events.first { $0.summary == "browser open outcome unknown" })
+        XCTAssertTrue(warning.result.contains("do not retry automatically"))
+        XCTAssertTrue(events.allSatisfy { !$0.result.contains("private-token") && !$0.target.contains("private-token") })
+    }
+}
+#endif
