@@ -69,7 +69,7 @@ actor SafariClickCapture {
 
     /// Revalidation and AXPress remain non-atomic with respect to Safari.
     fileprivate func press(expected: SafariClickIdentity,
-               timeout: TimeInterval, onTimeout: @escaping @Sendable () -> SafariPressTimeout, beforeAction: @escaping @Sendable () -> Void,
+               timeout: TimeInterval, onTimeout: @escaping @Sendable () -> SafariPressFailure, onActionFailure: @escaping @Sendable () -> SafariPressFailure, beforeAction: @escaping @Sendable () -> Void,
                action: @escaping @Sendable (AXUIElement, CFString) -> AXError) async throws {
         guard let before = captured else { throw CaptureError.changed }
         try await verify(expected: expected)
@@ -79,7 +79,7 @@ actor SafariClickCapture {
               CFEqual(after.window, before.window), CFEqual(after.element, before.element) else {
             throw CaptureError.changed
         }
-        try await SafariAXPressAdapter.perform(after, timeout: timeout, onTimeout: onTimeout, beforeAction: beforeAction, action: action)
+        try await SafariAXPressAdapter.perform(after, timeout: timeout, onTimeout: onTimeout, onActionFailure: onActionFailure, beforeAction: beforeAction, action: action)
         captured = nil
     }
 }
@@ -92,6 +92,7 @@ private final class SafariClickRevocationGate: @unchecked Sendable {
     enum Result { case revoked, alreadyStarted, idle }
     private let state = ManagedAtomic<Int>(0) // idle, pending, started, revoked, completed
     func activate() { state.store(1, ordering: .releasing) }
+    func hasStarted() -> Bool { let current = state.load(ordering: .acquiring); return current == 2 || current == 4 }
     func finish() { _ = state.compareExchange(expected: 4, desired: 0, ordering: .acquiringAndReleasing) }
     func revoke() -> Result {
         if state.compareExchange(expected: 1, desired: 3, ordering: .acquiringAndReleasing).exchanged { return .revoked }
@@ -196,7 +197,7 @@ actor SafariClickApprovalPrototype {
             let action = self.action
             let revocation = entry.gate
             // The AX check and action are not atomic; cancellation cannot undo a started press.
-            try await capture.press(expected: entry.identity, timeout: actionTimeout, onTimeout: { revocation.revoke() == .alreadyStarted ? .actionOutcomeUnknown : .timeoutBeforeStart }, beforeAction: beforeAction) { element, operation in
+            try await capture.press(expected: entry.identity, timeout: actionTimeout, onTimeout: { revocation.revoke() == .alreadyStarted ? .actionOutcomeUnknown : .timeoutBeforeStart }, onActionFailure: { revocation.hasStarted() ? .actionOutcomeUnknown : .beforeStartRejected }, beforeAction: beforeAction) { element, operation in
                 let now = clock()
                 guard now.isFinite, now >= beforePress, now < entry.expires,
                       !Task.isCancelled else { return .failure }
@@ -218,11 +219,12 @@ actor SafariClickApprovalPrototype {
 /// Unregistered adapter. The caller must immediately revalidate capture before
 /// invoking it; AXPress is not atomic with validation and cannot be undone.
 /// A timed-out started operation may still finish; callers must not retry automatically.
-enum SafariPressTimeout: LocalizedError {
-    case timeoutBeforeStart, actionOutcomeUnknown
+enum SafariPressFailure: LocalizedError {
+    case timeoutBeforeStart, beforeStartRejected, actionOutcomeUnknown
     var errorDescription: String? {
         switch self {
         case .timeoutBeforeStart: return "操作超时且尚未开始；请重新确认后再请求。"
+        case .beforeStartRejected: return "操作未开始；目标或授权已失效。"
         case .actionOutcomeUnknown: return "操作已开始，但结果未知。请先检查页面；不要自动重试。"
         }
     }
@@ -236,7 +238,7 @@ private final class SafariPressCompletion: @unchecked Sendable {
         lock.lock(); let value = continuation; continuation = nil; lock.unlock()
         value?.resume(with: result)
     }
-    func timeout(_ revoke: () -> SafariPressTimeout) {
+    func timeout(_ revoke: () -> SafariPressFailure) {
         lock.lock()
         guard let value = continuation else { lock.unlock(); return }
         continuation = nil
@@ -250,7 +252,7 @@ private enum SafariAXPressAdapter {
     private static let busy = ManagedAtomic(false)
     private static let worker = DispatchQueue(label: "jarvis.safari.axpress", qos: .userInitiated)
     static func perform(_ candidate: SafariClickCandidate, timeout: TimeInterval,
-                        onTimeout: @escaping @Sendable () -> SafariPressTimeout, beforeAction: @escaping @Sendable () -> Void,
+                        onTimeout: @escaping @Sendable () -> SafariPressFailure, onActionFailure: @escaping @Sendable () -> SafariPressFailure, beforeAction: @escaping @Sendable () -> Void,
                         action: @escaping @Sendable (AXUIElement, CFString) -> AXError) async throws {
         guard candidate.identity.enabled, timeout.isFinite, timeout > 0 else { throw SafariAXReadError.unavailable }
         try Task.checkCancellation()
@@ -262,7 +264,7 @@ private enum SafariAXPressAdapter {
                 defer { busy.store(false, ordering: .releasing) }
                 beforeAction()
                 let result = action(candidate.element, kAXPressAction as CFString)
-                completion.complete(result == .success ? .success(()) : .failure(SafariAXReadError.unavailable))
+                completion.complete(result == .success ? .success(()) : .failure(onActionFailure()))
             }
             DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + timeout) {
                 completion.timeout(onTimeout)

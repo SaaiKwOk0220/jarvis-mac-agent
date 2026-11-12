@@ -254,7 +254,7 @@ extension SafariClickTicketTests {
         let token = try await coordinator.prepare(requestID: id, identity: identity)
         let approval = Task { try await coordinator.approve(token: token, requestID: id, digest: "digest") }
         await fulfillment(of: [entered], timeout: 2)
-        do { try await approval.value; XCTFail("must time out") } catch SafariPressTimeout.timeoutBeforeStart { }
+        do { try await approval.value; XCTFail("must time out") } catch SafariPressFailure.timeoutBeforeStart { }
         _ = try await coordinator.prepare(requestID: UUID(), identity: identity)
         blocking.release.signal()
         try await Task.sleep(for: .milliseconds(100))
@@ -279,6 +279,20 @@ extension SafariClickTicketTests {
         XCTAssertEqual(counter.value, 0)
     }
 
+    func testAXFailureAfterSideEffectIsIndeterminateAndNotRetried() async throws {
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "digest")
+        let ref = AXUIElementCreateSystemWide()
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let counter = ClickActionCounter()
+        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: SafariClickCapture { [candidate] }, clock: { 11 }) { _, _ in counter.increment(); return .failure }
+        let id = UUID()
+        let token = try await coordinator.prepare(requestID: id, identity: identity)
+        do { try await coordinator.approve(token: token, requestID: id, digest: "digest"); XCTFail("AX error") } catch SafariPressFailure.actionOutcomeUnknown { }
+        XCTAssertEqual(counter.value, 1)
+        do { try await coordinator.approve(token: token, requestID: id, digest: "digest"); XCTFail("replay") } catch { }
+        XCTAssertEqual(counter.value, 1)
+    }
+
     func testTimedOutActionKeepsWorkerBoundedUntilReturn() async throws {
         let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "digest")
         let ref = AXUIElementCreateSystemWide()
@@ -291,7 +305,7 @@ extension SafariClickTicketTests {
         let token = try await coordinator.prepare(requestID: id, identity: identity)
         let approval = Task { try await coordinator.approve(token: token, requestID: id, digest: "digest") }
         await fulfillment(of: [entered], timeout: 2)
-        do { try await approval.value; XCTFail("blocked action must time out") } catch SafariPressTimeout.actionOutcomeUnknown { }
+        do { try await approval.value; XCTFail("blocked action must time out") } catch SafariPressFailure.actionOutcomeUnknown { }
         let next = try await coordinator.prepare(requestID: UUID(), identity: identity)
         do { try await coordinator.approve(token: next, requestID: UUID(), digest: "digest"); XCTFail("mismatched request") } catch { }
         let nextID = UUID()
