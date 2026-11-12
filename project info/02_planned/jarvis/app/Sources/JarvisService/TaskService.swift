@@ -166,7 +166,7 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
                 throw BrowserURLTicketError.invalidRequest
             }
             return try exactBrowserGate.withCurrentGeneration(exactGeneration) {
-            guard try lock.withLock({ try hasExactBrowserCapacityLocked() }) else { throw TaskServiceCapabilityError.unavailable }
+            guard try lock.withLock({ try hasExactBrowserCapacityLocked() }) else { throw BrowserOpenError.exactCapacityReached }
             let ticket = browserTickets.issue(url: request.target)
             do {
                 let stored = try browserTickets.persistableRequest(request, ticket: ticket)
