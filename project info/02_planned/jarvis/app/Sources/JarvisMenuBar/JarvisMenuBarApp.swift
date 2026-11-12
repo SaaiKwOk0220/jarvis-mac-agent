@@ -60,7 +60,18 @@ struct JarvisMenuBarApp: App {
         registerGlobalHotkey()
     }
 
+    private var askView: some View {
+        AskJarvisView(client: client, service: runtime.taskService,
+                      voiceDraftStore: runtime.voiceDraftStore,
+                      memoryContextProvider: runtime.memoryContextProvider)
+            .frame(minWidth: 520, minHeight: 460)
+    }
+
     var body: some Scene {
+        #if JARVIS_SAFARI_EXPERIMENT_BUILD || JARVIS_COMBINED_EXPERIMENT
+        Window("Ask Jarvis", id: "ask-jarvis") { askView }
+            .defaultSize(width: 620, height: 560)
+        #endif
         Window("Welcome to Jarvis", id: "welcome") {
             WelcomeView()
                 .frame(minWidth: 540, minHeight: 460)
@@ -96,16 +107,10 @@ struct JarvisMenuBarApp: App {
                 .frame(minWidth: 420, minHeight: 360)
         }
         .defaultSize(width: 520, height: 460)
-        Window("Ask Jarvis", id: "ask-jarvis") {
-            AskJarvisView(
-                client: client,
-                service: runtime.taskService,
-                voiceDraftStore: runtime.voiceDraftStore,
-                memoryContextProvider: runtime.memoryContextProvider
-            )
-            .frame(minWidth: 520, minHeight: 460)
-        }
-        .defaultSize(width: 620, height: 560)
+        #if !JARVIS_SAFARI_EXPERIMENT_BUILD && !JARVIS_COMBINED_EXPERIMENT
+        Window("Ask Jarvis", id: "ask-jarvis") { askView }
+            .defaultSize(width: 620, height: 560)
+        #endif
         Window("Memory", id: "memory") {
             if let memory = runtime.memory {
                 MemoryView(memory: memory)
