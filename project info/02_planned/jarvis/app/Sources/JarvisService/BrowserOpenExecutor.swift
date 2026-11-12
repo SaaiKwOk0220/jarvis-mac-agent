@@ -7,10 +7,15 @@ public enum BrowserOpenError: Error { case invalidRequest, openFailed, unavailab
 /// Opens an approved HTTPS URL; no page contents are read or returned.
 public struct BrowserOpenExecutor: ToolExecutor, Sendable {
     private let opener: @Sendable (URL) async -> Bool
-    private let exactOpener: (@MainActor @Sendable (URL) -> Bool)?
+    private let exactOpener: (@Sendable (URL) async -> Bool)?
 
     public init() {
-        self.exactOpener = { NSWorkspace.shared.open($0) }
+        self.exactOpener = { url in
+            do {
+                _ = try await NSWorkspace.shared.open(url, configuration: NSWorkspace.OpenConfiguration())
+                return true
+            } catch { return false }
+        }
         self.opener = { url in
             await MainActor.run {
                 BrowserOpenExecutor.openOnMainActorIfNotCancelled(url) { NSWorkspace.shared.open($0) }
@@ -20,7 +25,7 @@ public struct BrowserOpenExecutor: ToolExecutor, Sendable {
 
     public init(opener: @escaping @Sendable (URL) async -> Bool) { self.opener = opener; self.exactOpener = nil }
 
-    init(opener: @escaping @Sendable (URL) async -> Bool, exactOpener: @escaping @MainActor @Sendable (URL) -> Bool) {
+    init(opener: @escaping @Sendable (URL) async -> Bool, exactOpener: @escaping @Sendable (URL) async -> Bool) {
         self.opener = opener
         self.exactOpener = exactOpener
     }
@@ -48,12 +53,10 @@ public struct BrowserOpenExecutor: ToolExecutor, Sendable {
         try Task.checkCancellation()
         guard let exactOpener else { throw BrowserOpenError.unavailable }
         let attempt = gate.pendingOpen(generation: generation)
-        let opened = try await MainActor.run {
-            // Closing after the pending → started transition cannot revoke this
-            // open. AppKit runs outside the lock and may block or re-enter.
-            try gate.beginOpen(attempt)
-            return exactOpener(url)
-        }
+        // Closing after the pending → started transition cannot revoke this
+        // open. The async system API runs outside the lock and main actor.
+        try gate.beginOpen(attempt)
+        let opened = await exactOpener(url)
         guard opened else { throw BrowserOpenError.openFailed }
         return ToolResult(summary: "Browser open requested")
     }

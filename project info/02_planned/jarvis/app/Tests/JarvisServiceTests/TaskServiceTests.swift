@@ -116,6 +116,7 @@ final class TaskServiceTests: XCTestCase {
         })
         let count = await recorder.count
         XCTAssertEqual(count, 1)
+        XCTAssertEqual(recorder.lastURL?.absoluteString, request.target)
     }
 
     func testBrowserOpenRequiresApprovalAndRedactsAuditPath() async throws {
@@ -1289,8 +1290,10 @@ private func XCTAssertThrowsErrorAsync<T>(
 private final class BrowserRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private var recorded = 0
+    private var last: URL?
     var count: Int { lock.withLock { recorded } }
-    func record(_ url: URL) { lock.withLock { recorded += 1 } }
+    var lastURL: URL? { lock.withLock { last } }
+    func record(_ url: URL) { lock.withLock { recorded += 1; last = url } }
 }
 
 private struct AllowTestSafariPolicy: PolicyEvaluator {
@@ -2900,8 +2903,11 @@ extension TaskServiceTests {
         let generation = try XCTUnwrap(gate.capture())
         let executor = BrowserOpenExecutor(opener: { _ in false }, exactOpener: { _ in
             entered.signal()
-            _ = release.wait(timeout: .now() + 5)
-            return true
+            return await withCheckedContinuation { continuation in
+                DispatchQueue.global().async {
+                    continuation.resume(returning: release.wait(timeout: .now() + 5) == .success)
+                }
+            }
         })
         let request = ToolRequest(taskID: UUID(), name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private", payload: "Open in browser")
         let operation = Task.detached { try await executor.executeApprovedExact(request, gate: gate, generation: generation) }
