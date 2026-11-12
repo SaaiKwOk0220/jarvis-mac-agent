@@ -372,7 +372,7 @@ struct AskJarvisView: View {
                 if exactBrowserChanging { Text("正在更新完整网址权限…") }
                 Text("浏览器打开后可能重定向或发送网络请求；已经打开的网页及其后续操作无法撤回。")
                     .font(.caption).foregroundStyle(.secondary)
-                Text("如果打开结果不明，请先检查浏览器，确认后再决定后续操作；重启应用可能使未确认状态消失。若待处理及结果未知的请求合计达到容量上限，请停止使用此功能并逐项核查，不要反复重试。")
+                Text("若打开结果不明，请检查浏览器并停止重复尝试。已记录的不明结果会保留屏障，目前没有解除入口；既往未记录的状态或数据库不可用时无法保证记录。系统接受打开请求不代表网页已完成加载或操作。若待处理及结果未知请求合计达到容量上限，请停止使用并逐项核查。")
                     .font(.caption).foregroundStyle(.secondary)
                 if let exactBrowserError { Text(exactBrowserError).foregroundStyle(.red) }
             }
