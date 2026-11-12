@@ -84,7 +84,11 @@ public final class ServiceClient: ObservableObject {
     @Published public private(set) var actionError: String?
 
     var experimentalClickApprovalForTesting: ((ApprovalRequest) async throws -> Void)?
-    private struct ApprovalFreshness { let taskID: UUID; let digest: String; let generation: UInt64 }
+    var experimentalClickRefreshForTesting: ((UUID) async throws -> [ApprovalRequest])?
+    var approvalClockForTesting: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    private var lastApprovalClock: TimeInterval?
+    private let approvalFreshnessLifetime: TimeInterval = 2
+    private struct ApprovalFreshness { let taskID: UUID; let digest: String; let generation: UInt64; let deadline: TimeInterval }
     @Published private var approvalFreshness: [UUID: ApprovalFreshness] = [:]
     private var approvalGeneration: [UUID: UInt64] = [:]
     @Published private var approvalMutationCount: [UUID: Int] = [:]
@@ -198,6 +202,12 @@ public final class ServiceClient: ObservableObject {
         } catch { throw ServiceClientError.decoding }
     }
 
+    private func approvalTime() -> TimeInterval? {
+        let now = approvalClockForTesting()
+        guard now.isFinite, now >= 0, lastApprovalClock.map({ now >= $0 }) ?? true else { return nil }
+        lastApprovalClock = now
+        return now
+    }
     @discardableResult func beginApprovalRefresh(taskID: UUID) -> UInt64 {
         let generation = approvalGeneration[taskID, default: 0] &+ 1
         approvalGeneration[taskID] = generation
@@ -210,8 +220,10 @@ public final class ServiceClient: ObservableObject {
         for request in requests where request.taskID == taskID && next[request.id] == nil { next[request.id] = request }
         approvalRequests = next
         var freshness = approvalFreshness.filter { $0.value.taskID != taskID }
-        for request in requests where request.taskID == taskID && next[request.id] == request && request.previewAvailable == true {
-            freshness[request.id] = ApprovalFreshness(taskID: taskID, digest: request.digest, generation: generation)
+        if let now = approvalTime(), (now + approvalFreshnessLifetime).isFinite {
+            for request in requests where request.taskID == taskID && next[request.id] == request && request.previewAvailable == true {
+                freshness[request.id] = ApprovalFreshness(taskID: taskID, digest: request.digest, generation: generation, deadline: now + approvalFreshnessLifetime)
+            }
         }
         approvalFreshness = freshness
     }
@@ -229,8 +241,8 @@ public final class ServiceClient: ObservableObject {
         beginApprovalRefresh(taskID: taskID)
     }
     func isApprovalFresh(_ request: ApprovalRequest) -> Bool {
-        guard approvalMutationCount[request.taskID, default: 0] == 0, let freshness = approvalFreshness[request.id], freshness.taskID == request.taskID,
-              freshness.digest == request.digest, approvalGeneration[request.taskID] == freshness.generation,
+        guard let now = approvalTime(), approvalMutationCount[request.taskID, default: 0] == 0, let freshness = approvalFreshness[request.id], freshness.taskID == request.taskID,
+              freshness.digest == request.digest, now < freshness.deadline, approvalGeneration[request.taskID] == freshness.generation,
               approvalRequests[request.id] == request, request.previewAvailable == true else { return false }
         return true
     }
@@ -262,6 +274,12 @@ public final class ServiceClient: ObservableObject {
     public func approve(_ request: ApprovalRequest) async throws {
         if request.kind == "safari_click_experiment" {
             guard isApprovalFresh(request), !request.digest.isEmpty, let handler = experimentalClickApprovalForTesting else { throw ServiceClientError.unavailable }
+            if let refresh = experimentalClickRefreshForTesting {
+                let generation = beginApprovalRefresh(taskID: request.taskID)
+                let requests = try await refresh(request.taskID)
+                commitApprovalRefresh(requests, taskID: request.taskID, generation: generation)
+            } else { _ = try await loadApprovalRequests(taskID: request.taskID) }
+            guard isApprovalFresh(request) else { throw ServiceClientError.unavailable }
             beginApprovalMutation(taskID: request.taskID)
             defer { endApprovalMutation(taskID: request.taskID) }
             try await handler(request)

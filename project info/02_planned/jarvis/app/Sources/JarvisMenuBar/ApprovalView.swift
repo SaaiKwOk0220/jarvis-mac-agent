@@ -69,10 +69,12 @@ struct ApprovalView: View {
                         }
                             .disabled(submittingRequestID != nil)
                         Spacer()
-                        Button("Approve") {
-                            submit(.approve, request: request)
-                        }
+                        TimelineView(.periodic(from: .now, by: 1)) { _ in
+                            Button("Approve") {
+                                submit(.approve, request: request)
+                            }
                             .disabled(submittingRequestID != nil || !ApprovalPresentation(request: request, clickHandlerAvailable: client.experimentalClickApprovalForTesting != nil && client.isApprovalFresh(request)).canApprove || (isSafariRead(request) && !request.target.hasPrefix("https://")))
+                        }
                     }
                 }
             }

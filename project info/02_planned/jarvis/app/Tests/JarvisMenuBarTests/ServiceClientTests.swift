@@ -733,14 +733,69 @@ extension ServiceClientTests {
         XCTAssertFalse(client.isApprovalFresh(changed))
         XCTAssertNil(client.approvalRequests[changed.id])
     }
+    func testExperimentalFreshnessExpiresAndRefreshBeforeApprovalRevalidatesTarget() async throws {
+        let client = ServiceClient(), taskID = UUID()
+        var now: TimeInterval = 10
+        client.approvalClockForTesting = { now }
+        let request = ApprovalRequest(id: UUID(), taskID: taskID, reason: "test", target: "https://example.com/a", payload: "target", digest: "digest", kind: "safari_click_experiment", previewAvailable: true)
+        client.applyApprovalRequests([request], taskID: taskID)
+        XCTAssertTrue(client.isApprovalFresh(request))
+        now = 13
+        XCTAssertFalse(client.isApprovalFresh(request))
+        var calls = 0
+        client.experimentalClickApprovalForTesting = { _ in calls += 1 }
+        client.experimentalClickRefreshForTesting = { _ in [request] }
+        do { try await client.approve(request); XCTFail("expired preview") } catch { }
+        client.applyApprovalRequests([request], taskID: taskID)
+        let changed = ApprovalRequest(id: request.id, taskID: taskID, reason: "test", target: "https://example.com/b", payload: "target", digest: "digest", kind: "safari_click_experiment", previewAvailable: true)
+        client.experimentalClickRefreshForTesting = { _ in [changed] }
+        do { try await client.approve(request); XCTFail("changed target") } catch { }
+        XCTAssertEqual(calls, 0)
+        client.experimentalClickRefreshForTesting = { _ in [request] }
+        client.applyApprovalRequests([request], taskID: taskID)
+        try await client.approve(request)
+        XCTAssertEqual(calls, 1)
+        now = 12
+        client.applyApprovalRequests([request], taskID: taskID)
+        XCTAssertFalse(client.isApprovalFresh(request))
+    }
+    func testApprovalRefreshInFlightCannotRestoreChangedTarget() async throws {
+        let client = ServiceClient(), taskID = UUID()
+        let request = ApprovalRequest(id: UUID(), taskID: taskID, reason: "test", target: "https://example.com/a", payload: "old", digest: "digest", kind: "safari_click_experiment", previewAvailable: true)
+        let changed = ApprovalRequest(id: request.id, taskID: taskID, reason: "test", target: "https://example.com/b", payload: "new", digest: "digest", kind: "safari_click_experiment", previewAvailable: true)
+        client.applyApprovalRequests([request], taskID: taskID)
+        let entered = expectation(description: "refresh waiting")
+        let pause = ApprovalRefreshPause(entered: entered)
+        client.experimentalClickRefreshForTesting = { _ in await pause.wait(); return [request] }
+        var calls = 0
+        client.experimentalClickApprovalForTesting = { _ in calls += 1 }
+        let attempt = Task { try await client.approve(request) }
+        await fulfillment(of: [entered], timeout: 2)
+        client.applyApprovalRequests([changed], taskID: taskID)
+        pause.release()
+        do { try await attempt.value; XCTFail("old request approved") } catch { }
+        XCTAssertEqual(calls, 0)
+        XCTAssertTrue(client.isApprovalFresh(changed))
+        XCTAssertFalse(client.isApprovalFresh(request))
+    }
     func testExperimentalApprovalUsesOnlyInjectedFakeHandler() async throws {
         let client = ServiceClient()
         let request = ApprovalRequest(id: UUID(), taskID: UUID(), reason: "test", target: "https://example.com", payload: "target", digest: "digest", kind: "safari_click_experiment", previewAvailable: true)
         do { try await client.approve(request); XCTFail("unregistered click must fail") } catch { }
         var called = false
         client.experimentalClickApprovalForTesting = { received in called = received.id == request.id }
+        client.experimentalClickRefreshForTesting = { _ in [request] }
         client.applyApprovalRequests([request], taskID: request.taskID)
         try await client.approve(request)
         XCTAssertTrue(called)
     }
+}
+
+@MainActor
+private final class ApprovalRefreshPause {
+    let entered: XCTestExpectation
+    var continuation: CheckedContinuation<Void, Never>?
+    init(entered: XCTestExpectation) { self.entered = entered }
+    func wait() async { await withCheckedContinuation { continuation = $0; entered.fulfill() } }
+    func release() { continuation?.resume(); continuation = nil }
 }
