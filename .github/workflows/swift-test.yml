@@ -2,7 +2,7 @@ name: swift-test
 
 on:
   pull_request:
-    branches: [main, fix/loopback-security-main]
+    branches: [main, fix/loopback-security-main, feat/safari-read-stacked]
   push:
     branches: [main]
 
@@ -37,3 +37,10 @@ jobs:
 
       - name: Run swift test
         run: swift test --package-path 'project info/02_planned/jarvis/app'
+
+      - name: Test Safari read experiment
+        if: github.event_name == 'pull_request' && github.head_ref == 'feat/safari-read-session-control' && github.base_ref == 'feat/safari-read-stacked'
+        run: >-
+          swift test --package-path 'project info/02_planned/jarvis/app'
+          --scratch-path "$RUNNER_TEMP/jarvis-safari-read-build"
+          -Xswiftc -DJARVIS_SAFARI_EXPERIMENT_BUILD

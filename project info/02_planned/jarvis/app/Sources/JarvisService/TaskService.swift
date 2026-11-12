@@ -26,14 +26,15 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     private let webFetch: WebFetchToolExecutor?
     private let screenshot: ScreenshotToolExecutor?
     private let accessibility: AccessibilityQueryToolExecutor?
-    private let enableSafariRead: Bool
-    private let safariCoordinator = SafariReadCoordinator()
+    private let safariToggleAllowed: Bool
+    private let safariGate: SafariReadGate
+    private let safariCoordinator: SafariReadCoordinator
     var safariCaptureFactory: @Sendable () -> any SafariTargetCapturing = { SafariAXTargetCapture() }
     private let ephemeralResults = EphemeralToolResultStore()
     private let lock = NSLock()
     private var executions: [UUID: Task<Void, Error>] = [:]
 
-    public init(taskRepository: any TaskRepository, auditRepository: any AuditRepository, policy: any PolicyEvaluator, policyConfig: PolicyConfig = .init(), executor: any ToolExecutor = NoOpToolExecutor(), terminal: TerminalToolExecutor? = nil, webFetch: WebFetchToolExecutor? = nil, screenshot: ScreenshotToolExecutor? = nil, accessibility: AccessibilityQueryToolExecutor? = nil, enableSafariRead: Bool = false, requestRepository: (any ToolRequestRepository)? = nil, approvalRepository: (any ApprovalRepository)? = nil, unitOfWork: (any PersistenceUnitOfWork)? = nil) throws {
+    public init(taskRepository: any TaskRepository, auditRepository: any AuditRepository, policy: any PolicyEvaluator, policyConfig: PolicyConfig = .init(), executor: any ToolExecutor = NoOpToolExecutor(), terminal: TerminalToolExecutor? = nil, webFetch: WebFetchToolExecutor? = nil, screenshot: ScreenshotToolExecutor? = nil, accessibility: AccessibilityQueryToolExecutor? = nil, enableSafariRead: Bool = false, requestRepository: (any ToolRequestRepository)? = nil, approvalRepository: (any ApprovalRepository)? = nil, unitOfWork: (any PersistenceUnitOfWork)? = nil, allowSafariReadToggle: Bool = false) throws {
         guard let sqliteTasks = taskRepository as? SQLiteTaskRepository,
               let sqliteAudits = auditRepository as? SQLiteAuditRepository,
               sqliteTasks.database === sqliteAudits.database else { throw TaskServiceError.incompatiblePersistence }
@@ -50,7 +51,17 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
             guard let sqlite = unitOfWork as? SQLitePersistenceUnitOfWork, sqlite.database === database else { throw TaskServiceError.incompatiblePersistence }
             self.uow = sqlite
         } else { self.uow = SQLitePersistenceUnitOfWork(database: database) }
-        self.tasks = taskRepository; self.audits = auditRepository; self.policy = policy; self.config = policyConfig; self.executor = executor; self.terminal = terminal; self.webFetch = webFetch; self.screenshot = screenshot; self.accessibility = accessibility; self.enableSafariRead = enableSafariRead
+        let safariGate = SafariReadGate()
+        #if JARVIS_SAFARI_EXPERIMENT_BUILD
+        safariGate.setEnabled(enableSafariRead)
+        self.safariToggleAllowed = enableSafariRead || allowSafariReadToggle
+        #else
+        // Ordinary builds never activate experimental Safari access, regardless of runtime arguments.
+        self.safariToggleAllowed = false
+        #endif
+        self.safariGate = safariGate
+        self.safariCoordinator = SafariReadCoordinator(gate: safariGate)
+        self.tasks = taskRepository; self.audits = auditRepository; self.policy = policy; self.config = policyConfig; self.executor = executor; self.terminal = terminal; self.webFetch = webFetch; self.screenshot = screenshot; self.accessibility = accessibility
     }
 
     public func createTask(title: String) async throws -> JarvisTask { try lock.withLock { let task = JarvisTask(title: title); try uow.createTask(task, audit: event(taskID: task.id, summary: "task created", result: "created")); return task } }
@@ -79,10 +90,17 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
         return output
     }
 
-    public func isSafariReadAvailable() async -> Bool { enableSafariRead }
+    public func isSafariReadAvailable() async -> Bool { safariGate.capture() != nil }
+
+    public func isSafariReadEnabled() -> Bool { safariGate.capture() != nil }
+
+    public func setSafariReadEnabled(_ enabled: Bool) throws {
+        guard !enabled || safariToggleAllowed else { throw TaskServiceCapabilityError.unavailable }
+        safariGate.setEnabled(enabled) { if !enabled { ephemeralResults.clearAll() } }
+    }
 
     public func prepareSafariRead(taskID: UUID) async throws -> ToolRequest {
-        guard enableSafariRead else { throw TaskServiceCapabilityError.unavailable }
+        guard safariGate.capture() != nil else { throw TaskServiceCapabilityError.unavailable }
         try lock.withLock { try ensureRunning(taskID) }
         let request = try await safariCoordinator.prepare(taskID: taskID, capture: safariCaptureFactory())
         do {
@@ -119,7 +137,7 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
         try lock.withLock { try ensureRunning(request.taskID) }
         var decision = policy.evaluate(request, config: config)
         if request.name == "safari_read" {
-            let preview = enableSafariRead ? await safariCoordinator.preview(request) : nil
+            let preview = safariGate.capture() != nil ? await safariCoordinator.preview(request) : nil
             if preview == nil { decision = .deny(reason: "Safari capture unavailable or expired") }
             else if case .requireApproval = decision { } else { decision = .deny(reason: "Safari reading requires explicit approval") }
         }
@@ -152,7 +170,7 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
             return request
         }
         if preliminary.name == "safari_read" {
-            guard enableSafariRead, await safariCoordinator.preview(preliminary) != nil else { throw TaskServiceCapabilityError.unavailable }
+            guard safariGate.capture() != nil, await safariCoordinator.preview(preliminary) != nil else { throw TaskServiceCapabilityError.unavailable }
         }
         let (request, approval) = try lock.withLock { () throws -> (ToolRequest, Approval) in
             guard let (request, status) = try requests.fetch(id: requestID), status == .pending else { throw TaskServiceError.requestNotAwaitingApproval }
@@ -192,10 +210,13 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     }
 
     public func takeEphemeralToolResult(taskID: UUID, requestID: UUID, digest: String) async throws -> String? {
-        try lock.withLock {
-            guard let (request, status) = try requests.fetch(id: requestID), request.taskID == taskID,
-                  request.name == "safari_read", request.payloadDigest == digest, status == .completed else { return nil }
-            return ephemeralResults.take(taskID: taskID, requestID: requestID, digest: digest)
+        guard let generation = safariGate.capture() else { return nil }
+        return try safariGate.withCurrentGeneration(generation) {
+            try lock.withLock {
+                guard let (request, status) = try requests.fetch(id: requestID), request.taskID == taskID,
+                      request.name == "safari_read", request.payloadDigest == digest, status == .completed else { return nil }
+                return ephemeralResults.take(taskID: taskID, requestID: requestID, digest: digest)
+            }
         }
     }
 
@@ -272,7 +293,7 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     private func execute(_ request: ToolRequest, approval: Approval? = nil) async throws {
         do {
             try lock.withLock { guard let (_, status) = try requests.fetch(id: request.id), status == .executing else { throw TaskServiceError.requestNotAwaitingApproval }; try requireRunning(request.taskID) }
-            if request.name == "safari_read" && (!enableSafariRead || approval == nil) { throw SafariAXReadError.unavailable }
+            if request.name == "safari_read" && (safariGate.capture() == nil || approval == nil) { throw SafariAXReadError.unavailable }
             let picked: any ToolExecutor = {
                 if request.name == "shell", let terminal = self.terminal { return terminal }
                 if request.name == "fetch", let webFetch = self.webFetch { return webFetch }
@@ -281,13 +302,17 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
                 return executor
             }()
             let result: ToolResult
+            var safariGeneration: UInt64?
             if request.name == "safari_read" {
                 guard let approval else { throw SafariAXReadError.unavailable }
-                result = ToolResult(summary: try await safariCoordinator.readApproved(request, approval: approval))
+                let read = try await safariCoordinator.readApprovedWithGeneration(request, approval: approval)
+                guard let generation = read.generation else { throw SafariReadCoordinatorError.unavailable }
+                safariGeneration = generation
+                result = ToolResult(summary: read.text)
             } else {
                 result = try await picked.execute(request)
             }
-            try lock.withLock {
+            let publish = { [self] in try lock.withLock {
                 guard let task = try tasks.fetch(id: request.taskID), task.status != .cancelled else { return }
                 let taskStatus = try aggregateStatus(forTask: request.taskID, excluding: request.id, fallback: .running)
                 let auditResult = request.name == "safari_read" ? request.id.uuidString : bounded(result.summary)
@@ -296,7 +321,9 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
                 if request.name == "safari_read" {
                     ephemeralResults.put(result.summary, taskID: request.taskID, requestID: request.id, digest: request.payloadDigest)
                 }
-            }
+            } }
+            if let safariGeneration { try safariGate.withCurrentGeneration(safariGeneration, publish) }
+            else { try publish() }
         } catch is CancellationError {
             // Cancellation transaction already sets request and task to cancelled; never add success/failure after it.
         } catch {

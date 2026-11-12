@@ -103,6 +103,9 @@ struct AskJarvisView: View {
     /// start of every run; when nil, the loop runs without that context.
     let memoryContextProvider: (@Sendable () async -> String)?
 
+    @State private var safariReadState = false
+    @State private var safariReadChanging = false
+    @State private var safariReadError: String?
     @StateObject private var log = AgentRunLog()
     @StateObject private var voice = VoiceCoordinator(backend: OnDeviceSpeechBackend(), speaker: SystemVoiceSpeaker())
     @State private var lastAnswer = ""
@@ -116,6 +119,23 @@ struct AskJarvisView: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Ask Jarvis").font(.title2).bold()
             #if JARVIS_SAFARI_EXPERIMENT_BUILD
+            if let service {
+                Toggle("允许本次运行读取 Safari（每次仍需审批）", isOn: Binding(get: { safariReadState }, set: { value in
+                    guard !safariReadChanging else { return }
+                    safariReadChanging = true
+                    Task { @MainActor in
+                        let result = await Task.detached { () -> (Bool, String?) in
+                            do { try service.setSafariReadEnabled(value); return (service.isSafariReadEnabled(), nil) }
+                            catch { return (service.isSafariReadEnabled(), error.localizedDescription) }
+                        }.value
+                        safariReadState = result.0; safariReadError = result.1; safariReadChanging = false
+                    }
+                })).disabled(safariReadChanging).onAppear { safariReadState = service.isSafariReadEnabled() }
+                if safariReadChanging { Text("正在更新 Safari 读取权限…") }
+                Text("关闭后不再开始新的读取；已经开始的读取和已交付给模型的内容无法撤回。")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let safariReadError { Text(safariReadError).foregroundStyle(.red) }
+            }
             Button("请求辅助功能权限") { _ = AccessibilityPermissionRequest.request() }
             Text("授权后返回并重新提交请求。页面文本会发送给模型，可能留在对话或回答中。")
                 .font(.caption).foregroundStyle(.secondary)
