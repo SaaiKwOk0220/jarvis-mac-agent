@@ -116,11 +116,18 @@ struct AskJarvisView: View {
     /// needs the real instance rather than the HTTP client so it can hand it
     /// to `TaskServiceToolRunner`.
     let service: (any TaskServiceAPI)?
-    var voiceDraftStore: VoiceDraftStore? = nil
+    var voiceDraftStore: VoiceDraftStore?
     /// Optional snapshot of the user's memory. When non-nil, the agent loop
     /// reads the current memory context as a second system prompt at the
     /// start of every run; when nil, the loop runs without that context.
     let memoryContextProvider: (@Sendable () async -> String)?
+
+    init(client: ServiceClient, service: (any TaskServiceAPI)?, voiceDraftStore: VoiceDraftStore?, memoryContextProvider: (@Sendable () async -> String)?) {
+        self.client = client
+        self.service = service
+        self.voiceDraftStore = voiceDraftStore
+        self.memoryContextProvider = memoryContextProvider
+    }
 
     @StateObject private var log = AgentRunLog()
     @StateObject private var voice = VoiceCoordinator(backend: OnDeviceSpeechBackend(), speaker: SystemVoiceSpeaker())
