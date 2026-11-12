@@ -91,6 +91,16 @@ public final class Database: @unchecked Sendable {
             }
         }
 
+        // A started URL open can have an unknown outcome after a crash or database failure.
+        migrator.registerMigration("persist exact browser barriers") { database in
+            try database.execute(sql: "CREATE TABLE IF NOT EXISTS exact_browser_barriers (request_id TEXT PRIMARY KEY NOT NULL)")
+            try database.execute(sql: """
+                INSERT OR IGNORE INTO exact_browser_barriers (request_id)
+                SELECT DISTINCT r.id FROM tool_requests r JOIN approvals a ON a.tool_request_id = r.id
+                WHERE r.name = 'browser_open' AND r.payload LIKE 'ticket:%'
+                  AND a.decision = 'approved' AND r.status <> 'completed'
+                """)
+        }
         try migrator.migrate(queue)
     }
 

@@ -6,7 +6,7 @@ import JarvisPolicy
 @testable import JarvisService
 
 final class TaskServiceTests: XCTestCase {
-    func testExactBrowserApprovalTransactionFailureShowsExpiredTarget() async throws {
+    func testExactBrowserApprovalTransactionFailurePreservesPreview() async throws {
         #if !JARVIS_EXACT_BROWSER_EXPERIMENT && !JARVIS_COMBINED_EXPERIMENT
         throw XCTSkip("Exact browser feature is unavailable in ordinary builds")
         #endif
@@ -22,7 +22,7 @@ final class TaskServiceTests: XCTestCase {
         }
         await XCTAssertThrowsErrorAsync(try await fixture.service.approve(requestID: request.id, digest: digest))
         let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
-        XCTAssertEqual(pending.first?.target, "[目标已失效，请拒绝此请求后重新请求]")
+        XCTAssertEqual(pending.first?.target, "https://example.com/private")
         let count = await recorder.count
         XCTAssertEqual(count, 0)
     }

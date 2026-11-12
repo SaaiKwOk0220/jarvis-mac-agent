@@ -97,7 +97,8 @@ public final class BrowserURLTicketStore: @unchecked Sendable {
     public func peekBound(_ ticket: Ticket, taskID: UUID, requestID: UUID) -> String? {
         lock.lock(); defer { lock.unlock() }
         guard let entry = entries[ticket.id], entry.digest == ticket.digest,
-              entry.taskID == taskID, entry.requestID == requestID, Date() < entry.expires else { return nil }
+              entry.taskID == taskID, entry.requestID == requestID else { return nil }
+        guard Date() < entry.expires else { entries.removeValue(forKey: ticket.id); return nil }
         return entry.url
     }
 }
