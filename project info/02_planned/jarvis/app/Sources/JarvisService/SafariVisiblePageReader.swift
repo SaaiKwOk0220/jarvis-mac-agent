@@ -228,3 +228,125 @@ public struct SafariPageReadExecutor: ToolExecutor, Sendable {
         }
     }
 }
+
+#if os(macOS)
+/// Shared bounded traversal, injectable for tests. Individual AX calls and
+/// their returned arrays cannot be given a hard time or memory bound here.
+/// Cycles fail closed at the node limit.
+enum SafariClickTraversal {
+    static func find<Node>(root: Node, maxNodes: Int = 3000, maxDepth: Int = 30,
+        expired: () -> Bool, inspect: (Node, Bool) throws -> (role: String, match: Bool, children: [Node])) throws -> [Node] {
+        var stack: [(Node, Int, Bool)] = [(root, 0, false)]
+        var found: [Node] = []
+        var count = 0
+        while let (node, depth, inWeb) = stack.popLast() {
+            try Task.checkCancellation()
+            count += 1
+            guard count <= maxNodes, depth <= maxDepth, !expired() else { throw SafariAXReadError.limitExceeded }
+            let item = try inspect(node, inWeb)
+            guard !expired(), item.children.count <= maxNodes - count - stack.count else {
+                throw SafariAXReadError.limitExceeded
+            }
+            if inWeb && item.match {
+                found.append(node)
+                guard found.count <= 1 else { throw SafariAXReadError.unavailable }
+            }
+            for child in item.children { stack.append((child, depth + 1, inWeb || item.role == "AXWebArea")) }
+        }
+        return found
+    }
+}
+
+/// Captures an AX reference only; it never performs an action. AX snapshots
+/// are not atomic and a same-URL document replacement cannot be ruled out.
+enum SafariClickCandidateProvider {
+    static func candidates(expected: SafariClickIdentity) async throws -> [SafariClickCandidate] {
+        guard AXIsProcessTrusted(), !expected.title.isEmpty, expected.enabled else { throw SafariAXReadError.permissionDenied }
+        let process = await MainActor.run { () -> (pid_t, Date)? in
+            guard let app = NSWorkspace.shared.frontmostApplication, app.bundleIdentifier == "com.apple.Safari" else { return nil }
+            guard let launch = app.launchDate else { return nil }
+            return (app.processIdentifier, launch)
+        }
+        guard let (pid, launchDate) = process, pid == expected.pid else { throw SafariAXReadError.notFocused }
+        let app = AXUIElementCreateApplication(pid)
+        let window = try SafariFocusedPageAdapter.element(app, kAXFocusedWindowAttribute as String)
+        let page = try SafariFocusedPageAdapter.readPage(window, includeText: false)
+        guard page.url == expected.url else { throw SafariAXReadError.targetChanged }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        let nodes = try SafariClickTraversal.find(root: window, expired: { ContinuousClock.now >= deadline }) { node, inWeb in
+            guard AXUIElementSetMessagingTimeout(node, 0.25) == .success else { throw SafariAXReadError.unavailable }
+            var rawRole: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(node, kAXRoleAttribute as CFString, &rawRole) == .success,
+                  let role = rawRole as? String else { throw SafariAXReadError.unavailable }
+            var match = false
+            if inWeb && role == expected.role {
+                var rawTitle: CFTypeRef?
+                var rawEnabled: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(node, kAXTitleAttribute as CFString, &rawTitle) == .success,
+                      let title = rawTitle as? String,
+                      AXUIElementCopyAttributeValue(node, kAXEnabledAttribute as CFString, &rawEnabled) == .success,
+                      let enabled = rawEnabled as? Bool else { throw SafariAXReadError.unavailable }
+                match = title == expected.title && enabled
+                if match {
+                    var actions: CFArray?
+                    guard AXUIElementCopyActionNames(node, &actions) == .success,
+                          let names = actions as? [String], names.contains(kAXPressAction as String) else { throw SafariAXReadError.unavailable }
+                }
+            }
+            var rawChildren: CFTypeRef?
+            let status = AXUIElementCopyAttributeValue(node, kAXChildrenAttribute as CFString, &rawChildren)
+            let children: [AXUIElement]
+            if status == .success {
+                guard let value = rawChildren as? [AXUIElement] else { throw SafariAXReadError.unavailable }
+                children = value
+            } else if status == .noValue || status == .attributeUnsupported { children = [] }
+            else { throw SafariAXReadError.unavailable }
+            return (role, match, children)
+        }
+        let results = nodes.map { SafariClickCandidate(element: $0, window: window, launchDate: launchDate, identity: expected) }
+        let current = await MainActor.run { () -> (pid_t, Date)? in
+            guard let app = NSWorkspace.shared.frontmostApplication, app.bundleIdentifier == "com.apple.Safari", let launch = app.launchDate else { return nil }
+            return (app.processIdentifier, launch)
+        }
+        guard current?.0 == pid, current?.1 == launchDate,
+              CFEqual(window, try SafariFocusedPageAdapter.element(app, kAXFocusedWindowAttribute as String)),
+              try SafariFocusedPageAdapter.readPage(window, includeText: false).url == expected.url else { throw SafariAXReadError.targetChanged }
+        return results
+    }
+}
+#if JARVIS_SAFARI_CLICK_EXPERIMENT && JARVIS_SAFARI_EXPERIMENT_BUILD
+/// User supplies only role/title. All window identity and URL data are observed
+/// from foreground Safari and revalidated around every candidate traversal.
+enum SafariClickTargetSelection {
+    static func select(role: String, title: String, authorization: @escaping @Sendable () -> Bool) async throws -> (SafariClickIdentity, SafariClickCapture) {
+        guard !role.isEmpty, role.utf8.count <= 128, !title.isEmpty, title.utf8.count <= 512 else { throw SafariAXReadError.unavailable }
+        let page = SafariAXTargetCapture()
+        let deadline = ContinuousClock.now.advanced(by: .seconds(15))
+        let target: SafariCapturedTarget
+        while true {
+            try Task.checkCancellation()
+            guard authorization() else { throw SafariAXReadError.permissionDenied }
+            do { target = try await page.capture(); break }
+            catch SafariAXReadError.notFocused {
+                guard ContinuousClock.now < deadline else { throw SafariAXReadError.focusTimedOut }
+                try await Task.sleep(for: .milliseconds(250))
+            }
+        }
+        guard authorization(), target.url.utf8.count <= 2048 else { throw SafariAXReadError.unavailable }
+        let identity = SafariClickIdentity(pid: target.processID, window: target.windowIdentity.uuidString,
+            url: target.url, role: role, title: title, enabled: true, requestDigest: "")
+        let capture = SafariClickCapture {
+            guard authorization() else { throw SafariAXReadError.permissionDenied }
+            try await page.verify(target)
+            guard authorization() else { throw SafariAXReadError.permissionDenied }
+            let candidates = try await SafariClickCandidateProvider.candidates(expected: identity)
+            guard authorization() else { throw SafariAXReadError.permissionDenied }
+            try await page.verify(target)
+            guard authorization() else { throw SafariAXReadError.permissionDenied }
+            return candidates
+        }
+        return (identity, capture)
+    }
+}
+#endif
+#endif

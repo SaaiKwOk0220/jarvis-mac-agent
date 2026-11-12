@@ -5,15 +5,27 @@ package_dir="$(cd "$script_dir/.." && pwd)"
 output_dir="${1:-$package_dir/.build/dev-app}"
 mkdir -p "$output_dir"
 output_dir="$(cd "$output_dir" && pwd)"
-if [ "${JARVIS_SAFARI_EXPERIMENT_BUNDLE:-0}" = 1 ]; then
-  swift build --package-path "$package_dir" --product JarvisMenuBar -Xswiftc -DJARVIS_SAFARI_EXPERIMENT_BUILD >&2
-  bin_dir="$(swift build --package-path "$package_dir" --show-bin-path -Xswiftc -DJARVIS_SAFARI_EXPERIMENT_BUILD)"
-else
-  swift build --package-path "$package_dir" --product JarvisMenuBar >&2
-  bin_dir="$(swift build --package-path "$package_dir" --show-bin-path)"
+if [ "${JARVIS_SAFARI_CLICK_EXPERIMENT_BUNDLE:-0}" = 1 ] && [ "${JARVIS_SAFARI_EXPERIMENT_BUNDLE:-0}" = 1 ]; then
+  printf 'Choose only one Safari experiment bundle.\n' >&2
+  exit 1
 fi
+build_flags=()
+if [ "${JARVIS_SAFARI_CLICK_EXPERIMENT_BUNDLE:-0}" = 1 ]; then
+  build_flags=(-Xswiftc -DJARVIS_SAFARI_EXPERIMENT_BUILD -Xswiftc -DJARVIS_SAFARI_CLICK_EXPERIMENT)
+elif [ "${JARVIS_SAFARI_EXPERIMENT_BUNDLE:-0}" = 1 ]; then
+  build_flags=(-Xswiftc -DJARVIS_SAFARI_EXPERIMENT_BUILD)
+fi
+scratch_flags=()
+if [ -n "${JARVIS_SWIFT_SCRATCH_PATH:-}" ]; then
+  scratch_flags=(--scratch-path "$JARVIS_SWIFT_SCRATCH_PATH")
+fi
+if [ "${JARVIS_SWIFT_DISABLE_SANDBOX:-0}" = 1 ]; then
+  scratch_flags+=(--disable-sandbox)
+fi
+swift build --package-path "$package_dir" "${scratch_flags[@]}" --product JarvisMenuBar "${build_flags[@]}" >&2
+bin_dir="$(swift build --package-path "$package_dir" "${scratch_flags[@]}" --show-bin-path "${build_flags[@]}")"
 if [ "${JARVIS_STABLE_OUTPUT:-0}" = 1 ]; then
-  if [ "${JARVIS_SAFARI_EXPERIMENT_BUNDLE:-0}" != 1 ]; then
+  if [ "${JARVIS_SAFARI_EXPERIMENT_BUNDLE:-0}" != 1 ] && [ "${JARVIS_SAFARI_CLICK_EXPERIMENT_BUNDLE:-0}" != 1 ]; then
     printf 'Stable output is only supported for the Safari experiment.\n' >&2
     exit 1
   fi
@@ -26,7 +38,12 @@ else
 fi
 mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
 cp "$script_dir/Info.plist" "$app_dir/Contents/Info.plist"
-if [ "${JARVIS_SAFARI_EXPERIMENT_BUNDLE:-0}" = 1 ]; then
+if [ "${JARVIS_SAFARI_CLICK_EXPERIMENT_BUNDLE:-0}" = 1 ]; then
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier local.jarvis.safari-click-experiment' "$app_dir/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleName Jarvis Safari Click Experiment' "$app_dir/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c 'Add :JarvisSafariExperiment bool true' "$app_dir/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c 'Add :JarvisSafariClickExperiment bool true' "$app_dir/Contents/Info.plist"
+elif [ "${JARVIS_SAFARI_EXPERIMENT_BUNDLE:-0}" = 1 ]; then
   /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier local.jarvis.safari-experiment' "$app_dir/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c 'Set :CFBundleName Jarvis Safari Experiment' "$app_dir/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c 'Add :JarvisSafariExperiment bool true' "$app_dir/Contents/Info.plist"

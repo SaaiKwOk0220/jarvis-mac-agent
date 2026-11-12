@@ -11,6 +11,8 @@ final class AppStorageNamespaceTests: XCTestCase {
     }
     func testExperimentUsesSeparateStorageNamespace() {
         XCTAssertEqual(AppStorageNamespace.directoryName(bundleID: "local.jarvis.safari-experiment"), "Jarvis-Safari-Experiment")
+        XCTAssertEqual(AppStorageNamespace.directoryName(bundleID: "local.jarvis.safari-click-experiment"), "Jarvis-Safari-Click-Experiment")
+        XCTAssertFalse(AppStorageNamespace.safariReadEnabled(bundleID: "local.jarvis.safari-click-experiment", flag: "1"))
         XCTAssertEqual(AppStorageNamespace.directoryName(bundleID: "local.jarvis.dev"), "Jarvis")
         XCTAssertEqual(AppStorageNamespace.directoryName(bundleID: nil), "Jarvis")
     }

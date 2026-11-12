@@ -176,9 +176,11 @@ public struct PendingApprovalRequest: Codable, Equatable, Sendable, Identifiable
     public let target: String
     public let payload: String
     public let digest: String
+    public let kind: String?
+    public let previewAvailable: Bool?
 
-    public init(id: UUID, taskID: UUID, reason: String, target: String, payload: String, digest: String) {
-        self.id = id; self.taskID = taskID; self.reason = reason; self.target = target; self.payload = payload; self.digest = digest
+    public init(id: UUID, taskID: UUID, reason: String, target: String, payload: String, digest: String, kind: String? = nil, previewAvailable: Bool? = nil) {
+        self.id = id; self.taskID = taskID; self.reason = reason; self.target = target; self.payload = payload; self.digest = digest; self.kind = kind; self.previewAvailable = previewAvailable
     }
 }
 

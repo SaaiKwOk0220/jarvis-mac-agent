@@ -91,6 +91,18 @@ public final class Database: @unchecked Sendable {
             }
         }
 
+        // An approval may already have caused a click even if its result could
+        // not be persisted. Never clear this barrier merely because of restart.
+        migrator.registerMigration("persist experimental click barriers") { database in
+            try database.execute(sql: "CREATE TABLE IF NOT EXISTS experimental_click_barriers (request_id TEXT PRIMARY KEY NOT NULL)")
+            // Conservatively import pre-barrier approved clicks that lack a
+            // confirmed completed state, including cancelled/failed requests.
+            try database.execute(sql: """
+                INSERT OR IGNORE INTO experimental_click_barriers (request_id)
+                SELECT DISTINCT r.id FROM tool_requests r JOIN approvals a ON a.tool_request_id = r.id
+                WHERE r.name = 'safari_click_experiment' AND a.decision = 'approved' AND r.status <> 'completed'
+                """)
+        }
         try migrator.migrate(queue)
     }
 

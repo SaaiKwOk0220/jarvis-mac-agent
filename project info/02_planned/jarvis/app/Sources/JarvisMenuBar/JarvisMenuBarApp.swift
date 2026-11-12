@@ -15,7 +15,13 @@ struct JarvisMenuBarApp: App {
     private let instanceLock: SingleInstanceLock
 
     init() {
-        #if JARVIS_SAFARI_EXPERIMENT_BUILD
+        #if JARVIS_SAFARI_CLICK_EXPERIMENT && JARVIS_SAFARI_EXPERIMENT_BUILD
+        guard Bundle.main.bundleIdentifier == "local.jarvis.safari-click-experiment",
+              Bundle.main.object(forInfoDictionaryKey: "JarvisSafariExperiment") as? Bool == true,
+              Bundle.main.object(forInfoDictionaryKey: "JarvisSafariClickExperiment") as? Bool == true else {
+            FileHandle.standardError.write(Data("Invalid experimental click bundle identity.\n".utf8)); exit(EXIT_FAILURE)
+        }
+        #elseif JARVIS_SAFARI_EXPERIMENT_BUILD
         guard Bundle.main.bundleIdentifier == "local.jarvis.safari-experiment",
               Bundle.main.object(forInfoDictionaryKey: "JarvisSafariExperiment") as? Bool == true else {
             FileHandle.standardError.write(Data("Invalid experimental bundle identity.\n".utf8)); exit(EXIT_FAILURE)
@@ -45,6 +51,18 @@ struct JarvisMenuBarApp: App {
                 .frame(minWidth: 520, minHeight: 460)
         }
         .defaultSize(width: 620, height: 560)
+        #endif
+        #if JARVIS_SAFARI_CLICK_EXPERIMENT && JARVIS_SAFARI_EXPERIMENT_BUILD
+        Window("Safari 点击实验", id: "safari-click-mode") {
+            if let service = runtime.clickModeService {
+                SafariClickModeView(service: service).frame(minWidth: 500, minHeight: 260)
+            } else { Text("实验服务不可用") }
+        }
+        .defaultSize(width: 560, height: 320)
+        Window("请求 Safari 点击", id: "safari-click-request") {
+            SafariClickRequestView(client: client).frame(minWidth: 500, minHeight: 300)
+        }
+        .defaultSize(width: 560, height: 360)
         #endif
         Window("Welcome to Jarvis", id: "welcome") {
             WelcomeView()
@@ -115,6 +133,9 @@ private final class Runtime {
     /// to `TaskServiceToolRunner`; both paths end up at this one service, so
     /// the agent loop is bound by the same policy gate as every other task.
     private(set) var taskService: (any TaskServiceAPI)?
+    #if JARVIS_SAFARI_CLICK_EXPERIMENT && JARVIS_SAFARI_EXPERIMENT_BUILD
+    private(set) var clickModeService: TaskService?
+    #endif
 
     /// The user's memory store, or `nil` when initialisation failed. The
     /// "Memory" window shows an unavailable message in that case, and the
@@ -153,6 +174,9 @@ private final class Runtime {
                 screenshot: ScreenshotToolExecutor(),
                 accessibility: AccessibilityQueryToolExecutor(), enableSafariRead: safariReadEnabled)
             self.taskService = service
+            #if JARVIS_SAFARI_CLICK_EXPERIMENT && JARVIS_SAFARI_EXPERIMENT_BUILD
+            self.clickModeService = service
+            #endif
             let server = LoopbackServer(service: service)
             self.server = server
             Task { @MainActor in
