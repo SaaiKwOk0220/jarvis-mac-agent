@@ -84,6 +84,10 @@ public final class ServiceClient: ObservableObject {
     @Published public private(set) var actionError: String?
 
     var experimentalClickApprovalForTesting: ((ApprovalRequest) async throws -> Void)?
+    private struct ApprovalFreshness { let taskID: UUID; let digest: String; let generation: UInt64 }
+    @Published private var approvalFreshness: [UUID: ApprovalFreshness] = [:]
+    private var approvalGeneration: [UUID: UInt64] = [:]
+    @Published private var approvalMutationCount: [UUID: Int] = [:]
     private var baseURL: URL
     private var authorizationToken: String?
     private let session: URLSession
@@ -113,6 +117,9 @@ public final class ServiceClient: ObservableObject {
               var parts = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else { return }
         parts.host = "127.0.0.1"
         guard let normalized = parts.url else { return }
+        for taskID in Array(approvalGeneration.keys) { approvalGeneration[taskID, default: 0] &+= 1 }
+        approvalRequests.removeAll()
+        approvalFreshness.removeAll()
         self.baseURL = normalized
         self.authorizationToken = authorizationToken
     }
@@ -181,25 +188,51 @@ public final class ServiceClient: ObservableObject {
 
     /// Loads digest-bound approval metadata when the service exposes the optional task requests route.
     public func loadApprovalRequests(taskID: UUID) async throws -> [ApprovalRequest] {
+        let generation = beginApprovalRefresh(taskID: taskID)
         let (data, _) = try await request(path: "/tasks/\(taskID.uuidString)/requests", method: "GET")
         do {
             let requests = try Self.decoder.decode([ApprovalRequest].self, from: data)
-            // Key by taskID so the UI can resolve the active pending request for a
-            // task with `approvalRequests[task.id]`. A task may now hold several
-            // pending requests at once (see the multi-pending-approval change in
-            // TaskService); this dictionary collapses them and the last one in the
-            // response wins. That is accurate for the single-request case and safe
-            // — if lossy — for the multi-pending case; showing all pendings is a
-            // follow-up UI change.
-            applyApprovalRequests(requests, taskID: taskID)
+            commitApprovalRefresh(requests, taskID: taskID, generation: generation)
             serviceError = nil
             return requests
         } catch { throw ServiceClientError.decoding }
     }
 
+    @discardableResult func beginApprovalRefresh(taskID: UUID) -> UInt64 {
+        let generation = approvalGeneration[taskID, default: 0] &+ 1
+        approvalGeneration[taskID] = generation
+        approvalFreshness = approvalFreshness.filter { $0.value.taskID != taskID }
+        return generation
+    }
+    func commitApprovalRefresh(_ requests: [ApprovalRequest], taskID: UUID, generation: UInt64) {
+        guard approvalGeneration[taskID] == generation else { return }
+        var next = approvalRequests.filter { $0.value.taskID != taskID }
+        for request in requests where request.taskID == taskID && next[request.id] == nil { next[request.id] = request }
+        approvalRequests = next
+        var freshness = approvalFreshness.filter { $0.value.taskID != taskID }
+        for request in requests where request.taskID == taskID && next[request.id] == request && request.previewAvailable == true {
+            freshness[request.id] = ApprovalFreshness(taskID: taskID, digest: request.digest, generation: generation)
+        }
+        approvalFreshness = freshness
+    }
     func applyApprovalRequests(_ requests: [ApprovalRequest], taskID: UUID) {
-        approvalRequests.removeValue(forKey: taskID)
-        for request in requests where request.taskID == taskID { approvalRequests[taskID] = request }
+        let generation = beginApprovalRefresh(taskID: taskID)
+        commitApprovalRefresh(requests, taskID: taskID, generation: generation)
+    }
+    func beginApprovalMutation(taskID: UUID) {
+        approvalMutationCount[taskID, default: 0] += 1
+        beginApprovalRefresh(taskID: taskID)
+    }
+    func endApprovalMutation(taskID: UUID) {
+        let count = approvalMutationCount[taskID, default: 0]
+        if count <= 1 { approvalMutationCount.removeValue(forKey: taskID) } else { approvalMutationCount[taskID] = count - 1 }
+        beginApprovalRefresh(taskID: taskID)
+    }
+    func isApprovalFresh(_ request: ApprovalRequest) -> Bool {
+        guard approvalMutationCount[request.taskID, default: 0] == 0, let freshness = approvalFreshness[request.id], freshness.taskID == request.taskID,
+              freshness.digest == request.digest, approvalGeneration[request.taskID] == freshness.generation,
+              approvalRequests[request.id] == request, request.previewAvailable == true else { return false }
+        return true
     }
 
     public func loadTimeline(taskID: UUID) async throws -> [TimelineEvent] {
@@ -228,7 +261,9 @@ public final class ServiceClient: ObservableObject {
 
     public func approve(_ request: ApprovalRequest) async throws {
         if request.kind == "safari_click_experiment" {
-            guard request.previewAvailable == true, !request.digest.isEmpty, let handler = experimentalClickApprovalForTesting else { throw ServiceClientError.unavailable }
+            guard isApprovalFresh(request), !request.digest.isEmpty, let handler = experimentalClickApprovalForTesting else { throw ServiceClientError.unavailable }
+            beginApprovalMutation(taskID: request.taskID)
+            defer { endApprovalMutation(taskID: request.taskID) }
             try await handler(request)
             return
         }
@@ -236,6 +271,9 @@ public final class ServiceClient: ObservableObject {
     }
 
     public func reject(requestID: UUID) async throws {
+        let taskID = approvalRequests[requestID]?.taskID
+        if let taskID { beginApprovalMutation(taskID: taskID) }
+        defer { if let taskID { endApprovalMutation(taskID: taskID) } }
         do {
             try await mutate(path: "/requests/\(requestID.uuidString)/reject")
             try await refresh()
@@ -252,6 +290,8 @@ public final class ServiceClient: ObservableObject {
     public func reject(_ request: ApprovalRequest) async throws { try await reject(requestID: request.id) }
 
     public func cancel(taskID: UUID) async throws {
+        beginApprovalMutation(taskID: taskID)
+        defer { endApprovalMutation(taskID: taskID) }
         do {
             try await mutate(path: "/tasks/\(taskID.uuidString)/cancel")
             try await refresh()

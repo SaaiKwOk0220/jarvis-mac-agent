@@ -5,13 +5,8 @@ struct ApprovalView: View {
     @ObservedObject var client: ServiceClient
     let task: JarvisTask
     @State private var submittingRequestID: UUID?
-    @State private var clickPreviewFresh = false
 
-    /// All pending approvals for this task, ordered by submission time so the
-    /// UI is stable across re-renders. PR #10 lets a single task hold several
-    /// pendings at once; the previous view resolved to a single object via
-    /// `client.approvalRequests[task.id]` and silently dropped every request
-    /// except the last one.
+    /// All requests for this task, ordered by ID for a stable presentation.
     private var pendingRequests: [ApprovalRequest] {
         client.approvalRequests.values
             .filter { $0.taskID == task.id }
@@ -77,7 +72,7 @@ struct ApprovalView: View {
                         Button("Approve") {
                             submit(.approve, request: request)
                         }
-                            .disabled(submittingRequestID != nil || !ApprovalPresentation(request: request, clickHandlerAvailable: client.experimentalClickApprovalForTesting != nil && clickPreviewFresh).canApprove || (isSafariRead(request) && !request.target.hasPrefix("https://")))
+                            .disabled(submittingRequestID != nil || !ApprovalPresentation(request: request, clickHandlerAvailable: client.experimentalClickApprovalForTesting != nil && client.isApprovalFresh(request)).canApprove || (isSafariRead(request) && !request.target.hasPrefix("https://")))
                     }
                 }
             }
@@ -87,9 +82,8 @@ struct ApprovalView: View {
         .task {
             while !Task.isCancelled {
                 if pendingRequests.contains(where: isExperimentalClick) {
-                    do { _ = try await client.loadApprovalRequests(taskID: task.id); clickPreviewFresh = true }
-                    catch { clickPreviewFresh = false }
-                } else { clickPreviewFresh = false }
+                    _ = try? await client.loadApprovalRequests(taskID: task.id)
+                }
                 try? await Task.sleep(for: .seconds(1))
             }
         }

@@ -211,11 +211,8 @@ final class ServiceClientTests: XCTestCase {
         XCTAssertTrue(client.timelineEvents[task.id]?.contains { $0.summary == "approval accepted" } == true)
     }
 
-    /// Bug C: ApprovalView used `approvalRequests.values.first(where:)`, which is
-    /// non-deterministic when multiple requests exist for the same task. The fix
-    /// re-keys the dictionary by `taskID` so `approvalRequests[task.id]` is the
-    /// canonical lookup the view relies on.
-    func testLoadApprovalRequestsStoresRequestsKeyedByTaskID() async throws {
+    /// Requests are independently addressable by request ID.
+    func testLoadApprovalRequestsStoresRequestsKeyedByRequestID() async throws {
         let database = try Database(path: ":memory:")
         try database.migrate()
         let service = try TaskService(
@@ -239,18 +236,12 @@ final class ServiceClientTests: XCTestCase {
 
         _ = try await client.loadApprovalRequests(taskID: task.id)
         XCTAssertEqual(client.approvalRequests.count, 1)
-        XCTAssertNotNil(client.approvalRequests[task.id],
-            "approvalRequests must be keyed by taskID so ApprovalView can resolve with [task.id]")
-        XCTAssertEqual(client.approvalRequests[task.id]?.id, request.id)
-        XCTAssertEqual(client.approvalRequests[task.id]?.digest, request.payloadDigest)
+        XCTAssertNotNil(client.approvalRequests[request.id])
+        XCTAssertEqual(client.approvalRequests[request.id]?.digest, request.payloadDigest)
     }
 
-    /// Documents the current ServiceClient contract: `approvalRequests` is keyed by taskID,
-    /// so multiple pending requests for the same task collapse to the *last* one received in the
-    /// server response. ApprovalView uses this directly via `client.approvalRequests[task.id]`;
-    /// if a UI change wants to surface every pending, it must fetch via `loadApprovalRequests`
-    /// and aggregate rather than rely on the dictionary.
-    func testMultiplePendingApprovalsForSameTaskCollapseToLast() async throws {
+    /// Multiple requests for the same task remain independently visible.
+    func testMultiplePendingApprovalsForSameTaskRemainVisible() async throws {
         let database = try Database(path: ":memory:")
         try database.migrate()
         let service = try TaskService(
@@ -277,11 +268,9 @@ final class ServiceClientTests: XCTestCase {
 
         let fetched = try await client.loadApprovalRequests(taskID: task.id)
         XCTAssertEqual(fetched.count, 2, "Server should return both pending requests for the task")
-        XCTAssertEqual(client.approvalRequests.count, 1, "ServiceClient dict collapses to one entry per taskID")
-        let resolved = try XCTUnwrap(client.approvalRequests[task.id],
-            "After load, the last entry received must be resolvable via [task.id]")
-        XCTAssertTrue([first.id, second.id].contains(resolved.id),
-            "Collapsed entry must be one of the two requests; got \(resolved.id)")
+        XCTAssertEqual(client.approvalRequests.count, 2)
+        XCTAssertNotNil(client.approvalRequests[first.id])
+        XCTAssertNotNil(client.approvalRequests[second.id])
     }
 
     /// Bug D: NewTaskView used to call `client.select(task)` after `createTask`,
@@ -697,12 +686,52 @@ extension ServiceClientTests {
         let client = ServiceClient(), taskID = UUID()
         let request = ApprovalRequest(id: UUID(), taskID: taskID, reason: "test", target: "https://example.com", payload: "target", digest: "digest", kind: "safari_click_experiment", previewAvailable: true)
         client.applyApprovalRequests([request], taskID: taskID)
-        XCTAssertEqual(client.approvalRequests[taskID]?.previewAvailable, true)
+        XCTAssertEqual(client.approvalRequests[request.id]?.previewAvailable, true)
         let expired = ApprovalRequest(id: request.id, taskID: taskID, reason: "test", target: "失效", payload: "失效", digest: "digest", kind: "safari_click_experiment", previewAvailable: false)
         client.applyApprovalRequests([expired], taskID: taskID)
-        XCTAssertEqual(client.approvalRequests[taskID]?.previewAvailable, false)
+        XCTAssertEqual(client.approvalRequests[request.id]?.previewAvailable, false)
         client.applyApprovalRequests([], taskID: taskID)
-        XCTAssertNil(client.approvalRequests[taskID])
+        XCTAssertNil(client.approvalRequests[request.id])
+    }
+    func testApprovalRefreshGenerationsIsolateRequestsAndTasks() {
+        let client = ServiceClient(), taskA = UUID(), taskB = UUID()
+        let click = ApprovalRequest(id: UUID(), taskID: taskA, reason: "test", target: "https://example.com/a", payload: "a", digest: "a", kind: "safari_click_experiment", previewAvailable: true)
+        let ordinary = ApprovalRequest(id: UUID(), taskID: taskA, reason: "test", target: "file", payload: "b", digest: "b")
+        let other = ApprovalRequest(id: UUID(), taskID: taskB, reason: "test", target: "file", payload: "c", digest: "c")
+        let old = client.beginApprovalRefresh(taskID: taskA)
+        let newer = client.beginApprovalRefresh(taskID: taskA)
+        let otherGeneration = client.beginApprovalRefresh(taskID: taskB)
+        client.commitApprovalRefresh([other], taskID: taskB, generation: otherGeneration)
+        client.commitApprovalRefresh([click, ordinary], taskID: taskA, generation: newer)
+        XCTAssertEqual(client.approvalRequests.count, 3)
+        XCTAssertTrue(client.isApprovalFresh(click))
+        client.commitApprovalRefresh([], taskID: taskA, generation: old)
+        XCTAssertEqual(client.approvalRequests.count, 3)
+        let changed = ApprovalRequest(id: click.id, taskID: taskA, reason: "test", target: click.target, payload: click.payload, digest: "new", kind: "safari_click_experiment", previewAvailable: true)
+        let next = client.beginApprovalRefresh(taskID: taskA)
+        XCTAssertFalse(client.isApprovalFresh(click))
+        client.commitApprovalRefresh([changed], taskID: taskA, generation: next)
+        XCTAssertFalse(client.isApprovalFresh(click))
+        XCTAssertTrue(client.isApprovalFresh(changed))
+        client.beginApprovalMutation(taskID: taskA)
+        XCTAssertFalse(client.isApprovalFresh(changed))
+        let during = client.beginApprovalRefresh(taskID: taskA)
+        client.commitApprovalRefresh([changed], taskID: taskA, generation: during)
+        XCTAssertFalse(client.isApprovalFresh(changed))
+        client.endApprovalMutation(taskID: taskA)
+        XCTAssertFalse(client.isApprovalFresh(changed))
+        XCTAssertNotNil(client.approvalRequests[other.id])
+        XCTAssertNil(client.approvalRequests[ordinary.id])
+        let expired = ApprovalRequest(id: click.id, taskID: taskA, reason: "test", target: "expired", payload: "expired", digest: "new", kind: "safari_click_experiment", previewAvailable: false)
+        let last = client.beginApprovalRefresh(taskID: taskA)
+        client.commitApprovalRefresh([expired], taskID: taskA, generation: last)
+        XCTAssertFalse(client.isApprovalFresh(changed))
+        XCTAssertFalse(client.isApprovalFresh(expired))
+        let beforeReconfigure = client.beginApprovalRefresh(taskID: taskA)
+        client.configure(baseURL: URL(string: "http://127.0.0.1:9090")!)
+        client.commitApprovalRefresh([changed], taskID: taskA, generation: beforeReconfigure)
+        XCTAssertFalse(client.isApprovalFresh(changed))
+        XCTAssertNil(client.approvalRequests[changed.id])
     }
     func testExperimentalApprovalUsesOnlyInjectedFakeHandler() async throws {
         let client = ServiceClient()
@@ -710,6 +739,7 @@ extension ServiceClientTests {
         do { try await client.approve(request); XCTFail("unregistered click must fail") } catch { }
         var called = false
         client.experimentalClickApprovalForTesting = { received in called = received.id == request.id }
+        client.applyApprovalRequests([request], taskID: request.taskID)
         try await client.approve(request)
         XCTAssertTrue(called)
     }
