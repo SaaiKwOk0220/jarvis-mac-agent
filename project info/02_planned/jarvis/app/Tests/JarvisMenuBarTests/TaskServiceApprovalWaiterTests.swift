@@ -43,11 +43,13 @@ private extension NSLock {
 
 /// Builds a timeline event for one terminal outcome so each test only spells
 /// out the bits it actually cares about.
+private let waiterTestRequestID = UUID()
 private func terminalEvent(
     actionDigest: String,
     summary: String,
     result: String,
-    timestamp: Date = Date()
+    timestamp: Date = Date(),
+    requestID: UUID? = waiterTestRequestID
 ) -> TimelineEvent {
     TimelineEvent(
         id: UUID(),
@@ -58,7 +60,7 @@ private func terminalEvent(
         actionDigest: actionDigest,
         summary: summary,
         result: result,
-        approvalID: UUID()
+        approvalID: UUID(), requestID: requestID
     )
 }
 
@@ -79,7 +81,7 @@ final class TaskServiceApprovalWaiterTests: XCTestCase {
         )
 
         let resolution = try await waiter.waitForResolution(
-            requestID: UUID(),
+            requestID: waiterTestRequestID,
             payloadDigest: payloadDigest,
             taskID: UUID()
         )
@@ -102,7 +104,7 @@ final class TaskServiceApprovalWaiterTests: XCTestCase {
         )
 
         let resolution = try await waiter.waitForResolution(
-            requestID: UUID(),
+            requestID: waiterTestRequestID,
             payloadDigest: payloadDigest,
             taskID: UUID()
         )
@@ -125,7 +127,7 @@ final class TaskServiceApprovalWaiterTests: XCTestCase {
         )
 
         let resolution = try await waiter.waitForResolution(
-            requestID: UUID(),
+            requestID: waiterTestRequestID,
             payloadDigest: payloadDigest,
             taskID: UUID()
         )
@@ -146,7 +148,7 @@ final class TaskServiceApprovalWaiterTests: XCTestCase {
         )
 
         let resolution = try await waiter.waitForResolution(
-            requestID: UUID(),
+            requestID: waiterTestRequestID,
             payloadDigest: "digest-missing",
             taskID: UUID()
         )

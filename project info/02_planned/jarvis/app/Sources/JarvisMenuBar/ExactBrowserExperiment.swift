@@ -8,7 +8,8 @@ enum ExactBrowserExperiment {
     }
     static var toggleAllowed: Bool {
         #if JARVIS_EXACT_BROWSER_EXPERIMENT
-        return Bundle.main.bundleIdentifier == bundleID && CFGetTypeID(Bundle.main.object(forInfoDictionaryKey: "JarvisBrowserExperiment") as CFTypeRef) == CFBooleanGetTypeID() && (Bundle.main.object(forInfoDictionaryKey: "JarvisBrowserExperiment") as? Bool == true)
+        guard let marker = Bundle.main.object(forInfoDictionaryKey: "JarvisBrowserExperiment") else { return false }
+        return Bundle.main.bundleIdentifier == bundleID && CFGetTypeID(marker as CFTypeRef) == CFBooleanGetTypeID() && (marker as? Bool == true)
         #elseif JARVIS_EXACT_BROWSER_EXPERIMENT
         return Bundle.main.bundleIdentifier == bundleID && AppStorageNamespace.isTrueBoolean(Bundle.main.object(forInfoDictionaryKey: "JarvisBrowserExperiment"))
         #else
