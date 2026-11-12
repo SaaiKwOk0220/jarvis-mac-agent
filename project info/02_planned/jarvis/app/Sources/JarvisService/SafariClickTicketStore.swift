@@ -88,12 +88,13 @@ actor SafariClickCapture {
 #if os(macOS)
 /// CAS linearizes revocation and the start of AXPress. Once started,
 /// cancellation returns immediately and cannot undo the action.
-final class SafariClickRevocationGate: @unchecked Sendable {
-    enum Result { case revoked, alreadyStarted, idle }
+enum SafariClickCancellationResult { case revoked, alreadyStarted, idle }
+
+fileprivate final class SafariClickRevocationGate: @unchecked Sendable {
     private let state = ManagedAtomic<Int>(1) // pending, started, revoked, completed
     func hasStarted() -> Bool { let current = state.load(ordering: .acquiring); return current == 2 || current == 4 }
     func finish() { _ = state.compareExchange(expected: 4, desired: 0, ordering: .acquiringAndReleasing) }
-    func revoke() -> Result {
+    func revoke() -> SafariClickCancellationResult {
         if state.compareExchange(expected: 1, desired: 3, ordering: .acquiringAndReleasing).exchanged { return .revoked }
         let current = state.load(ordering: .acquiring)
         return current == 2 || current == 4 ? .alreadyStarted : .idle
@@ -261,7 +262,7 @@ actor SafariClickStagedCaptures {
             do { try await sleep(.seconds(remaining)) } catch { await cancel(token: token); return }
         }
     }
-    @discardableResult func cancel(token: UUID) async -> SafariClickRevocationGate.Result {
+    @discardableResult func cancel(token: UUID) async -> SafariClickCancellationResult {
         let result = gates.removeValue(forKey: token)?.revoke() ?? .idle
         if consuming.contains(token) { revoked.insert(token) }
         let transfer = transferred.removeValue(forKey: token)

@@ -246,7 +246,9 @@ extension SafariClickBindingStoreTests {
         await fulfillment(of: [entered], timeout: 2)
         clock.set(6)
         blocker.release.signal()
-        do { try await job.value; XCTFail("expired action succeeded") } catch { }
+        do { try await job.value; XCTFail("expired action succeeded") }
+        catch SafariPressFailure.actionOutcomeUnknown { }
+        catch { XCTFail("unexpected expiry classification: \(error)") }
         XCTAssertEqual(action.value, 0)
     }
 
