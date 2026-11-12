@@ -199,6 +199,13 @@ struct AskJarvisView: View {
                 if safariReadChanging { Text("正在更新 Safari 读取权限…") }
                 Text("关闭后不再开始新的读取；已经开始的读取和已交付给模型的内容无法撤回。")
                     .font(.caption).foregroundStyle(.secondary)
+                #if JARVIS_SAFARI_CLICK_EXPERIMENT
+                if (CombinedExperimentAccess.current || (Bundle.main.bundleIdentifier == "local.jarvis.safari-click-experiment" && AppStorageNamespace.isTrueBoolean(Bundle.main.object(forInfoDictionaryKey: "JarvisSafariExperiment")))),
+                   AppStorageNamespace.isTrueBoolean(Bundle.main.object(forInfoDictionaryKey: "JarvisSafariClickExperiment")) {
+                    Text("点击实验与 Safari 页面读取开关相互独立：即使页面读取已关闭，点击实验仍会读取当前网页网址、元素类型和标题，用于定位和审批。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                #endif
                 if let safariReadError { Text(safariReadError).foregroundStyle(.red) }
             }
             #endif

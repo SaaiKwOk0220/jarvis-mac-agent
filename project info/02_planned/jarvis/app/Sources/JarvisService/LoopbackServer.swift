@@ -4,6 +4,7 @@ import Security
 import Network
 import JarvisDomain
 import JarvisPolicy
+import JarvisPersistence
 
 public struct LoopbackResponse: Sendable {
     public let status: Int
@@ -110,6 +111,22 @@ public final class LoopbackServer: @unchecked Sendable {
                 let decision = try await service.submit(request: request)
                 return try response(status: 200, value: SubmitResponse(decision: decision))
             }
+            #if JARVIS_SAFARI_CLICK_EXPERIMENT && (JARVIS_SAFARI_EXPERIMENT_BUILD || JARVIS_COMBINED_EXPERIMENT)
+            if verb == "POST", parts.count == 3, parts[0] == "tasks", parts[2] == "safari-click" {
+                guard let taskID = UUID(uuidString: parts[1]) else { return error(status: 400, message: "invalid task id") }
+                guard let concrete = service as? TaskService else { return error(status: 404, message: "experimental click unavailable") }
+                let input = try decoder.decode(ExperimentalClickTargetInput.self, from: body)
+                let request = try await concrete.submitExperimentalSafariClick(taskID: taskID, role: input.role, title: input.title)
+                return try response(status: 201, value: request)
+            }
+            if verb == "POST", parts.count == 3, parts[0] == "requests", parts[2] == "safari-click-approve" {
+                guard let requestID = UUID(uuidString: parts[1]) else { return error(status: 400, message: "invalid request id") }
+                guard let concrete = service as? TaskService else { return error(status: 404, message: "experimental click unavailable") }
+                let input = try decoder.decode(ApprovalRequest.self, from: body)
+                try await concrete.approveExperimentalClick(requestID: requestID, digest: input.digest)
+                return LoopbackResponse(status: 204)
+            }
+            #endif
             if verb == "POST", parts.count == 3, parts[0] == "tasks", parts[2] == "cancel" {
                 let id = parts[1]
                 guard let taskID = UUID(uuidString: id) else { return error(status: 400, message: "invalid task id") }
@@ -146,6 +163,14 @@ public final class LoopbackServer: @unchecked Sendable {
                 return self.error(status: 409, message: "request cannot be completed")
             }
         } catch {
+            #if JARVIS_SAFARI_CLICK_EXPERIMENT && (JARVIS_SAFARI_EXPERIMENT_BUILD || JARVIS_COMBINED_EXPERIMENT)
+            if error is ExperimentalClickBarrierError {
+                return self.error(status: 409, message: "已有点击正在进行或结果未确认，请等待或核对页面和实验记录；当前版本没有解除入口。")
+            }
+            if let failure = error as? SafariPressFailure, case .actionOutcomeUnknown = failure {
+                return self.error(status: 409, message: "操作结果未知，请先检查页面，切勿自动重试。")
+            }
+            #endif
             return self.error(status: 500, message: "service error")
         }
     }
@@ -378,3 +403,7 @@ private struct SubmitResponse: Codable, Sendable {
 private struct APIError: Encodable {
     let message: String
 }
+
+#if JARVIS_SAFARI_CLICK_EXPERIMENT && (JARVIS_SAFARI_EXPERIMENT_BUILD || JARVIS_COMBINED_EXPERIMENT)
+private struct ExperimentalClickTargetInput: Decodable { let role: String; let title: String }
+#endif

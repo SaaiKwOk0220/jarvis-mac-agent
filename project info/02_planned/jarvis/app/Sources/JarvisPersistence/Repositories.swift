@@ -218,6 +218,8 @@ public final class SQLiteToolRequestRepository: ToolRequestRepository, @unchecke
     }
 }
 
+public enum ExperimentalClickBarrierError: Error, Sendable { case unresolved }
+
 public final class SQLitePersistenceUnitOfWork: PersistenceUnitOfWork, @unchecked Sendable {
     public let database: Database
     public init(database: Database) { self.database = database }
@@ -248,6 +250,53 @@ public final class SQLitePersistenceUnitOfWork: PersistenceUnitOfWork, @unchecke
             try updateToolRequest(request.id, to: .executing, db: db)
             try insertApproval(approval, db: db)
             for audit in audits { try insertAudit(audit, db: db) }
+        }
+    }
+    public func hasExperimentalClickBarrier() throws -> Bool {
+        try database.read { db in try Row.fetchOne(db, sql: "SELECT request_id FROM experimental_click_barriers LIMIT 1") != nil }
+    }
+    /// Check and create a durable cross-process barrier in the same transaction
+    /// that commits the approval, before any click can start.
+    public func approveExperimentalClick(_ request: ToolRequest, approval: Approval, taskStatus: TaskStatus, audits: [AuditEvent]) throws {
+        try database.write { db in
+            guard request.name == "safari_click_experiment", approval.decision == .approved,
+                  approval.toolRequestID == request.id, approval.actionDigest == request.payloadDigest else { throw PersistenceError.invalidStoredToolRequest }
+            let blocked = try Row.fetchOne(db, sql: "SELECT request_id FROM experimental_click_barriers LIMIT 1") != nil
+            guard !blocked else { throw ExperimentalClickBarrierError.unresolved }
+            try ensureTaskStatus(request.taskID, in: Self.requestAcceptingTaskStatuses, db: db)
+            guard let row = try Row.fetchOne(db, sql: "SELECT task_id, status, payload_digest FROM tool_requests WHERE id = ?", arguments: [request.id.uuidString]),
+                  (row["task_id"] as String) == request.taskID.uuidString,
+                  (row["status"] as String) == ToolRequestStatus.pending.rawValue,
+                  (row["payload_digest"] as String) == request.payloadDigest else { throw PersistenceError.invalidStoredToolRequest }
+            try db.execute(sql: "INSERT INTO experimental_click_barriers (request_id) VALUES (?)", arguments: [request.id.uuidString])
+            try updateTask(request.taskID, to: taskStatus, db: db)
+            try updateToolRequest(request.id, to: .executing, db: db)
+            try insertApproval(approval, db: db)
+            for audit in audits { try insertAudit(audit, db: db) }
+        }
+    }
+    /// Clear only when a confirmed successful click and its audit both commit.
+    public func finishExperimentalClickCompleted(_ request: ToolRequest, taskStatus: TaskStatus, audits: [AuditEvent]) throws {
+        try finishExperimentalClickConfirmed(request, status: .completed, taskStatus: taskStatus, audits: audits)
+    }
+    /// Caller must have an atomic gate result proving no action started.
+    public func finishExperimentalClickNotStarted(_ request: ToolRequest, taskStatus: TaskStatus, audits: [AuditEvent]) throws {
+        try finishExperimentalClickConfirmed(request, status: .failed, taskStatus: taskStatus, audits: audits)
+    }
+    private func finishExperimentalClickConfirmed(_ request: ToolRequest, status: ToolRequestStatus, taskStatus: TaskStatus, audits: [AuditEvent]) throws {
+        try database.write { db in
+            guard request.name == "safari_click_experiment",
+                  try Row.fetchOne(db, sql: "SELECT request_id FROM experimental_click_barriers WHERE request_id = ?", arguments: [request.id.uuidString]) != nil else { throw PersistenceError.invalidStoredToolRequest }
+            guard let row = try Row.fetchOne(db, sql: "SELECT task_id, status, payload_digest FROM tool_requests WHERE id = ?", arguments: [request.id.uuidString]),
+                  (row["task_id"] as String) == request.taskID.uuidString,
+                  (row["status"] as String) == ToolRequestStatus.executing.rawValue,
+                  (row["payload_digest"] as String) == request.payloadDigest else { throw PersistenceError.invalidStoredToolRequest }
+            let taskStatusValue: String? = try Row.fetchOne(db, sql: "SELECT status FROM tasks WHERE id = ?", arguments: [request.taskID.uuidString])?["status"]
+            guard let taskStatusValue, taskStatusValue != TaskStatus.cancelled.rawValue else { throw PersistenceError.invalidStoredTask }
+            try updateToolRequest(request.id, to: status, db: db)
+            try updateTask(request.taskID, to: taskStatus, db: db)
+            for audit in audits { try insertAudit(audit, db: db) }
+            try db.execute(sql: "DELETE FROM experimental_click_barriers WHERE request_id = ?", arguments: [request.id.uuidString])
         }
     }
     public func rejectRequest(_ request: ToolRequest, approval: Approval, taskStatus: TaskStatus, audits: [AuditEvent]) throws {

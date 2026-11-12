@@ -30,7 +30,7 @@ struct JarvisMenuBarApp: App {
             FileHandle.standardError.write(Data("实验构建身份或数据隔离配置无效，已停止启动。\n".utf8))
             exit(EXIT_FAILURE)
         }
-        #if JARVIS_SAFARI_EXPERIMENT_BUILD
+        #if JARVIS_SAFARI_EXPERIMENT_BUILD && !JARVIS_SAFARI_CLICK_EXPERIMENT
         guard Bundle.main.bundleIdentifier == "local.jarvis.safari-experiment",
               Bundle.main.object(forInfoDictionaryKey: "JarvisSafariExperiment") as? Bool == true else {
             FileHandle.standardError.write(Data("Invalid experimental bundle identity.\n".utf8))
@@ -42,6 +42,22 @@ struct JarvisMenuBarApp: App {
               Bundle.main.object(forInfoDictionaryKey: "JarvisBrowserExperiment") as? Bool == true else {
             FileHandle.standardError.write(Data("Invalid experimental bundle identity.\n".utf8)); exit(EXIT_FAILURE)
         }
+        #endif
+        #if JARVIS_SAFARI_CLICK_EXPERIMENT
+        #if JARVIS_COMBINED_EXPERIMENT
+        guard CombinedExperimentAccess.current,
+              AppStorageNamespace.isTrueBoolean(Bundle.main.object(forInfoDictionaryKey: "JarvisSafariClickExperiment")) else {
+            FileHandle.standardError.write(Data("Invalid combined click identity.\n".utf8)); exit(EXIT_FAILURE)
+        }
+        #elseif JARVIS_SAFARI_EXPERIMENT_BUILD
+        guard Bundle.main.bundleIdentifier == "local.jarvis.safari-click-experiment",
+              AppStorageNamespace.isTrueBoolean(Bundle.main.object(forInfoDictionaryKey: "JarvisSafariExperiment")),
+              AppStorageNamespace.isTrueBoolean(Bundle.main.object(forInfoDictionaryKey: "JarvisSafariClickExperiment")) else {
+            FileHandle.standardError.write(Data("Invalid click experiment identity.\n".utf8)); exit(EXIT_FAILURE)
+        }
+        #else
+        FileHandle.standardError.write(Data("Click experiment requires an isolated build.\n".utf8)); exit(EXIT_FAILURE)
+        #endif
         #endif
         do { instanceLock = try SingleInstanceLock() }
         catch {
@@ -71,6 +87,18 @@ struct JarvisMenuBarApp: App {
         #if JARVIS_SAFARI_EXPERIMENT_BUILD || JARVIS_COMBINED_EXPERIMENT
         Window("Ask Jarvis", id: "ask-jarvis") { askView }
             .defaultSize(width: 620, height: 560)
+        #endif
+        #if JARVIS_SAFARI_CLICK_EXPERIMENT && (JARVIS_SAFARI_EXPERIMENT_BUILD || JARVIS_COMBINED_EXPERIMENT)
+        Window("Safari 点击实验", id: "safari-click-mode") {
+            if let service = runtime.clickModeService {
+                SafariClickModeView(service: service).frame(minWidth: 500, minHeight: 260)
+            } else { Text("实验服务不可用") }
+        }
+        .defaultSize(width: 560, height: 320)
+        Window("请求 Safari 点击", id: "safari-click-request") {
+            SafariClickRequestView(client: client).frame(minWidth: 500, minHeight: 300)
+        }
+        .defaultSize(width: 560, height: 360)
         #endif
         Window("Welcome to Jarvis", id: "welcome") {
             WelcomeView()
@@ -135,6 +163,9 @@ private final class Runtime {
     /// the agent loop is bound by the same policy gate as every other task.
     private(set) var taskService: (any TaskServiceAPI)?
     private(set) var voiceDraftStore: VoiceDraftStore?
+    #if JARVIS_SAFARI_CLICK_EXPERIMENT && (JARVIS_SAFARI_EXPERIMENT_BUILD || JARVIS_COMBINED_EXPERIMENT)
+    private(set) var clickModeService: TaskService?
+    #endif
 
     /// The user's memory store, or `nil` when initialisation failed. The
     /// "Memory" window shows an unavailable message in that case, and the
@@ -179,6 +210,9 @@ private final class Runtime {
                 browserOpen: BrowserOpenExecutor(),
                 enableSafariRead: safariReadEnabled, exactBrowserEnabled: ExactBrowserExperiment.current, allowSafariReadToggle: allowSafariReadToggle)
             self.taskService = service
+            #if JARVIS_SAFARI_CLICK_EXPERIMENT && (JARVIS_SAFARI_EXPERIMENT_BUILD || JARVIS_COMBINED_EXPERIMENT)
+            self.clickModeService = service
+            #endif
             let server = LoopbackServer(service: service)
             self.server = server
             Task { @MainActor in

@@ -29,7 +29,9 @@ output_dir="${1:-$package_dir/.build/dev-app}"
 mkdir -p "$output_dir"
 output_dir="$(cd "$output_dir" && pwd)"
 if "$combined"; then
-  swift build --package-path "$package_dir" --scratch-path "$package_dir/.build/combined-experiment" -Xswiftc -DJARVIS_COMBINED_EXPERIMENT --product JarvisMenuBar >&2
+  click_flags=()
+  if [ "${JARVIS_COMBINED_CLICK_EXPERIMENT:-0}" = 1 ]; then click_flags=(-Xswiftc -DJARVIS_SAFARI_CLICK_EXPERIMENT); fi
+  swift build --package-path "$package_dir" --scratch-path "$package_dir/.build/combined-experiment" -Xswiftc -DJARVIS_COMBINED_EXPERIMENT "${click_flags[@]}" --product JarvisMenuBar >&2
   bin_dir="$(swift build --package-path "$package_dir" --scratch-path "$package_dir/.build/combined-experiment" --show-bin-path)"
 elif "$exact"; then
   swift build --package-path "$package_dir" --scratch-path "$package_dir/.build/browser-experiment" -Xswiftc -DJARVIS_EXACT_BROWSER_EXPERIMENT --product JarvisMenuBar >&2
@@ -45,7 +47,7 @@ else
   bin_dir="$(swift build --package-path "$package_dir" --show-bin-path)"
 fi
 if [ "${JARVIS_STABLE_OUTPUT:-0}" = 1 ]; then
-  if [ "${JARVIS_SAFARI_EXPERIMENT_BUNDLE:-0}" != 1 ]; then
+  if [ "${JARVIS_SAFARI_EXPERIMENT_BUNDLE:-0}" != 1 ] && [ "${JARVIS_SAFARI_CLICK_EXPERIMENT_BUNDLE:-0}" != 1 ]; then
     printf 'Stable output is only supported for the Safari experiment.\n' >&2
     exit 1
   fi
@@ -61,6 +63,9 @@ cp "$script_dir/Info.plist" "$app_dir/Contents/Info.plist"
 if "$combined"; then
   /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier local.jarvis.combined-experiment' "$app_dir/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c 'Add :JarvisCombinedExperiment bool true' "$app_dir/Contents/Info.plist"
+  if [ "${JARVIS_COMBINED_CLICK_EXPERIMENT:-0}" = 1 ]; then
+    /usr/libexec/PlistBuddy -c 'Add :JarvisSafariClickExperiment bool true' "$app_dir/Contents/Info.plist"
+  fi
 elif "$exact"; then
   /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier local.jarvis.browser-experiment' "$app_dir/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c 'Add :JarvisBrowserExperiment bool true' "$app_dir/Contents/Info.plist"

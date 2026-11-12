@@ -33,6 +33,14 @@ struct TaskListView: View {
             Button { openWindow(id: "welcome") } label: {
                 Label("Permissions and introduction…", systemImage: "info.circle")
             }
+            #if JARVIS_SAFARI_CLICK_EXPERIMENT && (JARVIS_SAFARI_EXPERIMENT_BUILD || JARVIS_COMBINED_EXPERIMENT)
+            Button { openWindow(id: "safari-click-mode") } label: {
+                Label("Safari 点击实验…", systemImage: "hand.tap")
+            }
+            Button { openWindow(id: "safari-click-request") } label: {
+                Label("请求 Safari 点击…", systemImage: "cursorarrow.click")
+            }
+            #endif
             Button { openWindow(id: "memory") } label: {
                 Label("Memory…", systemImage: "brain")
             }
