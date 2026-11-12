@@ -82,7 +82,7 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
                 let preview: (url: String, role: String, title: String, enabled: Bool)? = nil
                 #endif
                 if let preview {
-                    let payload = "元素类型：\(preview.role)\n元素标题：\(preview.title)\n状态：\(preview.enabled ? "已启用" : "未启用")\n风险：点击可能改变网页或触发操作；执行前会再次检查目标。完整网址可能包含敏感参数，请注意保护。"
+                    let payload = "元素类型：\(preview.role)\n元素标题：\(preview.title)\n状态：\(preview.enabled ? "已启用" : "未启用")\n风险：点击可能改变网页或触发操作；检查与点击非原子，动作开始后不可撤销。执行前会再次检查目标。完整网址可能包含敏感参数，请注意保护。"
                     output.append(PendingApprovalRequest(id: request.id, taskID: request.taskID, reason: reason, target: preview.url, payload: payload, digest: request.payloadDigest, kind: "safari_click_experiment", previewAvailable: true))
                 } else {
                     output.append(PendingApprovalRequest(id: request.id, taskID: request.taskID, reason: reason, target: "实验点击", payload: "此实验请求的目标已失效或不可用，请拒绝此请求后重新发起。", digest: request.payloadDigest, kind: "safari_click_experiment", previewAvailable: false))
@@ -227,11 +227,26 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
 
     #if os(macOS)
     #if JARVIS_SAFARI_CLICK_EXPERIMENT
-    /// Unregistered experiment: this installer is private and has no production caller.
-    /// The system function is reachable only through the durable approval coordinator.
-    private func installExperimentalSystemClick(systemAction: @escaping @Sendable (AXUIElement, CFString) -> AXError = { element, operation in
+    /// Checks actual bundle metadata and permission; user opt-in must be provided by
+    /// a future explicit UI. No production caller currently installs this capability.
+    private static func experimentalSystemClickGate(bundleID: String?, marker: Any?, optedIn: Bool, trusted: Bool) -> Bool {
+        #if JARVIS_SAFARI_EXPERIMENT_BUILD
+        guard bundleID == "local.jarvis.safari-click-experiment", let number = marker as? NSNumber,
+              CFGetTypeID(number) == CFBooleanGetTypeID(), number.boolValue, optedIn, trusted else { return false }
+        return true
+        #else
+        return false
+        #endif
+    }
+    private func installExperimentalSystemClick(optedIn: Bool, systemAction: @escaping @Sendable (AXUIElement, CFString) -> AXError = { element, operation in
         AXUIElementPerformAction(element, operation)
     }) {
+        guard Self.experimentalSystemClickGate(bundleID: Bundle.main.bundleIdentifier,
+            marker: Bundle.main.object(forInfoDictionaryKey: "JarvisSafariClickExperiment"),
+            optedIn: optedIn, trusted: AXIsProcessTrusted()) else { return }
+        installExperimentalSystemClickCore(systemAction: systemAction)
+    }
+    private func installExperimentalSystemClickCore(systemAction: @escaping @Sendable (AXUIElement, CFString) -> AXError) {
         lock.withLock {
             guard clickExperiment == nil else { return }
             clickExperiment = ExperimentalClickCoordinator(lifetime: 60, clock: { ProcessInfo.processInfo.systemUptime }) { element, operation in
@@ -241,9 +256,12 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
         }
     }
     #if JARVIS_SAFARI_CLICK_TESTING
-    /// Available only in explicit test builds; never register this in the application.
+    /// Fake injection is only present when the explicit test macro is set.
     func installExperimentalSystemClickForTesting(_ systemAction: @escaping @Sendable (AXUIElement, CFString) -> AXError) async {
-        installExperimentalSystemClick(systemAction: systemAction)
+        installExperimentalSystemClickCore(systemAction: systemAction)
+    }
+    static func experimentalSystemClickGateForTesting(bundleID: String?, marker: Any?, optedIn: Bool, trusted: Bool) -> Bool {
+        experimentalSystemClickGate(bundleID: bundleID, marker: marker, optedIn: optedIn, trusted: trusted)
     }
     #endif
     #endif

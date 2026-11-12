@@ -1450,6 +1450,8 @@ extension TaskServiceTests {
         XCTAssertTrue(preview.payload.contains("Secret"))
         XCTAssertTrue(preview.payload.contains("启用"))
         XCTAssertTrue(preview.payload.contains("风险"))
+        XCTAssertTrue(preview.payload.contains("非原子"))
+        XCTAssertTrue(preview.payload.contains("不可撤销"))
         let persisted = try XCTUnwrap(fixture.requests.fetch(id: request.id)?.0)
         XCTAssertFalse(String(describing: persisted).contains("Secret"))
         XCTAssertFalse(String(describing: persisted).contains("example.com/private"))
@@ -1641,6 +1643,19 @@ private final class ExperimentalClickActionCounter: @unchecked Sendable {
 
 #if os(macOS) && JARVIS_SAFARI_CLICK_EXPERIMENT && JARVIS_SAFARI_CLICK_TESTING
 extension TaskServiceTests {
+    func testExperimentalClickGateRejectsForgedOrMissingRequirements() {
+        let bundle = "local.jarvis.safari-click-experiment"
+        #if JARVIS_SAFARI_EXPERIMENT_BUILD
+        XCTAssertTrue(TaskService.experimentalSystemClickGateForTesting(bundleID: bundle, marker: NSNumber(value: true), optedIn: true, trusted: true))
+        #else
+        XCTAssertFalse(TaskService.experimentalSystemClickGateForTesting(bundleID: bundle, marker: NSNumber(value: true), optedIn: true, trusted: true))
+        #endif
+        XCTAssertFalse(TaskService.experimentalSystemClickGateForTesting(bundleID: "local.jarvis.dev", marker: NSNumber(value: true), optedIn: true, trusted: true))
+        XCTAssertFalse(TaskService.experimentalSystemClickGateForTesting(bundleID: bundle, marker: NSNumber(value: 1), optedIn: true, trusted: true))
+        XCTAssertFalse(TaskService.experimentalSystemClickGateForTesting(bundleID: bundle, marker: nil, optedIn: true, trusted: true))
+        XCTAssertFalse(TaskService.experimentalSystemClickGateForTesting(bundleID: bundle, marker: NSNumber(value: true), optedIn: false, trusted: true))
+        XCTAssertFalse(TaskService.experimentalSystemClickGateForTesting(bundleID: bundle, marker: NSNumber(value: true), optedIn: true, trusted: false))
+    }
     func testExperimentalSystemPressRunsOnlyAfterDurableApprovalAndOnce() async throws {
         let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
         let task = try await fixture.service.createTask(title: "system press test")
