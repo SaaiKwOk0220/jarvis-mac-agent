@@ -10,8 +10,6 @@ enum ExactBrowserExperiment {
         #if JARVIS_EXACT_BROWSER_EXPERIMENT
         guard let marker = Bundle.main.object(forInfoDictionaryKey: "JarvisBrowserExperiment") else { return false }
         return Bundle.main.bundleIdentifier == bundleID && CFGetTypeID(marker as CFTypeRef) == CFBooleanGetTypeID() && (marker as? Bool == true)
-        #elseif JARVIS_EXACT_BROWSER_EXPERIMENT
-        return Bundle.main.bundleIdentifier == bundleID && AppStorageNamespace.isTrueBoolean(Bundle.main.object(forInfoDictionaryKey: "JarvisBrowserExperiment"))
         #else
         return false
         #endif

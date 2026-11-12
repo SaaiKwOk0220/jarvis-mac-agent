@@ -1763,3 +1763,27 @@ extension TaskServiceTests {
     }
 }
 #endif
+
+extension TaskServiceTests {
+    func testPendingSnapshotDoesNotHoldServiceLockWhileWaitingForBrowserGate() async throws {
+        #if !JARVIS_EXACT_BROWSER_EXPERIMENT
+        throw XCTSkip("Exact browser experiment unavailable")
+        #endif
+        let fixture = try Fixture(exactBrowserEnabled: true)
+        let task = try await fixture.service.createTask(title: "lock ordering")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private", payload: "Open in browser")
+        _ = try await fixture.service.submit(request: request)
+        let snapshot = DispatchSemaphore(value: 0), gateHeld = DispatchSemaphore(value: 0)
+        let gateCompleted = expectation(description: "gate then service lock")
+        fixture.service.testPendingSnapshot = { snapshot.signal(); _ = gateHeld.wait(timeout: .now() + 2) }
+        DispatchQueue.global().async {
+            guard snapshot.wait(timeout: .now() + 2) == .success else { return }
+            let acquired = fixture.service.testGateThenServiceLock { gateHeld.signal() }
+            XCTAssertTrue(acquired, "service lock must be released before waiting on the gate")
+            gateCompleted.fulfill()
+        }
+        let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        await fulfillment(of: [gateCompleted], timeout: 2)
+        XCTAssertEqual(pending.first?.target, "https://example.com/private")
+    }
+}

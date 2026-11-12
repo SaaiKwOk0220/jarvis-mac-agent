@@ -101,24 +101,44 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     public func getTask(id: UUID) async throws -> JarvisTask? { try lock.withLock { try tasks.fetch(id: id) } }
     public func listTasks() async throws -> [JarvisTask] { try lock.withLock { try tasks.list() } }
 
+    var testPendingSnapshot: @Sendable () -> Void = {}
+    func testGateThenServiceLock(_ gateHeld: () -> Void) -> Bool {
+        guard let generation = exactBrowserGate.capture() else { return false }
+        return (try? exactBrowserGate.withCurrentGeneration(generation) {
+            gateHeld()
+            let deadline = Date().addingTimeInterval(1)
+            while Date() < deadline {
+                if lock.try() { lock.unlock(); return true }
+                Thread.sleep(forTimeInterval: 0.001)
+            }
+            return false
+        }) ?? false
+    }
+
     public func listPendingApprovalRequests(taskID: UUID) async throws -> [PendingApprovalRequest] {
-        try lock.withLock {
+        let snapshot: [(ToolRequest, String)] = try lock.withLock {
             guard try tasks.fetch(id: taskID) != nil else { throw TaskServiceError.taskNotFound }
             let pending = try requests.list(status: .pending).filter { $0.0.taskID == taskID }
-            return try pending.map { request, _ in
-                let reason = (try? audits.events(for: taskID).reversed().first(where: {
+            let events = try? audits.events(for: taskID)
+            let result = pending.map { request, _ in
+                let reason = events?.reversed().first(where: {
                     $0.actionDigest == request.payloadDigest && $0.summary == "policy requires approval"
-                })?.result) ?? "Approval requested by policy"
-                let redactedPayload = redactSecrets(request.payload)
-                let target: String
-                if request.name == "browser_open", let ticket = BrowserURLTicketStore.Ticket(payload: request.payload) {
-                    if let generation = exactBrowserGate.capture() {
-                        target = (try? exactBrowserGate.withCurrentGeneration(generation) { browserTickets.peekBound(ticket, taskID: request.taskID, requestID: request.id) }) ?? "[目标已失效，请拒绝此请求后重新请求]"
-                    } else { target = "[目标已失效，请拒绝此请求后重新请求]" }
-                } else { target = request.target }
-                return PendingApprovalRequest(id: request.id, taskID: request.taskID, reason: reason,
-                    target: target, payload: redactedPayload == request.payload ? redactedPayload : "[REDACTED]", digest: request.payloadDigest)
+                })?.result ?? "Approval requested by policy"
+                return (request, reason)
             }
+            testPendingSnapshot()
+            return result
+        }
+        return snapshot.map { request, reason in
+            let redactedPayload = redactSecrets(request.payload)
+            let target: String
+            if request.name == "browser_open", let ticket = BrowserURLTicketStore.Ticket(payload: request.payload) {
+                if let generation = exactBrowserGate.capture() {
+                    target = (try? exactBrowserGate.withCurrentGeneration(generation) { browserTickets.peekBound(ticket, taskID: request.taskID, requestID: request.id) }) ?? "[目标已失效，请拒绝此请求后重新请求]"
+                } else { target = "[目标已失效，请拒绝此请求后重新请求]" }
+            } else { target = request.target }
+            return PendingApprovalRequest(id: request.id, taskID: request.taskID, reason: reason,
+                target: target, payload: redactedPayload == request.payload ? redactedPayload : "[REDACTED]", digest: request.payloadDigest)
         }
     }
 
