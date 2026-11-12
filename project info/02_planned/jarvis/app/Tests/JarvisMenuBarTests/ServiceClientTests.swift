@@ -778,6 +778,53 @@ extension ServiceClientTests {
         XCTAssertTrue(client.isApprovalFresh(changed))
         XCTAssertFalse(client.isApprovalFresh(request))
     }
+    func testExperimentalApprovalCancellationDuringRefreshPreventsHandler() async throws {
+        let client = ServiceClient(), taskID = UUID()
+        let request = ApprovalRequest(id: UUID(), taskID: taskID, reason: "test", target: "https://example.com/a", payload: "target", digest: "digest", kind: "safari_click_experiment", previewAvailable: true)
+        client.applyApprovalRequests([request], taskID: taskID)
+        let entered = expectation(description: "refresh waiting"), pause = ApprovalRefreshPause(entered: entered)
+        client.experimentalClickRefreshForTesting = { _ in await pause.wait(); return [request] }
+        var calls = 0
+        client.experimentalClickApprovalForTesting = { _ in calls += 1 }
+        let attempt = Task { try await client.approve(request) }
+        await fulfillment(of: [entered], timeout: 2)
+        attempt.cancel()
+        pause.release()
+        do { try await attempt.value; XCTFail("cancelled approval succeeded") } catch { }
+        XCTAssertEqual(calls, 0)
+        XCTAssertFalse(client.isApprovalFresh(request))
+    }
+    func testExperimentalApprovalCancellationAfterHandlerStartsIsUnknown() async throws {
+        let client = ServiceClient(), taskID = UUID()
+        let request = ApprovalRequest(id: UUID(), taskID: taskID, reason: "test", target: "https://example.com/a", payload: "target", digest: "digest", kind: "safari_click_experiment", previewAvailable: true)
+        client.applyApprovalRequests([request], taskID: taskID)
+        client.experimentalClickRefreshForTesting = { _ in [request] }
+        let entered = expectation(description: "handler started"), pause = ApprovalRefreshPause(entered: entered)
+        client.experimentalClickApprovalForTesting = { _ in await pause.wait() }
+        let attempt = Task { try await client.approve(request) }
+        await fulfillment(of: [entered], timeout: 2)
+        attempt.cancel(); pause.release()
+        do { try await attempt.value; XCTFail("cancelled handler succeeded") } catch { }
+        client.applyApprovalRequests([request], taskID: taskID)
+        XCTAssertFalse(client.isApprovalFresh(request))
+        XCTAssertTrue(client.actionError?.contains("结果可能未知") == true)
+    }
+    func testExperimentalApprovalFailureShowsErrorAndCannotRepeat() async throws {
+        let client = ServiceClient(), taskID = UUID()
+        let request = ApprovalRequest(id: UUID(), taskID: taskID, reason: "test", target: "https://example.com/a", payload: "target", digest: "digest", kind: "safari_click_experiment", previewAvailable: true)
+        client.applyApprovalRequests([request], taskID: taskID)
+        client.experimentalClickRefreshForTesting = { _ in [request] }
+        var calls = 0
+        client.experimentalClickApprovalForTesting = { _ in calls += 1; throw ServiceClientError.http(status: 409, message: "approval failed") }
+        do { try await client.approve(request); XCTFail("failure expected") } catch { }
+        XCTAssertNotNil(client.actionError)
+        XCTAssertFalse(client.isApprovalFresh(request))
+        XCTAssertTrue(client.actionError?.contains("结果可能未知") == true)
+        client.applyApprovalRequests([request], taskID: taskID)
+        XCTAssertFalse(client.isApprovalFresh(request))
+        do { try await client.approve(request); XCTFail("repeat accepted") } catch { }
+        XCTAssertEqual(calls, 1)
+    }
     func testExperimentalApprovalUsesOnlyInjectedFakeHandler() async throws {
         let client = ServiceClient()
         let request = ApprovalRequest(id: UUID(), taskID: UUID(), reason: "test", target: "https://example.com", payload: "target", digest: "digest", kind: "safari_click_experiment", previewAvailable: true)

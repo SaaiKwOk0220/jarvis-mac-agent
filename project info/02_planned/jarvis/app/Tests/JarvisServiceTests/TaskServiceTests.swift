@@ -918,8 +918,8 @@ private final class Fixture: @unchecked Sendable {
     let approvals: SQLiteApprovalRepository
     let service: TaskService
 
-    init(executor: any ToolExecutor = NoOpToolExecutor(), terminal: TerminalToolExecutor? = nil, webFetch: WebFetchToolExecutor? = nil, screenshot: ScreenshotToolExecutor? = nil, accessibility: AccessibilityQueryToolExecutor? = nil) throws {
-        database = try Database(path: ":memory:")
+    init(path: String = ":memory:", executor: any ToolExecutor = NoOpToolExecutor(), terminal: TerminalToolExecutor? = nil, webFetch: WebFetchToolExecutor? = nil, screenshot: ScreenshotToolExecutor? = nil, accessibility: AccessibilityQueryToolExecutor? = nil) throws {
+        database = try Database(path: path)
         try database.migrate()
         tasks = SQLiteTaskRepository(database: database)
         audit = SQLiteAuditRepository(database: database)
@@ -1247,6 +1247,7 @@ extension TaskServiceTests {
 
 #if os(macOS)
 import ApplicationServices
+import SQLite3
 extension TaskServiceTests {
     func testExperimentalClickCommitsApprovalBeforeFakeAction() async throws {
         let fixture = try Fixture()
@@ -1514,6 +1515,46 @@ extension TaskServiceTests {
         let previews = try await fixture.service.listPendingApprovalRequests(taskID: actualTask.id)
         XCTAssertTrue(previews[0].payload.contains("失效"))
         await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
+    }
+    func testExperimentalClickRejectsLongURLAndRole() async throws {
+        for isURL in [true, false] {
+            let fixture = try Fixture(), task = try await fixture.service.createTask(title: "click")
+            let ref = AXUIElementCreateSystemWide()
+            let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/" + (isURL ? String(repeating: "a", count: 2100) : "a"), role: isURL ? "AXButton" : String(repeating: "r", count: 129), title: "title", enabled: true, requestDigest: "")
+            let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+            await fixture.service.installExperimentalClickForTesting(action: { _, _ in XCTFail("oversized target executed"); return .success })
+            let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+            let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+            XCTAssertEqual(pending[0].previewAvailable, false)
+            await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
+        }
+    }
+    func testExperimentalClickSecretsNeverReachSQLiteOrWAL() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("jarvis-click-privacy-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let databaseURL = directory.appendingPathComponent("test.sqlite")
+        var handle: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(databaseURL.path, &handle), SQLITE_OK)
+        XCTAssertEqual(sqlite3_exec(handle, "PRAGMA journal_mode=WAL", nil, nil, nil), SQLITE_OK)
+        XCTAssertEqual(sqlite3_close(handle), SQLITE_OK)
+        let fixture = try Fixture(path: databaseURL.path)
+        let task = try await fixture.service.createTask(title: "privacy")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/path?token=JARVIS_URL_PRIVATE_3871", role: "AXButton", title: "JARVIS_TITLE_PRIVATE_9234", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        await fixture.service.installExperimentalClickForTesting(action: { _, _ in .success })
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let preview = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        XCTAssertTrue(preview[0].target.contains("JARVIS_URL_PRIVATE_3871"))
+        try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest)
+        let walURL = URL(fileURLWithPath: databaseURL.path + "-wal")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: walURL.path))
+        for url in [databaseURL, walURL] {
+            let data = try Data(contentsOf: url)
+            XCTAssertNil(data.range(of: Data("JARVIS_URL_PRIVATE_3871".utf8)))
+            XCTAssertNil(data.range(of: Data("JARVIS_TITLE_PRIVATE_9234".utf8)))
+        }
     }
     func testExperimentalClickWrongDigestRevokesTicket() async throws {
         let (fixture, _, request, action) = try await experimentalFixture()

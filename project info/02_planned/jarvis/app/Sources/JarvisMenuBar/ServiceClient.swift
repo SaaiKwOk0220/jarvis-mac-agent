@@ -92,6 +92,7 @@ public final class ServiceClient: ObservableObject {
     @Published private var approvalFreshness: [UUID: ApprovalFreshness] = [:]
     private var approvalGeneration: [UUID: UInt64] = [:]
     @Published private var approvalMutationCount: [UUID: Int] = [:]
+    @Published private var failedExperimentalApprovals: Set<UUID> = []
     private var baseURL: URL
     private var authorizationToken: String?
     private let session: URLSession
@@ -196,10 +197,12 @@ public final class ServiceClient: ObservableObject {
         let (data, _) = try await request(path: "/tasks/\(taskID.uuidString)/requests", method: "GET")
         do {
             let requests = try Self.decoder.decode([ApprovalRequest].self, from: data)
+            try Task.checkCancellation()
             commitApprovalRefresh(requests, taskID: taskID, generation: generation)
             serviceError = nil
             return requests
-        } catch { throw ServiceClientError.decoding }
+        } catch is CancellationError { throw CancellationError() }
+        catch { throw ServiceClientError.decoding }
     }
 
     private func approvalTime() -> TimeInterval? {
@@ -241,7 +244,7 @@ public final class ServiceClient: ObservableObject {
         beginApprovalRefresh(taskID: taskID)
     }
     func isApprovalFresh(_ request: ApprovalRequest) -> Bool {
-        guard let now = approvalTime(), approvalMutationCount[request.taskID, default: 0] == 0, let freshness = approvalFreshness[request.id], freshness.taskID == request.taskID,
+        guard let now = approvalTime(), !failedExperimentalApprovals.contains(request.id), approvalMutationCount[request.taskID, default: 0] == 0, let freshness = approvalFreshness[request.id], freshness.taskID == request.taskID,
               freshness.digest == request.digest, now < freshness.deadline, approvalGeneration[request.taskID] == freshness.generation,
               approvalRequests[request.id] == request, request.previewAvailable == true else { return false }
         return true
@@ -273,17 +276,40 @@ public final class ServiceClient: ObservableObject {
 
     public func approve(_ request: ApprovalRequest) async throws {
         if request.kind == "safari_click_experiment" {
-            guard isApprovalFresh(request), !request.digest.isEmpty, let handler = experimentalClickApprovalForTesting else { throw ServiceClientError.unavailable }
-            if let refresh = experimentalClickRefreshForTesting {
-                let generation = beginApprovalRefresh(taskID: request.taskID)
-                let requests = try await refresh(request.taskID)
-                commitApprovalRefresh(requests, taskID: request.taskID, generation: generation)
-            } else { _ = try await loadApprovalRequests(taskID: request.taskID) }
-            guard isApprovalFresh(request) else { throw ServiceClientError.unavailable }
-            beginApprovalMutation(taskID: request.taskID)
-            defer { endApprovalMutation(taskID: request.taskID) }
-            try await handler(request)
-            return
+            let unknownMessage = "操作结果可能未知，请先检查页面，切勿自动重试。"
+            if failedExperimentalApprovals.contains(request.id) { actionError = unknownMessage; throw ServiceClientError.unavailable }
+            var handlerInvoked = false
+            do {
+                guard isApprovalFresh(request), !request.digest.isEmpty, let handler = experimentalClickApprovalForTesting else { throw ServiceClientError.unavailable }
+                if let refresh = experimentalClickRefreshForTesting {
+                    let generation = beginApprovalRefresh(taskID: request.taskID)
+                    let requests = try await refresh(request.taskID)
+                    try Task.checkCancellation()
+                    commitApprovalRefresh(requests, taskID: request.taskID, generation: generation)
+                } else { _ = try await loadApprovalRequests(taskID: request.taskID) }
+                try Task.checkCancellation()
+                guard isApprovalFresh(request) else { throw ServiceClientError.unavailable }
+                beginApprovalMutation(taskID: request.taskID)
+                defer { endApprovalMutation(taskID: request.taskID) }
+                try Task.checkCancellation()
+                handlerInvoked = true
+                try await handler(request)
+                try Task.checkCancellation()
+                actionError = nil
+                return
+            } catch is CancellationError {
+                beginApprovalRefresh(taskID: request.taskID)
+                if handlerInvoked { failedExperimentalApprovals.insert(request.id); actionError = unknownMessage }
+                throw CancellationError()
+            } catch let error as ServiceClientError {
+                if handlerInvoked { failedExperimentalApprovals.insert(request.id) }
+                actionError = handlerInvoked ? unknownMessage : error.localizedDescription
+                throw error
+            } catch {
+                if handlerInvoked { failedExperimentalApprovals.insert(request.id) }
+                actionError = handlerInvoked ? unknownMessage : ServiceClientError.unavailable.localizedDescription
+                throw ServiceClientError.unavailable
+            }
         }
         try await approve(requestID: request.id, digest: request.digest)
     }
