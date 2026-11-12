@@ -88,10 +88,9 @@ actor SafariClickCapture {
 #if os(macOS)
 /// CAS linearizes revocation and the start of AXPress. Once started,
 /// cancellation returns immediately and cannot undo the action.
-private final class SafariClickRevocationGate: @unchecked Sendable {
+final class SafariClickRevocationGate: @unchecked Sendable {
     enum Result { case revoked, alreadyStarted, idle }
-    private let state = ManagedAtomic<Int>(0) // idle, pending, started, revoked, completed
-    func activate() { state.store(1, ordering: .releasing) }
+    private let state = ManagedAtomic<Int>(1) // pending, started, revoked, completed
     func hasStarted() -> Bool { let current = state.load(ordering: .acquiring); return current == 2 || current == 4 }
     func finish() { _ = state.compareExchange(expected: 4, desired: 0, ordering: .acquiringAndReleasing) }
     func revoke() -> Result {
@@ -103,6 +102,174 @@ private final class SafariClickRevocationGate: @unchecked Sendable {
         guard state.compareExchange(expected: 1, desired: 2, ordering: .acquiringAndReleasing).exchanged else { return .failure }
         defer { _ = state.compareExchange(expected: 2, desired: 4, ordering: .acquiringAndReleasing) }
         return action()
+    }
+}
+
+/// A transferred reference remains revocable and subject to its original deadline.
+actor SafariClickTransferredCapture {
+    private let capture: SafariClickCapture
+    private let bindings: SafariClickBindingStore
+    private let deadline: TimeInterval
+    private var valid = true
+    private let gate: SafariClickRevocationGate
+    fileprivate init(capture: SafariClickCapture, bindings: SafariClickBindingStore, deadline: TimeInterval, gate: SafariClickRevocationGate) {
+        self.capture = capture; self.bindings = bindings; self.deadline = deadline; self.gate = gate
+    }
+    func invalidate() async { valid = false; _ = gate.revoke(); await capture.clear() }
+    func verify(expected: SafariClickIdentity) async throws {
+        let initialTimeValid = await bindings.isBefore(deadline)
+        guard valid, !Task.isCancelled, initialTimeValid else { await invalidate(); throw SafariClickCapture.CaptureError.changed }
+        try await capture.verify(expected: expected)
+        let finalTimeValid = await bindings.isBefore(deadline)
+        guard valid, !Task.isCancelled, finalTimeValid else { await invalidate(); throw SafariClickCapture.CaptureError.changed }
+    }
+    /// Experimental action path; only explicitly injected test actions are used.
+    func perform(expected: SafariClickIdentity, timeout: TimeInterval = 3,
+                 beforeAction: @escaping @Sendable () -> Void = {},
+                 action: @escaping @Sendable (AXUIElement, CFString) -> AXError) async throws {
+        let gate = self.gate, clock = bindings.clock, deadline = self.deadline
+        do {
+            try await verify(expected: expected)
+            let time = await bindings.checkedTime(deadline: deadline)
+            guard let baseline = time, valid, !Task.isCancelled else { throw SafariClickCapture.CaptureError.changed }
+            valid = false
+            try await capture.press(expected: expected, timeout: timeout,
+                onTimeout: { gate.revoke() == .alreadyStarted ? .actionOutcomeUnknown : .timeoutBeforeStart },
+                onActionFailure: { gate.hasStarted() ? .actionOutcomeUnknown : .beforeStartRejected },
+                beforeAction: beforeAction) { element, operation in
+                    gate.run {
+                        let now = clock()
+                        guard now.isFinite, now >= baseline, now < deadline else { return .failure }
+                        return action(element, operation)
+                    }
+                }
+            await capture.clear()
+        } catch { _ = gate.revoke(); await capture.clear(); throw error }
+    }
+    /// Simulation only: no AX action is registered or performed by this path.
+    func simulateOnce(expected: SafariClickIdentity, action: @Sendable () async -> Void) async throws {
+        try await verify(expected: expected)
+        guard valid, !Task.isCancelled else { throw SafariClickCapture.CaptureError.changed }
+        valid = false
+        await action()
+        await capture.clear()
+    }
+}
+
+/// Experimental capture binding only; not connected to TaskService or AX actions.
+actor SafariClickStagedCaptures {
+    private let bindings: SafariClickBindingStore
+    private let sleep: @Sendable (Duration) async throws -> Void
+    private var captures: [UUID: SafariClickCapture] = [:]
+    private var gates: [UUID: SafariClickRevocationGate] = [:]
+    private var inUse: Set<ObjectIdentifier> = []
+    private var releasing: [UUID: (Task<Void, Never>, ObjectIdentifier)] = [:]
+    private var consuming: Set<UUID> = []
+    private var revoked: Set<UUID> = []
+    private var transferred: [UUID: (SafariClickTransferredCapture, ObjectIdentifier)] = [:]
+    init(bindings: SafariClickBindingStore, sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) { self.bindings = bindings; self.sleep = sleep }
+    func purgeExpired() async {
+        let ids = await bindings.purgeExpired()
+        for token in ids { await cancel(token: token) }
+        for token in Array(releasing.keys) { await release(token: token) }
+    }
+    private func beginRelease(token: UUID) -> (Task<Void, Never>, ObjectIdentifier)? {
+        if let existing = releasing[token] { return existing }
+        guard let capture = captures.removeValue(forKey: token) else { return nil }
+        let item = (Task { await capture.clear() }, ObjectIdentifier(capture))
+        releasing[token] = item
+        return item
+    }
+    private func finishRelease(token: UUID, item: (Task<Void, Never>, ObjectIdentifier)?) async {
+        guard let item else { return }
+        await item.0.value
+        if releasing.removeValue(forKey: token) != nil { inUse.remove(item.1) }
+    }
+    private func release(token: UUID) async {
+        await finishRelease(token: token, item: beginRelease(token: token))
+    }
+    func stage(taskID: UUID, identity: SafariClickIdentity, targetDigest: String, capture: SafariClickCapture) async throws -> UUID? {
+        await purgeExpired()
+        try Task.checkCancellation()
+        let key = ObjectIdentifier(capture)
+        guard inUse.count < 32, inUse.insert(key).inserted else { return nil }
+        var published = false
+        var token: UUID?
+        do {
+            try await capture.capture(expected: identity)
+            try Task.checkCancellation()
+            token = await bindings.issue(.init(taskID: taskID, targetDigest: targetDigest))
+            try Task.checkCancellation()
+            guard let token else { await capture.clear(); inUse.remove(key); return nil }
+            captures[token] = capture
+            gates[token] = SafariClickRevocationGate()
+            published = true
+            Task { [weak self] in
+                await self?.waitForExpiry(token: token)
+            }
+            return token
+        } catch {
+            if let token { await bindings.cancel(token: token) }
+            if !published { await capture.clear(); inUse.remove(key) }
+            throw error
+        }
+    }
+    private func waitForExpiry(token: UUID) async {
+        while captures[token] != nil {
+            guard let remaining = await bindings.remaining(token: token) else {
+                if consuming.contains(token) || transferred[token] != nil { return }
+                await cancel(token: token)
+                return
+            }
+            do { try await sleep(.seconds(remaining)) }
+            catch { await cancel(token: token); return }
+        }
+    }
+    func bind(token: UUID, taskID: UUID, requestID: UUID, digest: String) async -> Bool {
+        guard captures[token] != nil else { return false }
+        let success = await bindings.bind(token: token, taskID: taskID, requestID: requestID, digest: digest)
+        guard success, captures[token] != nil, !Task.isCancelled else {
+            _ = gates.removeValue(forKey: token)?.revoke()
+            await bindings.cancel(token: token)
+            await release(token: token)
+            return false
+        }
+        return true
+    }
+    /// Transfers the captured reference only after a matching one-use binding.
+    /// This bridge is experimental and does not perform or authorize an action.
+    func consume(token: UUID, taskID: UUID, requestID: UUID, digest: String, targetDigest: String) async -> SafariClickTransferredCapture? {
+        guard let capture = captures.removeValue(forKey: token), let gate = gates[token] else { return nil }
+        consuming.insert(token)
+        defer { consuming.remove(token); revoked.remove(token) }
+        let deadline = await bindings.consumeWithDeadline(token: token, taskID: taskID, requestID: requestID, digest: digest, targetDigest: targetDigest)
+        guard let deadline, !Task.isCancelled, !revoked.contains(token) else {
+            _ = gate.revoke()
+            gates.removeValue(forKey: token)
+            await capture.clear()
+            inUse.remove(ObjectIdentifier(capture))
+            return nil
+        }
+        let transfer = SafariClickTransferredCapture(capture: capture, bindings: bindings, deadline: deadline, gate: gate)
+        transferred[token] = (transfer, ObjectIdentifier(capture))
+        Task { [weak self] in await self?.waitForTransferExpiry(token: token, deadline: deadline) }
+        return transfer
+    }
+    private func waitForTransferExpiry(token: UUID, deadline: TimeInterval) async {
+        while transferred[token] != nil {
+            guard let remaining = await bindings.remaining(deadline: deadline) else { await cancel(token: token); return }
+            do { try await sleep(.seconds(remaining)) } catch { await cancel(token: token); return }
+        }
+    }
+    @discardableResult func cancel(token: UUID) async -> SafariClickRevocationGate.Result {
+        let result = gates.removeValue(forKey: token)?.revoke() ?? .idle
+        if consuming.contains(token) { revoked.insert(token) }
+        let transfer = transferred.removeValue(forKey: token)
+        let item = beginRelease(token: token)
+        await bindings.cancel(token: token)
+        if let transfer { await transfer.0.invalidate(); inUse.remove(transfer.1) }
+        await finishRelease(token: token, item: item)
+        return result
     }
 }
 
@@ -146,7 +313,6 @@ actor SafariClickApprovalPrototype {
             let expires = try readClock() + 60
             let token = UUID()
             let gate = SafariClickRevocationGate()
-            gate.activate()
             activeGate = gate
             pending[token] = Pending(requestID: requestID, identity: identity, expires: expires, generation: current, gate: gate)
             return token

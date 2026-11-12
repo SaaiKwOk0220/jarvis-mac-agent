@@ -74,6 +74,18 @@ final class SafariClickBindingStoreTests: XCTestCase {
 
 #if os(macOS)
 import ApplicationServices
+private final class BindingWorkerBlocker: @unchecked Sendable {
+    let entered: XCTestExpectation
+    let release = DispatchSemaphore(value: 0)
+    init(_ entered: XCTestExpectation) { self.entered = entered }
+    func wait() { entered.fulfill(); _ = release.wait(timeout: .now() + 5) }
+}
+private final class BindingActionCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    func increment() { lock.lock(); defer { lock.unlock() }; count += 1 }
+    var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+}
 private actor EarlyWakeSleeper {
     var calls = 0
     func sleep(_ duration: Duration) async throws {
@@ -189,6 +201,77 @@ extension SafariClickBindingStoreTests {
         await transfer.invalidate()
         await gate.release()
         do { try await verification.value; XCTFail("invalidated transfer verified") } catch { }
+    }
+
+    func testTransferredPressCancelledBeforeWorkerStartsDoesNotAct() async throws {
+        let taskID = UUID(), requestID = UUID()
+        let staged = SafariClickStagedCaptures(bindings: SafariClickBindingStore())
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let ref = AXUIElementCreateSystemWide()
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let capture = SafariClickCapture { [candidate] }
+        let tokenValue = try await staged.stage(taskID: taskID, identity: identity, targetDigest: "target", capture: capture)
+        let token = try XCTUnwrap(tokenValue)
+        let bound = await staged.bind(token: token, taskID: taskID, requestID: requestID, digest: "digest")
+        XCTAssertTrue(bound)
+        let transferValue = await staged.consume(token: token, taskID: taskID, requestID: requestID, digest: "digest", targetDigest: "target")
+        let transfer = try XCTUnwrap(transferValue)
+        let entered = expectation(description: "worker waiting")
+        let blocker = BindingWorkerBlocker(entered)
+        let action = BindingActionCounter()
+        let job = Task { try await transfer.perform(expected: identity, beforeAction: { blocker.wait() }, action: { _, _ in action.increment(); return .success }) }
+        await fulfillment(of: [entered], timeout: 2)
+        await staged.cancel(token: token)
+        blocker.release.signal()
+        do { try await job.value; XCTFail("cancelled action succeeded") } catch { }
+        XCTAssertEqual(action.value, 0)
+    }
+
+    func testTransferredPressExpiredWhileWorkerWaitsNeverActs() async throws {
+        let clock = BindingClock(), taskID = UUID(), requestID = UUID()
+        let staged = SafariClickStagedCaptures(bindings: SafariClickBindingStore(lifetime: 5, clock: { clock.read() }))
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let ref = AXUIElementCreateSystemWide()
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let capture = SafariClickCapture { [candidate] }
+        let tokenValue = try await staged.stage(taskID: taskID, identity: identity, targetDigest: "target", capture: capture)
+        let token = try XCTUnwrap(tokenValue)
+        let bound = await staged.bind(token: token, taskID: taskID, requestID: requestID, digest: "digest")
+        XCTAssertTrue(bound)
+        let transferValue = await staged.consume(token: token, taskID: taskID, requestID: requestID, digest: "digest", targetDigest: "target")
+        let transfer = try XCTUnwrap(transferValue)
+        let entered = expectation(description: "worker waiting")
+        let blocker = BindingWorkerBlocker(entered), action = BindingActionCounter()
+        let job = Task { try await transfer.perform(expected: identity, beforeAction: { blocker.wait() }, action: { _, _ in action.increment(); return .success }) }
+        await fulfillment(of: [entered], timeout: 2)
+        clock.set(6)
+        blocker.release.signal()
+        do { try await job.value; XCTFail("expired action succeeded") } catch { }
+        XCTAssertEqual(action.value, 0)
+    }
+
+    func testTransferredPressStartedBeforeCancellationCannotBeUndone() async throws {
+        let taskID = UUID(), requestID = UUID()
+        let staged = SafariClickStagedCaptures(bindings: SafariClickBindingStore())
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let ref = AXUIElementCreateSystemWide()
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let capture = SafariClickCapture { [candidate] }
+        let tokenValue = try await staged.stage(taskID: taskID, identity: identity, targetDigest: "target", capture: capture)
+        let token = try XCTUnwrap(tokenValue)
+        let bound = await staged.bind(token: token, taskID: taskID, requestID: requestID, digest: "digest")
+        XCTAssertTrue(bound)
+        let transferValue = await staged.consume(token: token, taskID: taskID, requestID: requestID, digest: "digest", targetDigest: "target")
+        let transfer = try XCTUnwrap(transferValue)
+        let entered = expectation(description: "action started")
+        let blocker = BindingWorkerBlocker(entered), action = BindingActionCounter()
+        let job = Task { try await transfer.perform(expected: identity, action: { _, _ in action.increment(); blocker.wait(); return .success }) }
+        await fulfillment(of: [entered], timeout: 2)
+        let cancellation = await staged.cancel(token: token)
+        guard case .alreadyStarted = cancellation else { XCTFail("action already started") ; blocker.release.signal(); return }
+        blocker.release.signal()
+        try await job.value
+        XCTAssertEqual(action.value, 1)
     }
 
     func testTransferredCaptureSimulationRunsOnlyOnce() async throws {
