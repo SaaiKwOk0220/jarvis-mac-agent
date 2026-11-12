@@ -2,7 +2,18 @@ import AppKit
 import Foundation
 import JarvisDomain
 
-public enum BrowserOpenError: Error { case invalidRequest, openFailed, unavailable }
+public enum BrowserOpenError: Error, LocalizedError {
+    case invalidRequest, openFailed, unavailable, outcomeUnknown
+
+    public var errorDescription: String? {
+        switch self {
+        case .outcomeUnknown: return "Browser open outcome is unknown. Check the browser before trying again; do not retry automatically."
+        case .invalidRequest: return "Invalid browser destination."
+        case .openFailed: return "Could not open the browser."
+        case .unavailable: return "Browser opening is unavailable."
+        }
+    }
+}
 
 /// Opens an approved HTTPS URL; no page contents are read or returned.
 public struct BrowserOpenExecutor: ToolExecutor, Sendable {
@@ -57,7 +68,7 @@ public struct BrowserOpenExecutor: ToolExecutor, Sendable {
         // open. The async system API runs outside the lock and main actor.
         try gate.beginOpen(attempt)
         let opened = await exactOpener(url)
-        guard opened else { throw BrowserOpenError.openFailed }
+        guard opened, !Task.isCancelled else { throw BrowserOpenError.outcomeUnknown }
         return ToolResult(summary: "Browser open requested")
     }
 }

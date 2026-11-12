@@ -322,8 +322,15 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
             let fallback: TaskStatus = .failed
             let aggregate: TaskStatus = (try? aggregateStatus(forTask: request.taskID, excluding: request.id, fallback: fallback)) ?? fallback
             try lock.withLock {
-                guard let task = try tasks.fetch(id: request.taskID), task.status != .cancelled else { return }
-                try uow.finishRequest(request, status: .failed, taskStatus: aggregate, audits: [event(request, summary: "tool failure", result: "failed")])
+                guard let task = try tasks.fetch(id: request.taskID) else { return }
+                let browserOutcomeUnknown: Bool
+                if case BrowserOpenError.outcomeUnknown = error { browserOutcomeUnknown = true } else { browserOutcomeUnknown = false }
+                let safeFailure = browserOutcomeUnknown ? (BrowserOpenError.outcomeUnknown.errorDescription ?? "Browser open outcome unknown") : "failed"
+                if task.status == .cancelled {
+                    if browserOutcomeUnknown { try audits.append(event(request, summary: "browser open outcome unknown", result: safeFailure)) }
+                    return
+                }
+                try uow.finishRequest(request, status: .failed, taskStatus: aggregate, audits: [event(request, summary: "tool failure", result: safeFailure)])
             }
             throw error
         }
