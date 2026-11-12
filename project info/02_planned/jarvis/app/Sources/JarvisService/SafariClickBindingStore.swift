@@ -67,6 +67,8 @@ actor SafariClickStagedCaptures {
     private var captures: [UUID: SafariClickCapture] = [:]
     private var inUse: Set<ObjectIdentifier> = []
     private var releasing: [UUID: (Task<Void, Never>, ObjectIdentifier)] = [:]
+    private var consuming: Set<UUID> = []
+    private var revoked: Set<UUID> = []
     init(bindings: SafariClickBindingStore, sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) { self.bindings = bindings; self.sleep = sleep }
     func purgeExpired() async {
         let ids = await bindings.purgeExpired()
@@ -133,7 +135,23 @@ actor SafariClickStagedCaptures {
         }
         return true
     }
+    /// Transfers the captured reference only after a matching one-use binding.
+    /// This bridge is experimental and does not perform or authorize an action.
+    func consume(token: UUID, taskID: UUID, requestID: UUID, digest: String, targetDigest: String) async -> SafariClickCapture? {
+        guard let capture = captures.removeValue(forKey: token) else { return nil }
+        consuming.insert(token)
+        defer { consuming.remove(token); revoked.remove(token) }
+        let valid = await bindings.consume(token: token, taskID: taskID, requestID: requestID, digest: digest, targetDigest: targetDigest)
+        guard valid, !Task.isCancelled, !revoked.contains(token) else {
+            await capture.clear()
+            inUse.remove(ObjectIdentifier(capture))
+            return nil
+        }
+        inUse.remove(ObjectIdentifier(capture))
+        return capture
+    }
     func cancel(token: UUID) async {
+        if consuming.contains(token) { revoked.insert(token) }
         let item = beginRelease(token: token)
         await bindings.cancel(token: token)
         await finishRelease(token: token, item: item)

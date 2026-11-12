@@ -42,11 +42,11 @@ final class SafariClickBindingStoreTests: XCTestCase {
     func testWrongDigestsConsumeBoundTicket() async throws {
         let store = SafariClickBindingStore(clock: { 1 })
         let task = UUID(), request = UUID()
-        for badRequestDigest in [true, false] {
+        for variant in 0..<4 {
             let value = await store.issue(.init(taskID: task, targetDigest: "target")); let token = try XCTUnwrap(value)
             let bound = await store.bind(token: token, taskID: task, requestID: request, digest: "request")
             XCTAssertTrue(bound)
-            let result = await store.consume(token: token, taskID: task, requestID: request, digest: badRequestDigest ? "wrong" : "request", targetDigest: badRequestDigest ? "target" : "wrong")
+            let result = await store.consume(token: token, taskID: variant == 2 ? UUID() : task, requestID: variant == 3 ? UUID() : request, digest: variant == 0 ? "wrong" : "request", targetDigest: variant == 1 ? "wrong" : "target")
             let replay = await store.consume(token: token, taskID: task, requestID: request, digest: "request", targetDigest: "target")
             XCTAssertFalse(result); XCTAssertFalse(replay)
         }
@@ -152,6 +152,30 @@ extension SafariClickBindingStoreTests {
         task.cancel(); await gate.release()
         do { _ = try await task.value; XCTFail("cancelled stage") } catch { }
         do { try await capture.verify(expected: identity); XCTFail("cancelled reference retained") } catch { }
+    }
+    func testBoundCaptureTransferRequiresExactBindingAndIsSingleUse() async throws {
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let ref = AXUIElementCreateSystemWide()
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let staged = SafariClickStagedCaptures(bindings: SafariClickBindingStore(clock: { 1 }))
+        let task = UUID(), request = UUID()
+        let firstCapture = SafariClickCapture { [candidate] }
+        let firstValue = try await staged.stage(taskID: task, identity: identity, targetDigest: "target", capture: firstCapture)
+        let first = try XCTUnwrap(firstValue)
+        let firstBound = await staged.bind(token: first, taskID: task, requestID: request, digest: "digest")
+        XCTAssertTrue(firstBound)
+        let wrong = await staged.consume(token: first, taskID: task, requestID: request, digest: "wrong", targetDigest: "target")
+        XCTAssertNil(wrong)
+        do { try await firstCapture.verify(expected: identity); XCTFail("mismatch retained capture") } catch { }
+        let secondCapture = SafariClickCapture { [candidate] }
+        let secondValue = try await staged.stage(taskID: task, identity: identity, targetDigest: "target", capture: secondCapture)
+        let second = try XCTUnwrap(secondValue)
+        let secondBound = await staged.bind(token: second, taskID: task, requestID: request, digest: "digest")
+        XCTAssertTrue(secondBound)
+        let transferred = await staged.consume(token: second, taskID: task, requestID: request, digest: "digest", targetDigest: "target")
+        XCTAssertNotNil(transferred)
+        let replay = await staged.consume(token: second, taskID: task, requestID: request, digest: "digest", targetDigest: "target")
+        XCTAssertNil(replay)
     }
     func testFailedBindingReleasesCapturedElement() async throws {
         let task = UUID()
