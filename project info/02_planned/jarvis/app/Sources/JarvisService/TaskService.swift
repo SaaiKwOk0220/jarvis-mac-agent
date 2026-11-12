@@ -75,7 +75,9 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
         }
         var output: [PendingApprovalRequest] = []
         for (request, reason) in pending {
-            if request.name == "safari_read" {
+            if request.name == "safari_click_experiment" {
+                output.append(PendingApprovalRequest(id: request.id, taskID: request.taskID, reason: reason, target: "实验点击", payload: "此实验请求无法在当前界面审批，请拒绝此请求后重新发起。", digest: request.payloadDigest))
+            } else if request.name == "safari_read" {
                 let exactURL = await safariCoordinator.preview(request) ?? "Capture expired; reject and try again."
                 output.append(PendingApprovalRequest(id: request.id, taskID: request.taskID, reason: reason, target: exactURL, payload: "Read accessibility text from this captured Safari window", digest: request.payloadDigest))
             } else {
@@ -271,9 +273,11 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
                 return request
             }
         } catch { await click.cancel(requestID: requestID); throw error }
+        var actionCompleted = false
         do {
             try Task.checkCancellation()
             try await click.perform(request)
+            actionCompleted = true
             try lock.withLock {
                 guard let task = try tasks.fetch(id: request.taskID), task.status != .cancelled else { return }
                 let status = try aggregateStatus(forTask: request.taskID, excluding: request.id, fallback: .running)
@@ -285,14 +289,15 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
             await click.cancel(requestID: requestID)
             let recorded = (try? lock.withLock { () throws -> Bool in
                 guard let task = try tasks.fetch(id: request.taskID), task.status != .cancelled else { return false }
-                let result = (error as? SafariPressFailure).map { failure in
-                    if case .actionOutcomeUnknown = failure { return "action outcome unknown; do not retry automatically" }
-                    return "action not completed"
-                } ?? "action not completed"
+                let result: String
+                if actionCompleted { result = "action outcome unknown; do not retry automatically" }
+                else if let failure = error as? SafariPressFailure, case .actionOutcomeUnknown = failure { result = "action outcome unknown; do not retry automatically" }
+                else { result = "action not completed" }
                 try uow.finishRequest(request, status: .failed, taskStatus: .failed, audits: [event(request, summary: "experimental click failed", result: result)])
                 return true
             }) ?? false
             if recorded { await click.acknowledgeStarts(taskID: request.taskID, requestIDs: [requestID]) }
+            if actionCompleted { throw SafariPressFailure.actionOutcomeUnknown }
             throw error
         }
     }
