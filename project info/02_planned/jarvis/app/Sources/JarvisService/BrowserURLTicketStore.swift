@@ -67,6 +67,11 @@ public final class BrowserURLTicketStore: @unchecked Sendable {
                            payload: "ticket:\(ticket.id.uuidString):\(ticket.digest)")
     }
 
+    func revokeAll() {
+        lock.lock(); defer { lock.unlock() }
+        entries.removeAll()
+    }
+
     public func revoke(id: UUID) {
         lock.lock(); defer { lock.unlock() }
         entries.removeValue(forKey: id)

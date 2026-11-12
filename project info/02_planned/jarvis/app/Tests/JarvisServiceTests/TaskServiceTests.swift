@@ -7,8 +7,11 @@ import JarvisPolicy
 
 final class TaskServiceTests: XCTestCase {
     func testExactBrowserApprovalTransactionFailureShowsExpiredTarget() async throws {
+        #if !JARVIS_EXACT_BROWSER_EXPERIMENT && !JARVIS_COMBINED_EXPERIMENT
+        throw XCTSkip("Exact browser feature is unavailable in ordinary builds")
+        #endif
         let recorder = BrowserRecorder()
-        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in await recorder.record(url); return true }), exactBrowserEnabled: true)
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in recorder.record(url); return true }, exactOpener: { url in recorder.record(url); return true }), exactBrowserEnabled: true)
         let task = try await fixture.service.createTask(title: "Open")
         let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private", payload: "Open in browser")
         _ = try await fixture.service.submit(request: request)
@@ -24,8 +27,11 @@ final class TaskServiceTests: XCTestCase {
         XCTAssertEqual(count, 0)
     }
     func testExactBrowserExpiredTicketCannotExecute() async throws {
+        #if !JARVIS_EXACT_BROWSER_EXPERIMENT && !JARVIS_COMBINED_EXPERIMENT
+        throw XCTSkip("Exact browser feature is unavailable in ordinary builds")
+        #endif
         let recorder = BrowserRecorder()
-        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in await recorder.record(url); return true }), exactBrowserEnabled: true, browserTicketLifetime: 0.05)
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in recorder.record(url); return true }, exactOpener: { url in recorder.record(url); return true }), exactBrowserEnabled: true, browserTicketLifetime: 0.05)
         let task = try await fixture.service.createTask(title: "Open")
         let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private", payload: "Open in browser")
         _ = try await fixture.service.submit(request: request)
@@ -38,6 +44,9 @@ final class TaskServiceTests: XCTestCase {
         XCTAssertEqual(fixture.service.testBrowserTicketCount, 0)
     }
     func testExactBrowserTransactionFailureRevokesTicket() async throws {
+        #if !JARVIS_EXACT_BROWSER_EXPERIMENT && !JARVIS_COMBINED_EXPERIMENT
+        throw XCTSkip("Exact browser feature is unavailable in ordinary builds")
+        #endif
         let fixture = try Fixture(exactBrowserEnabled: true)
         let task = try await fixture.service.createTask(title: "Open")
         try fixture.database.write { db in
@@ -49,8 +58,11 @@ final class TaskServiceTests: XCTestCase {
         XCTAssertNil(try fixture.requests.fetch(id: request.id))
     }
     func testExactBrowserRejectAndCancelCannotExecute() async throws {
+        #if !JARVIS_EXACT_BROWSER_EXPERIMENT && !JARVIS_COMBINED_EXPERIMENT
+        throw XCTSkip("Exact browser feature is unavailable in ordinary builds")
+        #endif
         let recorder = BrowserRecorder()
-        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in await recorder.record(url); return true }), exactBrowserEnabled: true)
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in recorder.record(url); return true }, exactOpener: { url in recorder.record(url); return true }), exactBrowserEnabled: true)
         for shouldCancel in [false, true] {
             let task = try await fixture.service.createTask(title: "Open")
             let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private?secret=x", payload: "Open in browser")
@@ -65,8 +77,11 @@ final class TaskServiceTests: XCTestCase {
         XCTAssertEqual(count, 0)
     }
     func testExactBrowserPendingTicketFailsAfterServiceRestart() async throws {
+        #if !JARVIS_EXACT_BROWSER_EXPERIMENT && !JARVIS_COMBINED_EXPERIMENT
+        throw XCTSkip("Exact browser feature is unavailable in ordinary builds")
+        #endif
         let recorder = BrowserRecorder()
-        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in await recorder.record(url); return true }), exactBrowserEnabled: true)
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in recorder.record(url); return true }, exactOpener: { url in recorder.record(url); return true }), exactBrowserEnabled: true)
         let task = try await fixture.service.createTask(title: "Open")
         let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private?secret=x", payload: "Open in browser")
         _ = try await fixture.service.submit(request: request)
@@ -77,8 +92,11 @@ final class TaskServiceTests: XCTestCase {
         XCTAssertEqual(count, 0)
     }
     func testExactBrowserURLRemainsEphemeralUntilApproved() async throws {
+        #if !JARVIS_EXACT_BROWSER_EXPERIMENT && !JARVIS_COMBINED_EXPERIMENT
+        throw XCTSkip("Exact browser feature is unavailable in ordinary builds")
+        #endif
         let recorder = BrowserRecorder()
-        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in await recorder.record(url); return true }), exactBrowserEnabled: true)
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in recorder.record(url); return true }, exactOpener: { url in recorder.record(url); return true }), exactBrowserEnabled: true)
         let task = try await fixture.service.createTask(title: "Open")
         let secret = "private-path-token"
         let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/\(secret)?token=\(secret)", payload: "Open in browser")
@@ -102,7 +120,7 @@ final class TaskServiceTests: XCTestCase {
 
     func testBrowserOpenRequiresApprovalAndRedactsAuditPath() async throws {
         let recorder = BrowserRecorder()
-        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in await recorder.record(url); return true }))
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in recorder.record(url); return true }, exactOpener: { url in recorder.record(url); return true }))
         let task = try await fixture.service.createTask(title: "Open page")
         let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/", payload: "Open in browser")
         let decision = try await fixture.service.submit(request: request)
@@ -127,7 +145,7 @@ final class TaskServiceTests: XCTestCase {
     func testBrowserRejectAndCancellationNeverOpen() async throws {
         for cancel in [false, true] {
             let recorder = BrowserRecorder()
-            let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in await recorder.record(url); return true }))
+            let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in recorder.record(url); return true }, exactOpener: { url in recorder.record(url); return true }))
             let task = try await fixture.service.createTask(title: "Open")
             let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/", payload: "Open in browser")
             _ = try await fixture.service.submit(request: request)
@@ -141,7 +159,7 @@ final class TaskServiceTests: XCTestCase {
 
     func testPendingBrowserOpenIsNotAutomaticallyReplayedAfterServiceRestart() async throws {
         let recorder = BrowserRecorder()
-        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in await recorder.record(url); return true }))
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in recorder.record(url); return true }, exactOpener: { url in recorder.record(url); return true }))
         let task = try await fixture.service.createTask(title: "Open")
         let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/", payload: "Open in browser")
         _ = try await fixture.service.submit(request: request)
@@ -155,7 +173,7 @@ final class TaskServiceTests: XCTestCase {
 
     func testBrowserExecutorRevalidatesMalformedRequest() async throws {
         let recorder = BrowserRecorder()
-        let executor = BrowserOpenExecutor(opener: { url in await recorder.record(url); return true })
+        let executor = BrowserOpenExecutor(opener: { url in recorder.record(url); return true }, exactOpener: { url in recorder.record(url); return true })
         let request = ToolRequest(taskID: UUID(), name: "browser_open", sideEffect: .externalSend, target: "https://example.com/?secret=x", payload: "Open in browser")
         await XCTAssertThrowsErrorAsync(try await executor.execute(request))
         let count = await recorder.count
@@ -164,9 +182,12 @@ final class TaskServiceTests: XCTestCase {
 
     func testInternalExactExecutorRejectsCredentials() async throws {
         let recorder = BrowserRecorder()
-        let executor = BrowserOpenExecutor(opener: { url in await recorder.record(url); return true })
+        let executor = BrowserOpenExecutor(opener: { url in recorder.record(url); return true }, exactOpener: { url in recorder.record(url); return true })
         let request = ToolRequest(taskID: UUID(), name: "browser_open", sideEffect: .externalSend, target: "https://user:pass@example.com/private", payload: "Open in browser")
-        await XCTAssertThrowsErrorAsync(try await executor.executeApprovedExact(request))
+        let gate = ExactBrowserSessionGate()
+        gate.setEnabled(true)
+        let generation = try XCTUnwrap(gate.capture())
+        await XCTAssertThrowsErrorAsync(try await executor.executeApprovedExact(request, gate: gate, generation: generation))
         let count = await recorder.count
         XCTAssertEqual(count, 0)
     }
@@ -215,7 +236,7 @@ final class TaskServiceTests: XCTestCase {
 
     func testCancellationAfterBrowserOpenCannotUndoOpen() async throws {
         let recorder = BrowserRecorder()
-        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in await recorder.record(url); return true }))
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in recorder.record(url); return true }, exactOpener: { url in recorder.record(url); return true }))
         let task = try await fixture.service.createTask(title: "Open")
         let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/", payload: "Open in browser")
         _ = try await fixture.service.submit(request: request)
@@ -1265,9 +1286,11 @@ private func XCTAssertThrowsErrorAsync<T>(
     }
 }
 
-private actor BrowserRecorder {
-    private(set) var count = 0
-    func record(_ url: URL) { count += 1 }
+private final class BrowserRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded = 0
+    var count: Int { lock.withLock { recorded } }
+    func record(_ url: URL) { lock.withLock { recorded += 1 } }
 }
 
 private struct AllowTestSafariPolicy: PolicyEvaluator {
@@ -2823,3 +2846,48 @@ extension TaskServiceTests {
     }
 }
 #endif
+
+extension TaskServiceTests {
+    func testExactBrowserDisableReenableRevokesPendingTicket() async throws {
+        #if !JARVIS_EXACT_BROWSER_EXPERIMENT && !JARVIS_COMBINED_EXPERIMENT
+        throw XCTSkip("Exact browser feature is unavailable in ordinary builds")
+        #endif
+        let recorder = BrowserRecorder()
+        let service = try Fixture(browserOpen: BrowserOpenExecutor(opener: { _ in false }, exactOpener: { url in recorder.record(url); return true }), exactBrowserEnabled: true).service
+        let task = try await service.createTask(title: "open")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private?secret=1", payload: "Open in browser")
+        _ = try await service.submit(request: request)
+        let pending = try await service.listPendingApprovalRequests(taskID: task.id)
+        let item = try XCTUnwrap(pending.first)
+        XCTAssertEqual(item.target, request.target)
+        try service.setExactBrowserEnabled(false)
+        try service.setExactBrowserEnabled(true)
+        let after = try await service.listPendingApprovalRequests(taskID: task.id)
+        XCTAssertFalse(after[0].target.contains("secret"))
+        await XCTAssertThrowsErrorAsync(try await service.approve(requestID: item.id, digest: item.digest))
+        XCTAssertEqual(recorder.count, 0)
+    }
+    func testExactBrowserExecutorRejectsRevokedGenerationBeforeOpen() async throws {
+        let recorder = BrowserRecorder()
+        let executor = BrowserOpenExecutor(opener: { _ in false }, exactOpener: { url in recorder.record(url); return true })
+        let gate = ExactBrowserSessionGate()
+        gate.setEnabled(true)
+        let generation = try XCTUnwrap(gate.capture())
+        gate.setEnabled(false)
+        gate.setEnabled(true)
+        let request = ToolRequest(taskID: UUID(), name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private", payload: "Open in browser")
+        await XCTAssertThrowsErrorAsync(try await executor.executeApprovedExact(request, gate: gate, generation: generation))
+        XCTAssertEqual(recorder.count, 0)
+    }
+}
+
+extension TaskServiceTests {
+    #if !JARVIS_EXACT_BROWSER_EXPERIMENT && !JARVIS_COMBINED_EXPERIMENT
+    func testOrdinaryBuildCannotEnableExactBrowserEvenWithExplicitArguments() throws {
+        let fixture = try Fixture()
+        let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: Policy(), exactBrowserEnabled: true, allowExactBrowserToggle: true)
+        XCTAssertFalse(service.isExactBrowserEnabled())
+        XCTAssertThrowsError(try service.setExactBrowserEnabled(true))
+    }
+    #endif
+}

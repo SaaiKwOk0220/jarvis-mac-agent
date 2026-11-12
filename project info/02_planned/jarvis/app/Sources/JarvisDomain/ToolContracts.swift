@@ -149,6 +149,8 @@ public protocol TaskServiceAPI: Sendable {
     func takeEphemeralToolResult(taskID: UUID, requestID: UUID, digest: String) async throws -> String?
     func prepareSafariRead(taskID: UUID) async throws -> ToolRequest
     func isSafariReadAvailable() async -> Bool
+    func isExactBrowserEnabled() -> Bool
+    func setExactBrowserEnabled(_ enabled: Bool) throws
     func isSafariReadEnabled() -> Bool
     func setSafariReadEnabled(_ enabled: Bool) throws
 }
@@ -156,6 +158,8 @@ public protocol TaskServiceAPI: Sendable {
 public enum TaskServiceCapabilityError: Error { case unavailable }
 
 public extension TaskServiceAPI {
+    func isExactBrowserEnabled() -> Bool { false }
+    func setExactBrowserEnabled(_ enabled: Bool) throws { throw TaskServiceCapabilityError.unavailable }
     func isSafariReadAvailable() async -> Bool { false }
     func isSafariReadEnabled() -> Bool { false }
     func setSafariReadEnabled(_ enabled: Bool) throws { throw TaskServiceCapabilityError.unavailable }
