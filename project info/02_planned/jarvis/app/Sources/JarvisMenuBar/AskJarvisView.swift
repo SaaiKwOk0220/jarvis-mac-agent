@@ -107,6 +107,9 @@ struct AskJarvisView: View {
     /// start of every run; when nil, the loop runs without that context.
     let memoryContextProvider: (@Sendable () async -> String)?
 
+    @State private var exactBrowserState = false
+    @State private var exactBrowserChanging = false
+    @State private var exactBrowserError: String?
     @StateObject private var log = AgentRunLog()
     @StateObject private var voice = VoiceCoordinator(backend: OnDeviceSpeechBackend(), speaker: SystemVoiceSpeaker())
     @StateObject private var autoSubmit = VoiceAutoSubmitGate()
@@ -129,10 +132,25 @@ struct AskJarvisView: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Ask Jarvis").font(.title2).bold()
             #if JARVIS_EXACT_BROWSER_EXPERIMENT
-            Text(ExactBrowserExperiment.current
-                 ? "完整网址实验已启用；打开前仍需逐次审批。"
-                 : "完整网址实验未启用；仅支持域名。")
-                .font(.caption).foregroundStyle(.secondary)
+            if ExactBrowserExperiment.toggleAllowed, let service {
+                Toggle("允许本次运行请求打开完整网址（每次仍需审批）", isOn: Binding(get: { exactBrowserState }, set: { value in
+                    guard !exactBrowserChanging else { return }
+                    exactBrowserChanging = true
+                    Task { @MainActor in
+                        let result = await Task.detached { () -> (Bool, String?) in
+                            do { try service.setExactBrowserEnabled(value); return (service.isExactBrowserEnabled(), nil) }
+                            catch { return (service.isExactBrowserEnabled(), error.localizedDescription) }
+                        }.value
+                        exactBrowserState = result.0; exactBrowserError = result.1; exactBrowserChanging = false
+                    }
+                })).disabled(exactBrowserChanging).onAppear { exactBrowserState = service.isExactBrowserEnabled() }
+                if exactBrowserChanging { Text("正在更新完整网址权限…") }
+                Text("浏览器打开后可能重定向或发送网络请求；已经打开的网页及其后续操作无法撤回。")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("如果打开结果不明，请检查浏览器并停止重复尝试。已记录的不明结果会保留屏障，目前没有解除入口；既往未记录的状态或数据库不可用时无法保证记录。系统接受打开请求不代表网页已完成加载或操作。若待处理及结果未知请求合计达到容量上限，请停止使用并逐项核查。")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let exactBrowserError { Text(exactBrowserError).foregroundStyle(.red) }
+            }
             #endif
             Text("Describe a goal. Jarvis plans tool calls and runs them through the same policy gate and approval flow as any other task.")
                 .font(.callout).foregroundStyle(.secondary)

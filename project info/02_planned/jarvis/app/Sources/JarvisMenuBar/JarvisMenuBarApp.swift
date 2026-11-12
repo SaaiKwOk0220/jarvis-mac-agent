@@ -138,7 +138,7 @@ private final class Runtime {
                 webFetch: WebFetchToolExecutor(),
                 screenshot: ScreenshotToolExecutor(),
                 accessibility: AccessibilityQueryToolExecutor(),
-                browserOpen: BrowserOpenExecutor(), exactBrowserEnabled: ExactBrowserExperiment.current)
+                browserOpen: BrowserOpenExecutor(), exactBrowserEnabled: false, allowExactBrowserToggle: ExactBrowserExperiment.toggleAllowed)
             self.taskService = service
             let server = LoopbackServer(service: service)
             self.server = server

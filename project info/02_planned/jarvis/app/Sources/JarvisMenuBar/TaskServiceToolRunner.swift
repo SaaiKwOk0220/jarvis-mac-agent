@@ -66,7 +66,8 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
     /// allowlists the policy enforces, so the model plans requests that can
     /// actually be approved instead of discovering the gate by failing.
     public func tools() -> [LLMTool] {
-        [
+        let exactBrowserEnabled = service.isExactBrowserEnabled()
+        return [
             LLMTool(
                 name: "browser_open",
                 description: exactBrowserEnabled ? "Open a user-requested HTTPS address after approval; the full address may contain sensitive values and will be shown for approval. Browser redirects and network activity may follow. Does not read page contents." : "Open a user-requested HTTPS origin after approval. Paths, query strings, fragments and credentials are rejected. The browser may redirect or send network requests afterward.",
