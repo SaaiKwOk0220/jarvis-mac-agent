@@ -110,8 +110,15 @@ public struct Policy: PolicyEvaluator, Sendable {
     }
 
     private func evaluateRead(_ request: ToolRequest, config: PolicyConfig) -> PolicyDecision {
-        if request.name == "ax_query" && request.target == "com.apple.Safari" {
-            return .deny(reason: "Safari requires the approved Safari read flow")
+        if request.name == "ax_query" {
+            guard request.target.lowercased() != "com.apple.safari" else {
+                return .deny(reason: "Safari requires the approved Safari read flow")
+            }
+            guard request.target.contains("."), !request.target.contains("/"),
+                  config.applicationBundleIDs.contains(request.target) else {
+                return .deny(reason: "application is not allowlisted")
+            }
+            return .allow
         }
         if URLComponents(string: request.target)?.scheme != nil {
             guard let host = exactHTTPSHost(request.target), config.sites.contains(host) else {
