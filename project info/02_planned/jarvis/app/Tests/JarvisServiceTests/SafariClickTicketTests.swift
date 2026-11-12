@@ -222,6 +222,26 @@ extension SafariClickTicketTests {
         XCTAssertEqual(count, 0)
     }
 
+    func testCancelAfterActionBeforeCoordinatorCompletionReportsStarted() async throws {
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "digest")
+        let ref = AXUIElementCreateSystemWide()
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let clearEntered = expectation(description: "post-action cleanup")
+        let clearGate = ClickVerifyGate(clearEntered, blockAt: 1)
+        let capture = SafariClickCapture(beforeClear: { await clearGate.visit() }) { [candidate] }
+        let counter = ClickActionCounter()
+        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: capture, clock: { 11 }) { _, _ in counter.increment(); return .success }
+        let id = UUID()
+        let token = try await coordinator.prepare(requestID: id, identity: identity)
+        let approval = Task { try await coordinator.approve(token: token, requestID: id, digest: "digest") }
+        await fulfillment(of: [clearEntered], timeout: 2)
+        let result = await coordinator.cancel()
+        XCTAssertEqual(result, .alreadyStarted)
+        XCTAssertEqual(counter.value, 1)
+        await clearGate.release()
+        try await approval.value
+    }
+
     func testCancelReturnsWhenActionAlreadyStarted() async throws {
         let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "digest")
         let ref = AXUIElementCreateSystemWide()

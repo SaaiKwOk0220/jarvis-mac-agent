@@ -89,15 +89,17 @@ actor SafariClickCapture {
 /// cancellation returns immediately and cannot undo the action.
 private final class SafariClickRevocationGate: @unchecked Sendable {
     enum Result { case revoked, alreadyStarted, idle }
-    private let state = ManagedAtomic<Int>(0) // idle, pending, started, revoked
+    private let state = ManagedAtomic<Int>(0) // idle, pending, started, revoked, completed
     func activate() { state.store(1, ordering: .releasing) }
+    func finish() { _ = state.compareExchange(expected: 4, desired: 0, ordering: .acquiringAndReleasing) }
     func revoke() -> Result {
         if state.compareExchange(expected: 1, desired: 3, ordering: .acquiringAndReleasing).exchanged { return .revoked }
-        return state.load(ordering: .acquiring) == 2 ? .alreadyStarted : .idle
+        let current = state.load(ordering: .acquiring)
+        return current == 2 || current == 4 ? .alreadyStarted : .idle
     }
     func run(_ action: () -> AXError) -> AXError {
         guard state.compareExchange(expected: 1, desired: 2, ordering: .acquiringAndReleasing).exchanged else { return .failure }
-        defer { _ = state.compareExchange(expected: 2, desired: 0, ordering: .acquiringAndReleasing) }
+        defer { _ = state.compareExchange(expected: 2, desired: 4, ordering: .acquiringAndReleasing) }
         return action()
     }
 }
@@ -196,9 +198,11 @@ actor SafariClickApprovalPrototype {
                 return revocation.run { action(element, operation) }
             }
             await capture.clear()
+            revocation.finish()
         } catch {
             _ = revocation.revoke()
             await capture.clear()
+            revocation.finish()
             throw error
         }
     }
