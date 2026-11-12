@@ -134,7 +134,7 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
                 ]
             ),
         ]
-        if enableSafariRead {
+        if service.isSafariReadEnabled() {
             catalog.insert(LLMTool(name: "safari_read", description: "Capture the user's current focused Safari window and request approval to read its accessibility text. Ask the user to switch to the intended Safari page. The full captured URL is shown only for approval; content is sent to the model after approval. Dynamic pages are not atomic snapshots.", parameters: [:]), at: 0)
         }
         return catalog
@@ -149,7 +149,7 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
     public func perform(_ call: LLMToolCall) async throws -> AgentToolOutcome {
         let request: ToolRequest
         if call.name == "safari_read" {
-            guard enableSafariRead else { return .denied("Safari reading is unavailable") }
+            guard service.isSafariReadEnabled() else { return .denied("Safari reading is unavailable") }
             request = try await service.prepareSafariRead(taskID: taskID)
         } else {
             guard let mapped = makeRequest(for: call) else { return .denied("unknown tool") }

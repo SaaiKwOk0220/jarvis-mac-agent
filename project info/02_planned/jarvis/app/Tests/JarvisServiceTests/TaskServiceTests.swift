@@ -1278,6 +1278,9 @@ private struct AllowTestSafariPolicy: PolicyEvaluator {
 
 extension TaskServiceTests {
     func testSafariResultIsSingleUseAndNeverWrittenToAudit() async throws {
+        #if !JARVIS_SAFARI_EXPERIMENT_BUILD && !JARVIS_COMBINED_EXPERIMENT
+        throw XCTSkip("Safari service is unavailable in ordinary builds")
+        #endif
         let fixture = try Fixture()
         let secret = "private-page-unique-contents"
         let capture = SafariStaticFixture(text: secret)
@@ -1309,6 +1312,9 @@ private actor DelayedPage {
 
 extension TaskServiceTests {
     func testCancellationWhileSafariResultPendingDoesNotStoreOrPublishIt() async throws {
+        #if !JARVIS_SAFARI_EXPERIMENT_BUILD && !JARVIS_COMBINED_EXPERIMENT
+        throw XCTSkip("Safari service is unavailable in ordinary builds")
+        #endif
         let fixture = try Fixture(), page = DelayedPage()
         let capture = SafariStaticFixture(text: "private-cancelled-page", page: page)
         let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: AllowTestSafariPolicy(), enableSafariRead: true, requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
@@ -1339,6 +1345,9 @@ private actor SafariCaptureFixture: SafariTargetCapturing {
 
 extension TaskServiceTests {
     func testSafariCapturePreviewApprovalAndReadRemainPrivate() async throws {
+        #if !JARVIS_SAFARI_EXPERIMENT_BUILD && !JARVIS_COMBINED_EXPERIMENT
+        throw XCTSkip("Safari service is unavailable in ordinary builds")
+        #endif
         let fixture = try Fixture()
         let capture = SafariCaptureFixture()
         let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: Policy(allowSafariRead: true), enableSafariRead: true, requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
@@ -1383,6 +1392,9 @@ extension TaskServiceTests {
     }
 
     func testSafariApprovalCannotBeReplayedAfterRestartOrChangedDigest() async throws {
+        #if !JARVIS_SAFARI_EXPERIMENT_BUILD && !JARVIS_COMBINED_EXPERIMENT
+        throw XCTSkip("Safari service is unavailable in ordinary builds")
+        #endif
         let fixture = try Fixture()
         let capture = SafariCaptureFixture()
         let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: Policy(allowSafariRead: true), enableSafariRead: true, requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
@@ -1400,6 +1412,9 @@ extension TaskServiceTests {
     }
 
     func testRejectedSafariPreviewCannotBeApprovedAgain() async throws {
+        #if !JARVIS_SAFARI_EXPERIMENT_BUILD && !JARVIS_COMBINED_EXPERIMENT
+        throw XCTSkip("Safari service is unavailable in ordinary builds")
+        #endif
         let fixture = try Fixture(), capture = SafariCaptureFixture()
         let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: Policy(allowSafariRead: true), enableSafariRead: true, requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
         service.safariCaptureFactory = { capture }
@@ -1419,6 +1434,9 @@ private struct UnsafeAllowSafariPolicy: PolicyEvaluator {
 
 extension TaskServiceTests {
     func testSafariCannotExecuteWhenInjectedPolicyWouldAllowWithoutApproval() async throws {
+        #if !JARVIS_SAFARI_EXPERIMENT_BUILD && !JARVIS_COMBINED_EXPERIMENT
+        throw XCTSkip("Safari service is unavailable in ordinary builds")
+        #endif
         let fixture = try Fixture(), capture = SafariCaptureFixture()
         let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: UnsafeAllowSafariPolicy(), enableSafariRead: true, requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
         service.safariCaptureFactory = { capture }
@@ -1430,6 +1448,9 @@ extension TaskServiceTests {
     }
 
     func testSafariRejectedOrCancelledPreviewCannotBeUsed() async throws {
+        #if !JARVIS_SAFARI_EXPERIMENT_BUILD && !JARVIS_COMBINED_EXPERIMENT
+        throw XCTSkip("Safari service is unavailable in ordinary builds")
+        #endif
         for cancel in [false, true] {
             let fixture = try Fixture(), capture = SafariCaptureFixture()
             let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: Policy(allowSafariRead: true), enableSafariRead: true, requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
@@ -1444,4 +1465,72 @@ extension TaskServiceTests {
             XCTAssertNil(result)
         }
     }
+}
+
+extension TaskServiceTests {
+    func testDisablingSafariRevokesUndeliveredResultAcrossReenable() async throws {
+        #if !JARVIS_SAFARI_EXPERIMENT_BUILD && !JARVIS_COMBINED_EXPERIMENT
+        throw XCTSkip("Safari service is unavailable in ordinary builds")
+        #endif
+        let fixture = try Fixture(), capture = SafariCaptureFixture()
+        let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: Policy(allowSafariRead: true), enableSafariRead: true, requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
+        service.safariCaptureFactory = { capture }
+        let task = try await service.createTask(title: "read page")
+        let request = try await service.prepareSafariRead(taskID: task.id)
+        _ = try await service.submit(request: request)
+        try await service.approve(requestID: request.id, digest: request.payloadDigest)
+        try await fixture.waitForRequest(id: request.id, status: .completed)
+        try service.setSafariReadEnabled(false)
+        try service.setSafariReadEnabled(true)
+        let result = try await service.takeEphemeralToolResult(taskID: task.id, requestID: request.id, digest: request.payloadDigest)
+        XCTAssertNil(result)
+    }
+}
+
+extension TaskServiceTests {
+    func testDisablingSafariDuringReadSuppressesOldGenerationResult() async throws {
+        #if !JARVIS_SAFARI_EXPERIMENT_BUILD && !JARVIS_COMBINED_EXPERIMENT
+        throw XCTSkip("Safari service is unavailable in ordinary builds")
+        #endif
+        let fixture = try Fixture(), page = DelayedPage()
+        let capture = SafariStaticFixture(text: "private-in-flight", page: page)
+        let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: Policy(allowSafariRead: true), enableSafariRead: true, requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
+        service.safariCaptureFactory = { capture }
+        let task = try await service.createTask(title: "read page")
+        let request = try await service.prepareSafariRead(taskID: task.id)
+        _ = try await service.submit(request: request)
+        try await service.approve(requestID: request.id, digest: request.payloadDigest)
+        for _ in 0..<100 where !(await page.hasStarted()) { try await Task.sleep(for: .milliseconds(10)) }
+        let started = await page.hasStarted()
+        XCTAssertTrue(started)
+        try service.setSafariReadEnabled(false)
+        try service.setSafariReadEnabled(true)
+        await page.release()
+        await service.waitForTrackedExecution(request.id)
+        let result = try await service.takeEphemeralToolResult(taskID: task.id, requestID: request.id, digest: request.payloadDigest)
+        XCTAssertNil(result)
+        let events = try fixture.audit.events(for: task.id)
+        XCTAssertFalse(events.contains { $0.result.contains("private-in-flight") || $0.summary == "ephemeral tool result" })
+    }
+}
+
+extension TaskServiceTests {
+    func testSafariToggleFailsClosedUnlessExplicitlyAllowed() throws {
+        let fixture = try Fixture()
+        XCTAssertThrowsError(try fixture.service.setSafariReadEnabled(true))
+        XCTAssertFalse(fixture.service.isSafariReadEnabled())
+    }
+}
+
+extension TaskServiceTests {
+    #if !JARVIS_SAFARI_EXPERIMENT_BUILD && !JARVIS_COMBINED_EXPERIMENT
+    func testOrdinaryBuildCannotEnableSafariEvenWithExplicitArguments() async throws {
+        let fixture = try Fixture()
+        let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: Policy(allowSafariRead: true), enableSafariRead: true, allowSafariReadToggle: true)
+        XCTAssertFalse(service.isSafariReadEnabled())
+        XCTAssertThrowsError(try service.setSafariReadEnabled(true))
+        let task = try await service.createTask(title: "read page")
+        await XCTAssertThrowsErrorAsync(try await service.prepareSafariRead(taskID: task.id))
+    }
+    #endif
 }

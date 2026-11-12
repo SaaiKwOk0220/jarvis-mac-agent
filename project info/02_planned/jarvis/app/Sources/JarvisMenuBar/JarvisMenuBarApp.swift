@@ -151,9 +151,15 @@ private final class Runtime {
             self.voiceDraftStore = try VoiceDraftStore(database: database)
             self.memory = try SQLiteMemoryStore(database: database)
             // QA-only, process-scoped opt-in; unavailable by default.
+            #if JARVIS_COMBINED_EXPERIMENT
+            let safariReadEnabled = false
+            let allowSafariReadToggle = CombinedExperimentAccess.current
+            #else
             let safariReadEnabled = AppStorageNamespace.safariReadEnabledInCurrentBuild(bundleID: Bundle.main.bundleIdentifier, flag: ProcessInfo.processInfo.environment["JARVIS_EXPERIMENTAL_SAFARI_READ"])
+            let allowSafariReadToggle = false
+            #endif
             let service = try TaskService(taskRepository: SQLiteTaskRepository(database: database),
-                auditRepository: SQLiteAuditRepository(database: database), policy: Policy(allowSafariRead: safariReadEnabled),
+                auditRepository: SQLiteAuditRepository(database: database), policy: Policy(allowSafariRead: safariReadEnabled || allowSafariReadToggle),
                 policyConfig: PolicyConfig(
                     approvedDirectories: [appSupport.path],
                     commandNames: ["shell", "swift", "xcodebuild"],
@@ -171,7 +177,7 @@ private final class Runtime {
                 screenshot: ScreenshotToolExecutor(),
                 accessibility: AccessibilityQueryToolExecutor(),
                 browserOpen: BrowserOpenExecutor(),
-                enableSafariRead: safariReadEnabled, exactBrowserEnabled: ExactBrowserExperiment.current)
+                enableSafariRead: safariReadEnabled, exactBrowserEnabled: ExactBrowserExperiment.current, allowSafariReadToggle: allowSafariReadToggle)
             self.taskService = service
             let server = LoopbackServer(service: service)
             self.server = server

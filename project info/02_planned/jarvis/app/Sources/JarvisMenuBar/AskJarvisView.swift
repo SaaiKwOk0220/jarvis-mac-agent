@@ -129,6 +129,9 @@ struct AskJarvisView: View {
         self.memoryContextProvider = memoryContextProvider
     }
 
+    @State private var safariReadError: String?
+    @State private var safariReadState = false
+    @State private var safariReadChanging = false
     @StateObject private var log = AgentRunLog()
     @StateObject private var voice = VoiceCoordinator(backend: OnDeviceSpeechBackend(), speaker: SystemVoiceSpeaker())
     @StateObject private var autoSubmit = VoiceAutoSubmitGate()
@@ -169,6 +172,36 @@ struct AskJarvisView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            #if JARVIS_COMBINED_EXPERIMENT
+            if CombinedExperimentAccess.current, let service {
+                Toggle("允许本次运行读取 Safari（每次仍需审批）", isOn: Binding(
+                    get: { safariReadState },
+                    set: { value in
+                        guard !safariReadChanging else { return }
+                        safariReadChanging = true
+                        Task { @MainActor in
+                            let result = await Task.detached { () -> (Bool, String?) in
+                                do {
+                                    try service.setSafariReadEnabled(value)
+                                    return (service.isSafariReadEnabled(), nil)
+                                } catch {
+                                    return (service.isSafariReadEnabled(), error.localizedDescription)
+                                }
+                            }.value
+                            safariReadState = result.0
+                            safariReadError = result.1
+                            safariReadChanging = false
+                        }
+                    }))
+                    .disabled(safariReadChanging)
+                    .padding(.horizontal)
+                    .onAppear { safariReadState = service.isSafariReadEnabled() }
+                if safariReadChanging { Text("正在更新 Safari 读取权限…") }
+                Text("关闭后不再开始新的读取；已经开始的读取和已交付给模型的内容无法撤回。")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let safariReadError { Text(safariReadError).foregroundStyle(.red) }
+            }
+            #endif
             GeometryReader { geometry in
                 ScrollView {
                     if VoiceWorkspaceLayout.usesWideLayout(width: geometry.size.width) {
