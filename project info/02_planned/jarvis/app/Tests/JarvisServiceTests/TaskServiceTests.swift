@@ -3011,3 +3011,73 @@ extension TaskServiceTests {
     }
 }
 #endif
+
+#if JARVIS_EXACT_BROWSER_EXPERIMENT || JARVIS_COMBINED_EXPERIMENT
+extension TaskServiceTests {
+    #if JARVIS_SAFARI_CLICK_TESTING
+    func testCancelAfterSuccessfulOpenBeforeCommitReportsUnknown() async throws {
+        let page = DelayedPage()
+        let executor = BrowserOpenExecutor(opener: { _ in false }, exactOpener: { _ in true })
+        let fixture = try Fixture(browserOpen: executor, exactBrowserEnabled: true)
+        fixture.service.testAfterExactBrowserOpen = { await page.wait() }
+        let task = try await fixture.service.createTask(title: "open")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private?secret=private-token", payload: "Open in browser")
+        _ = try await fixture.service.submit(request: request)
+        let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        let item = try XCTUnwrap(pending.first)
+        try await fixture.service.approve(requestID: item.id, digest: item.digest)
+        for _ in 0..<100 where !(await page.hasStarted()) { try await Task.sleep(for: .milliseconds(10)) }
+        let started = await page.hasStarted(); XCTAssertTrue(started)
+        try await fixture.service.cancel(taskID: task.id)
+        await page.release()
+        await fixture.service.waitForTrackedExecution(item.id)
+        let events = try await fixture.service.listTimelineEvents(taskID: task.id)
+        let warning = try XCTUnwrap(events.last { $0.summary == "browser open outcome unknown" })
+        XCTAssertEqual(warning.requestID, item.id)
+        XCTAssertTrue(warning.result.contains("do not retry automatically"))
+        XCTAssertTrue(events.allSatisfy { !$0.result.contains("private-token") && !$0.target.contains("private-token") })
+    }
+    #endif
+    func testDatabaseFailureAfterOpenReturnsVolatileUnknown() async throws {
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { _ in false }, exactOpener: { _ in true }), exactBrowserEnabled: true)
+        let task = try await fixture.service.createTask(title: "open")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private?secret=private-token", payload: "Open in browser")
+        _ = try await fixture.service.submit(request: request)
+        let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        let item = try XCTUnwrap(pending.first)
+        try fixture.database.write { db in try db.execute(sql: "CREATE TRIGGER reject_browser_finish BEFORE UPDATE ON tool_requests WHEN NEW.status IN ('completed', 'failed') BEGIN SELECT RAISE(ABORT, 'test'); END") }
+        try await fixture.service.approve(requestID: item.id, digest: item.digest)
+        await fixture.service.waitForTrackedExecution(item.id)
+        let events = try await fixture.service.listTimelineEvents(taskID: task.id)
+        let warning = try XCTUnwrap(events.last { $0.summary == "browser open outcome unknown" })
+        XCTAssertTrue(warning.result.contains("do not retry automatically"))
+        XCTAssertTrue(events.allSatisfy { !$0.result.contains("private-token") && !$0.target.contains("private-token") })
+    }
+}
+#endif
+
+#if JARVIS_EXACT_BROWSER_EXPERIMENT || JARVIS_COMBINED_EXPERIMENT
+extension TaskServiceTests {
+    func testUnknownBrowserCapacityFailsClosedWithoutDroppingEarlierOutcomes() async throws {
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { _ in false }, exactOpener: { _ in false }), exactBrowserEnabled: true)
+        var firstTask: JarvisTask?
+        var firstRequest: UUID?
+        for index in 0..<64 {
+            let task = try await fixture.service.createTask(title: "open \(index)")
+            let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private/\(index)", payload: "Open in browser")
+            _ = try await fixture.service.submit(request: request)
+            let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+            let item = try XCTUnwrap(pending.first)
+            try await fixture.service.approve(requestID: item.id, digest: item.digest)
+            await fixture.service.waitForTrackedExecution(item.id)
+            if index == 0 { firstTask = task; firstRequest = item.id }
+        }
+        let task = try await fixture.service.createTask(title: "overflow")
+        let overflow = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private/overflow", payload: "Open in browser")
+        await XCTAssertThrowsErrorAsync(try await fixture.service.submit(request: overflow))
+        XCTAssertNil(try fixture.requests.fetch(id: overflow.id))
+        let events = try await fixture.service.listTimelineEvents(taskID: try XCTUnwrap(firstTask).id)
+        XCTAssertTrue(events.contains { $0.summary == "browser open outcome unknown" && $0.requestID == firstRequest })
+    }
+}
+#endif

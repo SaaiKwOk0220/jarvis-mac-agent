@@ -212,3 +212,16 @@ final class TaskServiceApprovalWaiterTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(service.listCalls, 1, "poller must consult the timeline at least once")
     }
 }
+
+extension TaskServiceApprovalWaiterTests {
+    func testUnknownBrowserOutcomeStopsSessionInsteadOfTreatingAsCancellation() async throws {
+        let requestID = UUID(), digest = "digest"
+        let service = StaticTimelineService(timeline: [
+            terminalEvent(actionDigest: "", summary: "task cancelled", result: "cancelled", requestID: nil),
+            terminalEvent(actionDigest: digest, summary: "browser open outcome unknown", result: "Check browser; do not retry automatically.", requestID: requestID)
+        ])
+        let waiter = TaskServiceApprovalWaiter(service: service, pollInterval: 0.01, timeout: 1)
+        let resolution = try await waiter.waitForResolution(requestID: requestID, payloadDigest: digest, taskID: UUID())
+        XCTAssertEqual(resolution, .failed(reason: "Check browser; do not retry automatically."))
+    }
+}

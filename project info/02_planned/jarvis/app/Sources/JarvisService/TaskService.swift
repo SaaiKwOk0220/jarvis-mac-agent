@@ -58,6 +58,33 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     #endif
     private let lock = NSLock()
     private var executions: [UUID: Task<Void, Error>] = [:]
+    // Process-local fallback when a started browser operation cannot persist its outcome.
+    private var browserUnknownEvents: [UUID: (taskID: UUID, event: TimelineEvent)] = [:]
+    private static let maximumUnresolvedExactBrowserRequests = 64
+
+    /// Called under `lock`: never evict unknown outcomes to make space.
+    private func hasExactBrowserCapacityLocked() throws -> Bool {
+        var reserved = Set(browserUnknownEvents.keys)
+        for status: ToolRequestStatus in [.pending, .executing] {
+            for (request, _) in try requests.list(status: status)
+            where request.name == "browser_open" && BrowserURLTicketStore.Ticket(payload: request.payload) != nil {
+                reserved.insert(request.id)
+            }
+        }
+        for id in executions.keys {
+            if let (request, _) = try requests.fetch(id: id), request.name == "browser_open",
+               BrowserURLTicketStore.Ticket(payload: request.payload) != nil { reserved.insert(id) }
+        }
+        return reserved.count < Self.maximumUnresolvedExactBrowserRequests
+    }
+    #if JARVIS_SAFARI_CLICK_TESTING
+    var testAfterExactBrowserOpen: @Sendable () async -> Void = {}
+    #endif
+
+    private func recordBrowserUnknownLocked(_ request: ToolRequest) {
+        let message = BrowserOpenError.outcomeUnknown.errorDescription ?? "Browser open outcome unknown"
+        browserUnknownEvents[request.id] = (request.taskID, TimelineEvent(id: UUID(), timestamp: Date(), worker: "task-service", target: Self.browserAuditTarget(request.target), sideEffect: request.sideEffect, actionDigest: request.payloadDigest, summary: "browser open outcome unknown", result: message, approvalID: nil, requestID: request.id))
+    }
 
     public init(taskRepository: any TaskRepository, auditRepository: any AuditRepository, policy: any PolicyEvaluator, policyConfig: PolicyConfig = .init(), executor: any ToolExecutor = NoOpToolExecutor(), terminal: TerminalToolExecutor? = nil, webFetch: WebFetchToolExecutor? = nil, screenshot: ScreenshotToolExecutor? = nil, accessibility: AccessibilityQueryToolExecutor? = nil, browserOpen: BrowserOpenExecutor? = nil, enableSafariRead: Bool = false, requestRepository: (any ToolRequestRepository)? = nil, approvalRepository: (any ApprovalRepository)? = nil, unitOfWork: (any PersistenceUnitOfWork)? = nil, exactBrowserEnabled: Bool = false, browserTicketLifetime: TimeInterval = 300, allowSafariReadToggle: Bool = false, allowExactBrowserToggle: Bool = false) throws {
         guard let sqliteTasks = taskRepository as? SQLiteTaskRepository,
@@ -165,12 +192,19 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
 
     public func listTimelineEvents(taskID: UUID) async throws -> [TimelineEvent] {
         try lock.withLock {
-            guard try tasks.fetch(id: taskID) != nil else { throw TaskServiceError.taskNotFound }
-            return try audits.events(for: taskID).map { event in
-                TimelineEvent(id: event.id, timestamp: event.timestamp, worker: event.worker,
-                    target: redactSecrets(event.target), sideEffect: event.sideEffect,
-                    actionDigest: event.actionDigest, summary: event.summary, result: event.result,
-                    approvalID: event.approvalID, requestID: event.requestID)
+            let fallback = browserUnknownEvents.values.filter { $0.taskID == taskID }.map(\.event)
+            do {
+                guard try tasks.fetch(id: taskID) != nil else { throw TaskServiceError.taskNotFound }
+                let persisted = try audits.events(for: taskID).map { event in
+                    TimelineEvent(id: event.id, timestamp: event.timestamp, worker: event.worker,
+                        target: redactSecrets(event.target), sideEffect: event.sideEffect,
+                        actionDigest: event.actionDigest, summary: event.summary, result: event.result,
+                        approvalID: event.approvalID, requestID: event.requestID)
+                }
+                return persisted + fallback
+            } catch {
+                if !fallback.isEmpty { return fallback }
+                throw error
             }
         }
     }
@@ -209,6 +243,7 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
                 throw BrowserURLTicketError.invalidRequest
             }
             return try exactBrowserGate.withCurrentGeneration(exactGeneration) {
+            guard try lock.withLock({ try hasExactBrowserCapacityLocked() }) else { throw TaskServiceCapabilityError.unavailable }
             let ticket = browserTickets.issue(url: request.target)
             do {
                 let stored = try browserTickets.persistableRequest(request, ticket: ticket)
@@ -305,12 +340,22 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
             if task.status == .cancelled || task.status == .completed || task.status == .failed {
                 throw TaskServiceError.illegalTransition(from: task.status, to: .cancelled)
             }
+            var uncertainBrowserRequests: [ToolRequest] = []
             for (requestID, job) in executions {
-                if let (request, _) = try requests.fetch(id: requestID), request.taskID == taskID { job.cancel() }
+                if let (request, _) = try requests.fetch(id: requestID), request.taskID == taskID {
+                    if request.name == "browser_open", BrowserURLTicketStore.Ticket(payload: request.payload) != nil {
+                        // Conservatively treat any in-flight exact open as unknown on cancel,
+                        // including the narrow window before the system call starts.
+                        recordBrowserUnknownLocked(request)
+                        uncertainBrowserRequests.append(request)
+                    }
+                    job.cancel()
+                }
             }
             ephemeralResults.clear(taskID: taskID)
             let pending = try requests.list(status: .pending).filter { $0.0.taskID == taskID }
             var cancelAudits = [event(taskID: taskID, summary: "task cancelled", result: "cancelled")]
+            cancelAudits += uncertainBrowserRequests.map { event($0, summary: "browser open outcome unknown", result: BrowserOpenError.outcomeUnknown.errorDescription ?? "Browser open outcome unknown") }
             cancelAudits += started.map { event(taskID: taskID, summary: "experimental click cancellation after start", result: "action outcome unknown; do not retry automatically", requestID: $0) }
             try uow.cancelTask(taskID: taskID, requestIDs: [], audits: cancelAudits)
             for (request, _) in pending where request.name == "browser_open" {
@@ -701,6 +746,7 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     }
 
     private func execute(_ request: ToolRequest, approval: Approval? = nil, executionRequest: ToolRequest? = nil, exactGeneration: UInt64? = nil) async throws {
+        var exactOpenReturned = false
         do {
             if let executionRequest {
                 guard executionRequest.id == request.id,
@@ -734,6 +780,10 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
                       BrowserURLTicketStore.Ticket(payload: request.payload) != nil {
                 guard let exactGeneration else { throw BrowserOpenError.unavailable }
                 result = try await browserOpen.executeApprovedExact(executionRequest, gate: exactBrowserGate, generation: exactGeneration)
+                exactOpenReturned = true
+                #if JARVIS_SAFARI_CLICK_TESTING
+                await testAfterExactBrowserOpen()
+                #endif
             } else {
                 result = try await picked.execute(executionRequest ?? request)
             }
@@ -752,12 +802,13 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
         } catch is CancellationError {
             // Cancellation transaction already sets request and task to cancelled; never add success/failure after it.
         } catch {
+            let browserOutcomeUnknown: Bool
+            if case BrowserOpenError.outcomeUnknown = error { browserOutcomeUnknown = true } else { browserOutcomeUnknown = exactOpenReturned }
+            if browserOutcomeUnknown { lock.withLock { recordBrowserUnknownLocked(request) } }
             let fallback: TaskStatus = .failed
             let aggregate: TaskStatus = (try? aggregateStatus(forTask: request.taskID, excluding: request.id, fallback: fallback)) ?? fallback
             try lock.withLock {
                 guard let task = try tasks.fetch(id: request.taskID) else { return }
-                let browserOutcomeUnknown: Bool
-                if case BrowserOpenError.outcomeUnknown = error { browserOutcomeUnknown = true } else { browserOutcomeUnknown = false }
                 let safeFailure = browserOutcomeUnknown ? (BrowserOpenError.outcomeUnknown.errorDescription ?? "Browser open outcome unknown") : (request.name == "safari_read" ? Self.safariFailureMessage(error) : "failed")
                 if task.status == .cancelled {
                     if browserOutcomeUnknown { try audits.append(event(request, summary: "browser open outcome unknown", result: safeFailure)) }

@@ -58,7 +58,7 @@ public final class TaskServiceApprovalWaiter: ApprovalWaiter, @unchecked Sendabl
                     return .approved(observation: result)
                 case Self.toolResultSummary:
                     return .approved(observation: event.result)
-                case Self.toolFailureSummary:
+                case Self.toolFailureSummary, "browser open outcome unknown":
                     return .failed(reason: event.result)
                 case Self.approvalRejectedSummary:
                     guard event.approvalID != nil else { continue }
