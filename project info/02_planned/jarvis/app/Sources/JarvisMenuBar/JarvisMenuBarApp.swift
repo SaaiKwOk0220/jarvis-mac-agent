@@ -130,12 +130,14 @@ private final class Runtime {
             try database.migrate()
             self.memory = try SQLiteMemoryStore(database: database)
             #if JARVIS_SAFARI_EXPERIMENT_BUILD
-            let safariReadEnabled = AppStorageNamespace.safariReadEnabled(bundleID: Bundle.main.bundleIdentifier, flag: ProcessInfo.processInfo.environment["JARVIS_EXPERIMENTAL_SAFARI_READ"])
+            let safariReadEnabled = false
+            let allowSafariReadToggle = Bundle.main.bundleIdentifier == "local.jarvis.safari-experiment" && Bundle.main.object(forInfoDictionaryKey: "JarvisSafariExperiment") as? Bool == true
             #else
             let safariReadEnabled = false
+            let allowSafariReadToggle = false
             #endif
             let service = try TaskService(taskRepository: SQLiteTaskRepository(database: database),
-                auditRepository: SQLiteAuditRepository(database: database), policy: Policy(allowSafariRead: safariReadEnabled),
+                auditRepository: SQLiteAuditRepository(database: database), policy: Policy(allowSafariRead: safariReadEnabled || allowSafariReadToggle),
                 policyConfig: PolicyConfig(
                     approvedDirectories: [appSupport.path],
                     commandNames: ["shell", "swift", "xcodebuild"],
@@ -151,7 +153,7 @@ private final class Runtime {
                 terminal: TerminalToolExecutor(),
                 webFetch: WebFetchToolExecutor(),
                 screenshot: ScreenshotToolExecutor(),
-                accessibility: AccessibilityQueryToolExecutor(), enableSafariRead: safariReadEnabled)
+                accessibility: AccessibilityQueryToolExecutor(), enableSafariRead: safariReadEnabled, allowSafariReadToggle: allowSafariReadToggle)
             self.taskService = service
             let server = LoopbackServer(service: service)
             self.server = server

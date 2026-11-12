@@ -145,3 +145,36 @@ extension SafariReadCoordinatorTests {
         catch SafariReadCoordinatorError.unavailable { }
     }
 }
+
+extension SafariReadCoordinatorTests {
+    func testDisabledAndReenabledGateCannotReadOldApproval() async throws {
+        let gate = SafariReadGate()
+        gate.setEnabled(true)
+        let coordinator = SafariReadCoordinator(gate: gate)
+        let target = SafariCapturedTarget(url: "https://example.com/", processID: 12, windowIdentity: UUID())
+        let request = try await coordinator.prepare(taskID: UUID(), capture: FakeSafariCapture(target))
+        let approval = Approval(toolRequestID: request.id, actionDigest: request.payloadDigest, decision: .approved)
+        gate.setEnabled(false)
+        gate.setEnabled(true)
+        do {
+            _ = try await coordinator.readApproved(request, approval: approval)
+            XCTFail("Old approval must not survive disabling")
+        } catch SafariReadCoordinatorError.unavailable {}
+    }
+}
+
+extension SafariReadCoordinatorTests {
+    func testRevocationSuppressesOldPreviewAfterReenable() async throws {
+        let gate = SafariReadGate()
+        gate.setEnabled(true)
+        let coordinator = SafariReadCoordinator(gate: gate)
+        let target = SafariCapturedTarget(url: "https://example.com/private", processID: 12, windowIdentity: UUID())
+        let request = try await coordinator.prepare(taskID: UUID(), capture: FakeSafariCapture(target))
+        let before = await coordinator.preview(request)
+        XCTAssertEqual(before, target.url)
+        gate.setEnabled(false)
+        gate.setEnabled(true)
+        let after = await coordinator.preview(request)
+        XCTAssertNil(after)
+    }
+}

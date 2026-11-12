@@ -12,6 +12,9 @@ import JarvisLLM
 final class ScriptedTaskService: TaskServiceAPI, @unchecked Sendable {
     private let lock = NSLock()
     private var recordedRequests: [ToolRequest] = []
+    private var safariEnabled = false
+    func isSafariReadEnabled() -> Bool { lock.withLock { safariEnabled } }
+    func setSafariReadEnabled(_ enabled: Bool) throws { lock.withLock { safariEnabled = enabled } }
     private var scriptedDecision: PolicyDecision
     private var scriptedTimeline: [TimelineEvent]
 
@@ -86,6 +89,7 @@ final class TaskServiceToolRunnerTests: XCTestCase {
         XCTAssertFalse(disabled.tools().contains { $0.name == "safari_read" })
         let disabledOutcome = try await disabled.perform(LLMToolCall(id: "x", name: "safari_read", arguments: [:]))
         XCTAssertEqual(disabledOutcome, .denied("Safari reading is unavailable"))
+        try service.setSafariReadEnabled(true)
         let enabled = TaskServiceToolRunner(service: service, taskID: UUID(), enableSafariRead: true)
         XCTAssertTrue(enabled.tools().contains { $0.name == "safari_read" })
         let outcome = try await enabled.perform(LLMToolCall(id: "y", name: "safari_read", arguments: ["url": "https://evil.example/"]))
@@ -95,6 +99,10 @@ final class TaskServiceToolRunnerTests: XCTestCase {
         XCTAssertEqual(submitted.payloadDigest, digest)
         XCTAssertEqual(submitted.target, "https://example.com")
         XCTAssertFalse(submitted.target.contains("evil"))
+        try service.setSafariReadEnabled(false)
+        XCTAssertFalse(enabled.tools().contains { $0.name == "safari_read" })
+        let revoked = try await enabled.perform(LLMToolCall(id: "later", name: "safari_read", arguments: [:]))
+        XCTAssertEqual(revoked, .denied("Safari reading is unavailable"))
     }
 
     /// The catalog advertised to the model is exactly Jarvis's four workers,
