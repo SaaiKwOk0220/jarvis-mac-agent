@@ -52,7 +52,7 @@ public final class TaskServiceApprovalWaiter: ApprovalWaiter, @unchecked Sendabl
                 switch event.summary {
                 case Self.toolResultSummary:
                     return .approved(observation: event.result)
-                case Self.toolFailureSummary:
+                case Self.toolFailureSummary, "browser open outcome unknown":
                     return .failed(reason: event.result)
                 case Self.approvalRejectedSummary:
                     return .rejected(reason: event.result)

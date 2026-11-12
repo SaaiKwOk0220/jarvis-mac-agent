@@ -84,6 +84,13 @@ public final class Database: @unchecked Sendable {
             try database.execute(sql: "CREATE UNIQUE INDEX IF NOT EXISTS audit_events_event_order ON audit_events(event_order)")
         }
 
+        migrator.registerMigration("link audit events to tool requests") { database in
+            let columns = Set(try database.columns(in: "audit_events").map(\.name))
+            if !columns.contains("request_id") {
+                try database.alter(table: "audit_events") { $0.add(column: "request_id", .text) }
+            }
+        }
+
         try migrator.migrate(queue)
     }
 
