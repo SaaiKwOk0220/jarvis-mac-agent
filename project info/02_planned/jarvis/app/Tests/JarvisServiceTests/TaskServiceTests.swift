@@ -116,6 +116,7 @@ final class TaskServiceTests: XCTestCase {
         })
         let count = await recorder.count
         XCTAssertEqual(count, 1)
+        XCTAssertEqual(recorder.lastURL?.absoluteString, request.target)
     }
 
     func testBrowserOpenRequiresApprovalAndRedactsAuditPath() async throws {
@@ -1289,6 +1290,8 @@ private func XCTAssertThrowsErrorAsync<T>(
 private final class BrowserRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private var recorded = 0
+    private var last: URL?
     var count: Int { lock.withLock { recorded } }
-    func record(_ url: URL) { lock.withLock { recorded += 1 } }
+    var lastURL: URL? { lock.withLock { last } }
+    func record(_ url: URL) { lock.withLock { recorded += 1; last = url } }
 }
