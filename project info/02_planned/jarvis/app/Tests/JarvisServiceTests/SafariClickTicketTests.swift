@@ -242,6 +242,27 @@ extension SafariClickTicketTests {
         try await approval.value
     }
 
+    func testTimedOutActionKeepsWorkerBoundedUntilReturn() async throws {
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "digest")
+        let ref = AXUIElementCreateSystemWide()
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "action started")
+        let blocking = BlockingClickAction(entered)
+        let capture = SafariClickCapture { [candidate] }
+        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: capture, clock: { 11 }, actionTimeout: 0.05) { _, _ in blocking.run(); return .success }
+        let id = UUID()
+        let token = try await coordinator.prepare(requestID: id, identity: identity)
+        let approval = Task { try await coordinator.approve(token: token, requestID: id, digest: "digest") }
+        await fulfillment(of: [entered], timeout: 2)
+        do { try await approval.value; XCTFail("blocked action must time out") } catch { }
+        let next = try await coordinator.prepare(requestID: UUID(), identity: identity)
+        do { try await coordinator.approve(token: next, requestID: UUID(), digest: "digest"); XCTFail("mismatched request") } catch { }
+        let nextID = UUID()
+        let busy = try await coordinator.prepare(requestID: nextID, identity: identity)
+        do { try await coordinator.approve(token: busy, requestID: nextID, digest: "digest"); XCTFail("worker must remain busy") } catch { }
+        blocking.release.signal()
+    }
+
     func testCancelReturnsWhenActionAlreadyStarted() async throws {
         let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "digest")
         let ref = AXUIElementCreateSystemWide()
