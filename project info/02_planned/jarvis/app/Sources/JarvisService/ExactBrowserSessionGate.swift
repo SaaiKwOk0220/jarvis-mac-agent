@@ -18,6 +18,22 @@ final class ExactBrowserSessionGate: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         return enabled && generation == value
     }
+    /// A one-use attempt whose start is serialized with session closure.
+    final class OpenAttempt: @unchecked Sendable {
+        fileprivate let generation: UInt64
+        fileprivate var started = false // Accessed only while the gate lock is held.
+        fileprivate init(generation: UInt64) { self.generation = generation }
+    }
+
+    func pendingOpen(generation: UInt64) -> OpenAttempt { OpenAttempt(generation: generation) }
+
+    func beginOpen(_ attempt: OpenAttempt) throws {
+        try withCurrentGeneration(attempt.generation) {
+            guard !attempt.started, !Task.isCancelled else { throw BrowserOpenError.unavailable }
+            attempt.started = true
+        }
+    }
+
     func withCurrentGeneration<T>(_ value: UInt64, _ operation: () throws -> T) throws -> T {
         lock.lock(); defer { lock.unlock() }
         guard enabled && generation == value else { throw BrowserOpenError.unavailable }

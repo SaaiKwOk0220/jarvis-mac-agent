@@ -38,4 +38,11 @@ final class ExactBrowserSessionGateTests: XCTestCase {
         XCTAssertEqual(closed.wait(timeout: .now() + 2), .success)
         XCTAssertThrowsError(try gate.withCurrentGeneration(generation) { true })
     }
+    func testOpenAttemptMayStartOnlyOnce() throws {
+        let gate = ExactBrowserSessionGate()
+        gate.setEnabled(true)
+        let attempt = gate.pendingOpen(generation: try XCTUnwrap(gate.capture()))
+        try gate.beginOpen(attempt)
+        XCTAssertThrowsError(try gate.beginOpen(attempt))
+    }
 }
