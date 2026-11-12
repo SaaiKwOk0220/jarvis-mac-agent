@@ -622,6 +622,22 @@ private final class PCMTestCollector: @unchecked Sendable {
         XCTAssertNil(low.endpointSeconds)
     }
 
+    func testNoInitialTranscriptShowsNoticeAndTextResetsTimer() async throws {
+        let backend = FakeVoiceBackend()
+        let voice = VoiceCoordinator(backend: backend, stalePartialNoticeDelay: .milliseconds(40))
+        await voice.start()
+        try await Task.sleep(for: .milliseconds(70))
+        XCTAssertTrue(voice.isRecording)
+        XCTAssertNotNil(voice.stalePartialNotice)
+        backend.handler?("收到文字")
+        XCTAssertNil(voice.stalePartialNotice)
+        try await Task.sleep(for: .milliseconds(70))
+        XCTAssertTrue(voice.isRecording)
+        XCTAssertNotNil(voice.stalePartialNotice)
+        voice.stop()
+        XCTAssertNil(voice.stalePartialNotice)
+    }
+
     func testUnchangedPartialDoesNotEndRecording() async throws {
         let backend = FakeVoiceBackend()
         let voice = VoiceCoordinator(backend: backend, stalePartialNoticeDelay: .milliseconds(40))
