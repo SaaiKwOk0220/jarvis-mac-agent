@@ -69,7 +69,7 @@ actor SafariClickCapture {
 
     /// Revalidation and AXPress remain non-atomic with respect to Safari.
     fileprivate func press(expected: SafariClickIdentity,
-               timeout: TimeInterval, onTimeout: @escaping @Sendable () -> Void,
+               timeout: TimeInterval, onTimeout: @escaping @Sendable () -> Void, beforeAction: @escaping @Sendable () -> Void,
                action: @escaping @Sendable (AXUIElement, CFString) -> AXError) async throws {
         guard let before = captured else { throw CaptureError.changed }
         try await verify(expected: expected)
@@ -79,7 +79,7 @@ actor SafariClickCapture {
               CFEqual(after.window, before.window), CFEqual(after.element, before.element) else {
             throw CaptureError.changed
         }
-        try await SafariAXPressAdapter.perform(after, timeout: timeout, onTimeout: onTimeout, action: action)
+        try await SafariAXPressAdapter.perform(after, timeout: timeout, onTimeout: onTimeout, beforeAction: beforeAction, action: action)
         captured = nil
     }
 }
@@ -108,7 +108,7 @@ private final class SafariClickRevocationGate: @unchecked Sendable {
 /// Testable approval coordinator. Not wired to any production tool or AX action.
 actor SafariClickApprovalPrototype {
     enum Failure: Error { case disabled, invalid, expired, changed }
-    private struct Pending { let requestID: UUID; let identity: SafariClickIdentity; let expires: TimeInterval; let generation: UInt64 }
+    private struct Pending { let requestID: UUID; let identity: SafariClickIdentity; let expires: TimeInterval; let generation: UInt64; let gate: SafariClickRevocationGate }
     private var pending: [UUID: Pending] = [:]
     private var generation: UInt64 = 0
     private var preparing = false
@@ -117,9 +117,10 @@ actor SafariClickApprovalPrototype {
     private let enabled: Bool
     private let capture: SafariClickCapture
     private let action: @Sendable (AXUIElement, CFString) -> AXError
-    private let revocation = SafariClickRevocationGate()
+    private var activeGate: SafariClickRevocationGate?
     private let clock: @Sendable () -> TimeInterval
     private let actionTimeout: TimeInterval
+    private let beforeAction: @Sendable () -> Void
     private var lastReading: TimeInterval?
     private func readClock() throws -> TimeInterval {
         let value = clock()
@@ -127,8 +128,8 @@ actor SafariClickApprovalPrototype {
         lastReading = value
         return value
     }
-    init(enabled: Bool = false, capture: SafariClickCapture, clock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }, actionTimeout: TimeInterval = 3, action: @escaping @Sendable (AXUIElement, CFString) -> AXError) {
-        self.enabled = enabled; self.capture = capture; self.clock = clock; self.actionTimeout = actionTimeout; self.action = action
+    init(enabled: Bool = false, capture: SafariClickCapture, clock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }, actionTimeout: TimeInterval = 3, beforeAction: @escaping @Sendable () -> Void = {}, action: @escaping @Sendable (AXUIElement, CFString) -> AXError) {
+        self.enabled = enabled; self.capture = capture; self.clock = clock; self.actionTimeout = actionTimeout; self.beforeAction = beforeAction; self.action = action
     }
     func prepare(requestID: UUID, identity: SafariClickIdentity) async throws -> UUID {
         guard enabled else { throw Failure.disabled }
@@ -143,8 +144,10 @@ actor SafariClickApprovalPrototype {
             guard current == generation else { throw Failure.invalid }
             let expires = try readClock() + 60
             let token = UUID()
-            revocation.activate()
-            pending[token] = Pending(requestID: requestID, identity: identity, expires: expires, generation: current)
+            let gate = SafariClickRevocationGate()
+            gate.activate()
+            activeGate = gate
+            pending[token] = Pending(requestID: requestID, identity: identity, expires: expires, generation: current, gate: gate)
             return token
         } catch {
             await capture.clear()
@@ -154,7 +157,7 @@ actor SafariClickApprovalPrototype {
     enum CancellationResult { case revoked, alreadyStarted, idle }
     @discardableResult func cancel() async -> CancellationResult {
         generation &+= 1; pending.removeAll()
-        let result = revocation.revoke()
+        let result = activeGate?.revoke() ?? .idle
         if result == .alreadyStarted { return .alreadyStarted }
         cleaning += 1
         defer { cleaning -= 1 }
@@ -162,8 +165,8 @@ actor SafariClickApprovalPrototype {
         return result == .revoked ? .revoked : .idle
     }
     func reject(token: UUID) async {
-        if pending.removeValue(forKey: token) != nil {
-            _ = revocation.revoke()
+        if let removed = pending.removeValue(forKey: token) {
+            _ = removed.gate.revoke()
             cleaning += 1
             defer { cleaning -= 1 }
             await capture.clear()
@@ -173,7 +176,7 @@ actor SafariClickApprovalPrototype {
         guard let entry = pending.removeValue(forKey: token) else { throw Failure.invalid }
         guard entry.requestID == requestID, entry.identity.requestDigest == digest,
               entry.generation == generation else {
-            _ = revocation.revoke()
+            _ = entry.gate.revoke()
             cleaning += 1
             defer { cleaning -= 1 }
             await capture.clear()
@@ -191,20 +194,20 @@ actor SafariClickApprovalPrototype {
             guard beforePress < entry.expires else { throw Failure.expired }
             let clock = self.clock
             let action = self.action
-            let revocation = self.revocation
+            let revocation = entry.gate
             // The AX check and action are not atomic; cancellation cannot undo a started press.
-            try await capture.press(expected: entry.identity, timeout: actionTimeout, onTimeout: { _ = revocation.revoke() }) { element, operation in
+            try await capture.press(expected: entry.identity, timeout: actionTimeout, onTimeout: { _ = revocation.revoke() }, beforeAction: beforeAction) { element, operation in
                 let now = clock()
                 guard now.isFinite, now >= beforePress, now < entry.expires,
                       !Task.isCancelled else { return .failure }
                 return revocation.run { action(element, operation) }
             }
             await capture.clear()
-            revocation.finish()
+            entry.gate.finish()
         } catch {
-            _ = revocation.revoke()
+            _ = entry.gate.revoke()
             await capture.clear()
-            revocation.finish()
+            entry.gate.finish()
             throw error
         }
     }
@@ -236,15 +239,17 @@ private enum SafariAXPressAdapter {
     private static let busy = ManagedAtomic(false)
     private static let worker = DispatchQueue(label: "jarvis.safari.axpress", qos: .userInitiated)
     static func perform(_ candidate: SafariClickCandidate, timeout: TimeInterval,
-                        onTimeout: @escaping @Sendable () -> Void,
+                        onTimeout: @escaping @Sendable () -> Void, beforeAction: @escaping @Sendable () -> Void,
                         action: @escaping @Sendable (AXUIElement, CFString) -> AXError) async throws {
         guard candidate.identity.enabled, timeout.isFinite, timeout > 0 else { throw SafariAXReadError.unavailable }
         try Task.checkCancellation()
         guard busy.compareExchange(expected: false, desired: true, ordering: .acquiringAndReleasing).exchanged else { throw SafariAXReadError.unavailable }
+        try await withTaskCancellationHandler {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             let completion = SafariPressCompletion(continuation)
             worker.async {
                 defer { busy.store(false, ordering: .releasing) }
+                beforeAction()
                 let result = action(candidate.element, kAXPressAction as CFString)
                 completion.complete(result == .success ? .success(()) : .failure(SafariAXReadError.unavailable))
             }
@@ -252,6 +257,7 @@ private enum SafariAXPressAdapter {
                 completion.timeout(onTimeout)
             }
         }
+        } onCancel: { onTimeout() }
     }
 }
 #endif

@@ -242,6 +242,43 @@ extension SafariClickTicketTests {
         try await approval.value
     }
 
+    func testOldQueuedWorkerCannotUseNewTicketAfterTimeout() async throws {
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "digest")
+        let ref = AXUIElementCreateSystemWide()
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "worker queued")
+        let blocking = BlockingClickAction(entered)
+        let counter = ClickActionCounter()
+        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: SafariClickCapture { [candidate] }, clock: { 11 }, actionTimeout: 0.05, beforeAction: { blocking.run() }) { _, _ in counter.increment(); return .success }
+        let id = UUID()
+        let token = try await coordinator.prepare(requestID: id, identity: identity)
+        let approval = Task { try await coordinator.approve(token: token, requestID: id, digest: "digest") }
+        await fulfillment(of: [entered], timeout: 2)
+        do { try await approval.value; XCTFail("must time out") } catch { }
+        _ = try await coordinator.prepare(requestID: UUID(), identity: identity)
+        blocking.release.signal()
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(counter.value, 0)
+    }
+
+    func testTaskCancelWhileWorkerQueuedPreventsAction() async throws {
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "digest")
+        let ref = AXUIElementCreateSystemWide()
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "worker queued")
+        let blocking = BlockingClickAction(entered)
+        let counter = ClickActionCounter()
+        let coordinator = SafariClickApprovalPrototype(enabled: true, capture: SafariClickCapture { [candidate] }, clock: { 11 }, actionTimeout: 0.2, beforeAction: { blocking.run() }) { _, _ in counter.increment(); return .success }
+        let id = UUID()
+        let token = try await coordinator.prepare(requestID: id, identity: identity)
+        let approval = Task { try await coordinator.approve(token: token, requestID: id, digest: "digest") }
+        await fulfillment(of: [entered], timeout: 2)
+        approval.cancel()
+        blocking.release.signal()
+        do { try await approval.value; XCTFail("cancelled") } catch { }
+        XCTAssertEqual(counter.value, 0)
+    }
+
     func testTimedOutActionKeepsWorkerBoundedUntilReturn() async throws {
         let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "digest")
         let ref = AXUIElementCreateSystemWide()
