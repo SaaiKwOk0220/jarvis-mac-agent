@@ -3,11 +3,12 @@ import Foundation
 import JarvisDomain
 
 public enum BrowserOpenError: Error, LocalizedError {
-    case invalidRequest, openFailed, unavailable, outcomeUnknown
+    case invalidRequest, openFailed, unavailable, outcomeUnknown, exactCapacityReached
 
     public var errorDescription: String? {
         switch self {
         case .outcomeUnknown: return "Browser open outcome is unknown. Check the browser before trying again; do not retry automatically."
+        case .exactCapacityReached: return "Exact browser request capacity reached: the limit of 64 includes pending, in-flight, and outcome-unknown requests. Check the browser and pending requests; do not retry automatically."
         case .invalidRequest: return "Invalid browser destination."
         case .openFailed: return "Could not open the browser."
         case .unavailable: return "Browser opening is unavailable."

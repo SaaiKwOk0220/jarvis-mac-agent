@@ -3074,10 +3074,37 @@ extension TaskServiceTests {
         }
         let task = try await fixture.service.createTask(title: "overflow")
         let overflow = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private/overflow", payload: "Open in browser")
-        await XCTAssertThrowsErrorAsync(try await fixture.service.submit(request: overflow))
+        do {
+            _ = try await fixture.service.submit(request: overflow)
+            XCTFail("Expected exact-browser capacity limit")
+        } catch BrowserOpenError.exactCapacityReached {
+            let message = BrowserOpenError.exactCapacityReached.localizedDescription
+            XCTAssertTrue(message.contains("64"))
+            XCTAssertTrue(message.contains("pending"))
+            XCTAssertTrue(message.contains("unknown"))
+            XCTAssertFalse(message.contains("example.com"))
+        }
         XCTAssertNil(try fixture.requests.fetch(id: overflow.id))
         let events = try await fixture.service.listTimelineEvents(taskID: try XCTUnwrap(firstTask).id)
         XCTAssertTrue(events.contains { $0.summary == "browser open outcome unknown" && $0.requestID == firstRequest })
+    }
+}
+#endif
+
+#if JARVIS_EXACT_BROWSER_EXPERIMENT || JARVIS_COMBINED_EXPERIMENT
+extension TaskServiceTests {
+    func testPendingExactBrowserRequestsCountTowardCapacity() async throws {
+        let fixture = try Fixture(exactBrowserEnabled: true)
+        for index in 0..<64 {
+            let task = try await fixture.service.createTask(title: "pending \(index)")
+            let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private/\(index)", payload: "Open in browser")
+            _ = try await fixture.service.submit(request: request)
+        }
+        let task = try await fixture.service.createTask(title: "overflow")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private/overflow", payload: "Open in browser")
+        do { _ = try await fixture.service.submit(request: request); XCTFail("Expected capacity limit") }
+        catch BrowserOpenError.exactCapacityReached { }
+        XCTAssertNil(try fixture.requests.fetch(id: request.id))
     }
 }
 #endif
