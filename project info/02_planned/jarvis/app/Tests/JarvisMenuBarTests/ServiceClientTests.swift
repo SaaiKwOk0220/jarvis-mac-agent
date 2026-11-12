@@ -610,7 +610,7 @@ final class ServiceClientTests: XCTestCase {
             taskRepository: tasks,
             auditRepository: audit,
             policy: Policy(),
-            policyConfig: PolicyConfig(applicationBundleIDs: ["com.apple.Safari"]),
+            policyConfig: PolicyConfig(applicationBundleIDs: ["com.apple.finder"]),
             accessibility: AccessibilityQueryToolExecutor(query: { _ in "AXApplication \"Safari\"" }),
             requestRepository: requests,
             approvalRepository: approvals,
@@ -625,7 +625,7 @@ final class ServiceClientTests: XCTestCase {
 
         try await client.submitAccessibilityQuery(
             taskID: task.id,
-            target: "com.apple.Safari",
+            target: "com.apple.finder",
             maxDepth: 6
         )
 
@@ -654,7 +654,7 @@ final class ServiceClientTests: XCTestCase {
         XCTAssertEqual(storedRequest.taskID, task.id)
         XCTAssertEqual(storedRequest.name, "ax_query")
         XCTAssertEqual(storedRequest.sideEffect, .read)
-        XCTAssertEqual(storedRequest.target, "com.apple.Safari",
+        XCTAssertEqual(storedRequest.target, "com.apple.finder",
             "target must be the bundle identifier so the policy app allowlist applies")
         XCTAssertEqual(storedRequest.payload, "{\"maxDepth\":6}")
 
@@ -664,7 +664,7 @@ final class ServiceClientTests: XCTestCase {
         let expectedDigest = ToolRequest.actionDigest(
             name: "ax_query",
             sideEffect: .read,
-            target: "com.apple.Safari",
+            target: "com.apple.finder",
             payload: "{\"maxDepth\":6}"
         )
         XCTAssertEqual(storedRequest.payloadDigest, expectedDigest,

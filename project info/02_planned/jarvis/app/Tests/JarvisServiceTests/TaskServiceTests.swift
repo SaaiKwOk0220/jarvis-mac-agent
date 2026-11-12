@@ -530,7 +530,7 @@ final class TaskServiceTests: XCTestCase {
             taskID: task.id,
             name: "ax_query",
             sideEffect: .read,
-            target: "com.apple.Safari",
+            target: "com.apple.finder",
             payload: ""
         )
 
@@ -930,7 +930,7 @@ private final class Fixture: @unchecked Sendable {
             commandNames: ["shell", "swift", "xcodebuild"],
             browserProfiles: ["default"],
             sites: ["example.com"],
-            applicationBundleIDs: ["com.apple.Safari"]
+            applicationBundleIDs: ["com.apple.Safari", "com.apple.finder"]
         )
         service = try TaskService(
             taskRepository: tasks,
