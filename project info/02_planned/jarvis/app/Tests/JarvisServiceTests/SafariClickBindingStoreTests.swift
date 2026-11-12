@@ -74,7 +74,59 @@ final class SafariClickBindingStoreTests: XCTestCase {
 
 #if os(macOS)
 import ApplicationServices
+private actor BindingGate {
+    let entered: XCTestExpectation
+    var continuation: CheckedContinuation<Void, Never>?
+    init(_ entered: XCTestExpectation) { self.entered = entered }
+    func wait() async { await withCheckedContinuation { continuation = $0; entered.fulfill() } }
+    func release() { continuation?.resume(); continuation = nil }
+}
 extension SafariClickBindingStoreTests {
+    func testExpiredCapturesAreReleasedRepeatedly() async throws {
+        let clock = BindingClock(), task = UUID()
+        let bindings = SafariClickBindingStore(lifetime: 5, clock: { clock.read() })
+        let staged = SafariClickStagedCaptures(bindings: bindings)
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let ref = AXUIElementCreateSystemWide()
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        for index in 0..<40 {
+            let capture = SafariClickCapture { [candidate] }
+            let token = try await staged.stage(taskID: task, identity: identity, targetDigest: "target", capture: capture)
+            XCTAssertNotNil(token)
+            clock.set(TimeInterval(6 * (index + 1)))
+            await staged.purgeExpired()
+            do { try await capture.verify(expected: identity); XCTFail("expired capture retained") } catch { }
+        }
+    }
+    func testCancellationDuringCaptureReleasesReference() async throws {
+        let entered = expectation(description: "capture started")
+        let gate = BindingGate(entered)
+        let staged = SafariClickStagedCaptures(bindings: SafariClickBindingStore(clock: { 1 }))
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let ref = AXUIElementCreateSystemWide()
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let capture = SafariClickCapture { await gate.wait(); return [candidate] }
+        let task = Task { try await staged.stage(taskID: UUID(), identity: identity, targetDigest: "target", capture: capture) }
+        await fulfillment(of: [entered], timeout: 2)
+        task.cancel(); await gate.release()
+        do { _ = try await task.value; XCTFail("cancelled stage") } catch { }
+        do { try await capture.verify(expected: identity); XCTFail("cancelled reference retained") } catch { }
+    }
+    func testCancellationDuringIssueReleasesCapture() async throws {
+        let entered = expectation(description: "issue started")
+        let gate = BindingGate(entered)
+        let bindings = SafariClickBindingStore(clock: { 1 }, beforeIssue: { await gate.wait() })
+        let staged = SafariClickStagedCaptures(bindings: bindings)
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let ref = AXUIElementCreateSystemWide()
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let capture = SafariClickCapture { [candidate] }
+        let task = Task { try await staged.stage(taskID: UUID(), identity: identity, targetDigest: "target", capture: capture) }
+        await fulfillment(of: [entered], timeout: 2)
+        task.cancel(); await gate.release()
+        do { _ = try await task.value; XCTFail("cancelled stage") } catch { }
+        do { try await capture.verify(expected: identity); XCTFail("cancelled reference retained") } catch { }
+    }
     func testFailedBindingReleasesCapturedElement() async throws {
         let task = UUID()
         let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
