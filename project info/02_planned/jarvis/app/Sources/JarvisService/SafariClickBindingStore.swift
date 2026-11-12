@@ -15,10 +15,11 @@ actor SafariClickBindingStore {
     private let clock: @Sendable () -> TimeInterval
     private let lifetime: TimeInterval
     private let beforeIssue: @Sendable () async -> Void
+    private let beforeConsume: @Sendable () async -> Void
     private var lastTime: TimeInterval?
     private var entries: [UUID: Entry] = [:]
-    init(lifetime: TimeInterval = 60, clock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }, beforeIssue: @escaping @Sendable () async -> Void = {}) {
-        self.lifetime = lifetime; self.clock = clock; self.beforeIssue = beforeIssue
+    init(lifetime: TimeInterval = 60, clock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }, beforeIssue: @escaping @Sendable () async -> Void = {}, beforeConsume: @escaping @Sendable () async -> Void = {}) {
+        self.lifetime = lifetime; self.clock = clock; self.beforeIssue = beforeIssue; self.beforeConsume = beforeConsume
     }
     private func now() -> TimeInterval? {
         let value = clock()
@@ -40,10 +41,17 @@ actor SafariClickBindingStore {
         entry.requestID = requestID; entry.requestDigest = digest; entries[token] = entry
         return true
     }
-    func consume(token: UUID, taskID: UUID, requestID: UUID, digest: String, targetDigest: String) -> Bool {
-        guard let time = now(), let entry = entries.removeValue(forKey: token), time < entry.expires else { return false }
-        return entry.snapshot.taskID == taskID && entry.requestID == requestID && entry.requestDigest == digest && entry.snapshot.targetDigest == targetDigest
+    func consume(token: UUID, taskID: UUID, requestID: UUID, digest: String, targetDigest: String) async -> Bool {
+        await consumeWithDeadline(token: token, taskID: taskID, requestID: requestID, digest: digest, targetDigest: targetDigest) != nil
     }
+    func consumeWithDeadline(token: UUID, taskID: UUID, requestID: UUID, digest: String, targetDigest: String) async -> TimeInterval? {
+        await beforeConsume()
+        guard let time = now(), let entry = entries.removeValue(forKey: token), time < entry.expires else { return nil }
+        guard entry.snapshot.taskID == taskID && entry.requestID == requestID && entry.requestDigest == digest && entry.snapshot.targetDigest == targetDigest else { return nil }
+        return entry.expires
+    }
+    func isBefore(_ deadline: TimeInterval) -> Bool { guard let time = now() else { return false }; return time < deadline }
+    func remaining(deadline: TimeInterval) -> TimeInterval? { guard let time = now(), time < deadline else { return nil }; return deadline - time }
     func purgeExpired() -> [UUID] {
         guard let time = now() else { let ids = Array(entries.keys); entries.removeAll(); return ids }
         let ids = entries.filter { $0.value.expires <= time }.map(\.key)
@@ -60,6 +68,23 @@ actor SafariClickBindingStore {
 }
 
 #if os(macOS)
+/// A transferred reference remains revocable and subject to its original deadline.
+actor SafariClickTransferredCapture {
+    private let capture: SafariClickCapture
+    private let bindings: SafariClickBindingStore
+    private let deadline: TimeInterval
+    private var valid = true
+    init(capture: SafariClickCapture, bindings: SafariClickBindingStore, deadline: TimeInterval) {
+        self.capture = capture; self.bindings = bindings; self.deadline = deadline
+    }
+    func invalidate() async { valid = false; await capture.clear() }
+    func verify(expected: SafariClickIdentity) async throws {
+        guard valid else { throw SafariClickCapture.CaptureError.changed }
+        guard await bindings.isBefore(deadline) else { await invalidate(); throw SafariClickCapture.CaptureError.changed }
+        try await capture.verify(expected: expected)
+        guard valid, !Task.isCancelled, await bindings.isBefore(deadline) else { await invalidate(); throw SafariClickCapture.CaptureError.changed }
+    }
+}
 /// Experimental capture binding only; not connected to TaskService or AX actions.
 actor SafariClickStagedCaptures {
     private let bindings: SafariClickBindingStore
@@ -69,6 +94,7 @@ actor SafariClickStagedCaptures {
     private var releasing: [UUID: (Task<Void, Never>, ObjectIdentifier)] = [:]
     private var consuming: Set<UUID> = []
     private var revoked: Set<UUID> = []
+    private var transferred: [UUID: (SafariClickTransferredCapture, ObjectIdentifier)] = [:]
     init(bindings: SafariClickBindingStore, sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) { self.bindings = bindings; self.sleep = sleep }
     func purgeExpired() async {
         let ids = await bindings.purgeExpired()
@@ -118,6 +144,7 @@ actor SafariClickStagedCaptures {
     private func waitForExpiry(token: UUID) async {
         while captures[token] != nil {
             guard let remaining = await bindings.remaining(token: token) else {
+                if consuming.contains(token) || transferred[token] != nil { return }
                 await cancel(token: token)
                 return
             }
@@ -137,23 +164,33 @@ actor SafariClickStagedCaptures {
     }
     /// Transfers the captured reference only after a matching one-use binding.
     /// This bridge is experimental and does not perform or authorize an action.
-    func consume(token: UUID, taskID: UUID, requestID: UUID, digest: String, targetDigest: String) async -> SafariClickCapture? {
+    func consume(token: UUID, taskID: UUID, requestID: UUID, digest: String, targetDigest: String) async -> SafariClickTransferredCapture? {
         guard let capture = captures.removeValue(forKey: token) else { return nil }
         consuming.insert(token)
         defer { consuming.remove(token); revoked.remove(token) }
-        let valid = await bindings.consume(token: token, taskID: taskID, requestID: requestID, digest: digest, targetDigest: targetDigest)
-        guard valid, !Task.isCancelled, !revoked.contains(token) else {
+        let deadline = await bindings.consumeWithDeadline(token: token, taskID: taskID, requestID: requestID, digest: digest, targetDigest: targetDigest)
+        guard let deadline, !Task.isCancelled, !revoked.contains(token) else {
             await capture.clear()
             inUse.remove(ObjectIdentifier(capture))
             return nil
         }
-        inUse.remove(ObjectIdentifier(capture))
-        return capture
+        let transfer = SafariClickTransferredCapture(capture: capture, bindings: bindings, deadline: deadline)
+        transferred[token] = (transfer, ObjectIdentifier(capture))
+        Task { [weak self] in await self?.waitForTransferExpiry(token: token, deadline: deadline) }
+        return transfer
+    }
+    private func waitForTransferExpiry(token: UUID, deadline: TimeInterval) async {
+        while transferred[token] != nil {
+            guard let remaining = await bindings.remaining(deadline: deadline) else { await cancel(token: token); return }
+            do { try await sleep(.seconds(remaining)) } catch { await cancel(token: token); return }
+        }
     }
     func cancel(token: UUID) async {
         if consuming.contains(token) { revoked.insert(token) }
+        let transfer = transferred.removeValue(forKey: token)
         let item = beginRelease(token: token)
         await bindings.cancel(token: token)
+        if let transfer { await transfer.0.invalidate(); inUse.remove(transfer.1) }
         await finishRelease(token: token, item: item)
     }
 }

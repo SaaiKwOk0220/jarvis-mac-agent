@@ -153,6 +153,50 @@ extension SafariClickBindingStoreTests {
         do { _ = try await task.value; XCTFail("cancelled stage") } catch { }
         do { try await capture.verify(expected: identity); XCTFail("cancelled reference retained") } catch { }
     }
+    func testTransferredCaptureExpiresAtOriginalDeadline() async throws {
+        let clock = BindingClock(), task = UUID(), request = UUID()
+        let bindings = SafariClickBindingStore(lifetime: 5, clock: { clock.read() })
+        let staged = SafariClickStagedCaptures(bindings: bindings)
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let ref = AXUIElementCreateSystemWide()
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let capture = SafariClickCapture { [candidate] }
+        let value = try await staged.stage(taskID: task, identity: identity, targetDigest: "target", capture: capture)
+        let token = try XCTUnwrap(value)
+        let bound = await staged.bind(token: token, taskID: task, requestID: request, digest: "digest")
+        XCTAssertTrue(bound)
+        let transferValue = await staged.consume(token: token, taskID: task, requestID: request, digest: "digest", targetDigest: "target")
+        let transfer = try XCTUnwrap(transferValue)
+        try await transfer.verify(expected: identity)
+        clock.set(6)
+        do { try await transfer.verify(expected: identity); XCTFail("expired transfer") } catch { }
+        await staged.cancel(token: token)
+        do { try await capture.verify(expected: identity); XCTFail("capture retained") } catch { }
+    }
+
+    func testCancelDuringConsumePreventsTransfer() async throws {
+        let entered = expectation(description: "consume started")
+        let gate = BindingGate(entered)
+        let taskID = UUID(), request = UUID()
+        let bindings = SafariClickBindingStore(clock: { 1 }, beforeConsume: { await gate.wait() })
+        let staged = SafariClickStagedCaptures(bindings: bindings)
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let ref = AXUIElementCreateSystemWide()
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let capture = SafariClickCapture { [candidate] }
+        let value = try await staged.stage(taskID: taskID, identity: identity, targetDigest: "target", capture: capture)
+        let token = try XCTUnwrap(value)
+        let bound = await staged.bind(token: token, taskID: taskID, requestID: request, digest: "digest")
+        XCTAssertTrue(bound)
+        let consume = Task { await staged.consume(token: token, taskID: taskID, requestID: request, digest: "digest", targetDigest: "target") }
+        await fulfillment(of: [entered], timeout: 2)
+        await staged.cancel(token: token)
+        await gate.release()
+        let transferred = await consume.value
+        XCTAssertNil(transferred)
+        do { try await capture.verify(expected: identity); XCTFail("capture retained") } catch { }
+    }
+
     func testBoundCaptureTransferRequiresExactBindingAndIsSingleUse() async throws {
         let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
         let ref = AXUIElementCreateSystemWide()
