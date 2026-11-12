@@ -2,7 +2,7 @@ name: swift-test
 
 on:
   pull_request:
-    branches: [main, fix/loopback-security-main]
+    branches: [main, fix/loopback-security-main, feat/safari-read-stacked]
   push:
     branches: [main]
 
