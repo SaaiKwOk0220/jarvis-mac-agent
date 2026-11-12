@@ -13,12 +13,14 @@ public struct ApprovalRequest: Codable, Equatable, Identifiable, Sendable {
     public let target: String
     public let payload: String
     public let digest: String
+    public let kind: String?
+    public let previewAvailable: Bool?
 
-    public init(id: UUID, taskID: UUID, reason: String, target: String, payload: String, digest: String) {
-        self.id = id; self.taskID = taskID; self.reason = reason; self.target = target; self.payload = payload; self.digest = digest
+    public init(id: UUID, taskID: UUID, reason: String, target: String, payload: String, digest: String, kind: String? = nil, previewAvailable: Bool? = nil) {
+        self.id = id; self.taskID = taskID; self.reason = reason; self.target = target; self.payload = payload; self.digest = digest; self.kind = kind; self.previewAvailable = previewAvailable
     }
 
-    private enum CodingKeys: String, CodingKey { case id, taskID, reason, approvalReason, target, payload, digest, actionDigest }
+    private enum CodingKeys: String, CodingKey { case id, taskID, reason, approvalReason, target, payload, digest, actionDigest, kind, previewAvailable }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id)
@@ -27,11 +29,13 @@ public struct ApprovalRequest: Codable, Equatable, Identifiable, Sendable {
         target = try c.decodeIfPresent(String.self, forKey: .target) ?? ""
         payload = try c.decodeIfPresent(String.self, forKey: .payload) ?? ""
         digest = try c.decodeIfPresent(String.self, forKey: .digest) ?? c.decode(String.self, forKey: .actionDigest)
+        kind = try c.decodeIfPresent(String.self, forKey: .kind)
+        previewAvailable = try c.decodeIfPresent(Bool.self, forKey: .previewAvailable)
     }
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(id, forKey: .id); try c.encode(taskID, forKey: .taskID); try c.encode(reason, forKey: .reason)
-        try c.encode(target, forKey: .target); try c.encode(payload, forKey: .payload); try c.encode(digest, forKey: .digest)
+        try c.encode(target, forKey: .target); try c.encode(payload, forKey: .payload); try c.encode(digest, forKey: .digest); try c.encodeIfPresent(kind, forKey: .kind); try c.encodeIfPresent(previewAvailable, forKey: .previewAvailable)
     }
 }
 
@@ -79,6 +83,7 @@ public final class ServiceClient: ObservableObject {
     /// `serviceError` instead.
     @Published public private(set) var actionError: String?
 
+    var experimentalClickApprovalForTesting: ((ApprovalRequest) async throws -> Void)?
     private var baseURL: URL
     private var authorizationToken: String?
     private let session: URLSession
@@ -186,12 +191,15 @@ public final class ServiceClient: ObservableObject {
             // response wins. That is accurate for the single-request case and safe
             // — if lossy — for the multi-pending case; showing all pendings is a
             // follow-up UI change.
-            for request in requests {
-                approvalRequests[request.taskID] = request
-            }
+            applyApprovalRequests(requests, taskID: taskID)
             serviceError = nil
             return requests
         } catch { throw ServiceClientError.decoding }
+    }
+
+    func applyApprovalRequests(_ requests: [ApprovalRequest], taskID: UUID) {
+        approvalRequests.removeValue(forKey: taskID)
+        for request in requests where request.taskID == taskID { approvalRequests[taskID] = request }
     }
 
     public func loadTimeline(taskID: UUID) async throws -> [TimelineEvent] {
@@ -218,7 +226,14 @@ public final class ServiceClient: ObservableObject {
         }
     }
 
-    public func approve(_ request: ApprovalRequest) async throws { try await approve(requestID: request.id, digest: request.digest) }
+    public func approve(_ request: ApprovalRequest) async throws {
+        if request.kind == "safari_click_experiment" {
+            guard request.previewAvailable == true, !request.digest.isEmpty, let handler = experimentalClickApprovalForTesting else { throw ServiceClientError.unavailable }
+            try await handler(request)
+            return
+        }
+        try await approve(requestID: request.id, digest: request.digest)
+    }
 
     public func reject(requestID: UUID) async throws {
         do {

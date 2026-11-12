@@ -83,9 +83,9 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
                 #endif
                 if let preview {
                     let payload = "元素类型：\(preview.role)\n元素标题：\(preview.title)\n状态：\(preview.enabled ? "已启用" : "未启用")\n风险：点击可能改变网页或触发操作；执行前会再次检查目标。完整网址可能包含敏感参数，请注意保护。"
-                    output.append(PendingApprovalRequest(id: request.id, taskID: request.taskID, reason: reason, target: preview.url, payload: payload, digest: request.payloadDigest))
+                    output.append(PendingApprovalRequest(id: request.id, taskID: request.taskID, reason: reason, target: preview.url, payload: payload, digest: request.payloadDigest, kind: "safari_click_experiment", previewAvailable: true))
                 } else {
-                    output.append(PendingApprovalRequest(id: request.id, taskID: request.taskID, reason: reason, target: "实验点击", payload: "此实验请求的目标已失效或不可用，请拒绝此请求后重新发起。", digest: request.payloadDigest))
+                    output.append(PendingApprovalRequest(id: request.id, taskID: request.taskID, reason: reason, target: "实验点击", payload: "此实验请求的目标已失效或不可用，请拒绝此请求后重新发起。", digest: request.payloadDigest, kind: "safari_click_experiment", previewAvailable: false))
                 }
             } else if request.name == "safari_read" {
                 let exactURL = await safariCoordinator.preview(request) ?? "Capture expired; reject and try again."

@@ -674,3 +674,43 @@ final class ServiceClientTests: XCTestCase {
             "submitAccessibilityQuery must not leave actionError populated on success")
     }
 }
+
+@MainActor
+extension ServiceClientTests {
+    func testExperimentalApprovalMetadataSurvivesServiceEncoding() throws {
+        let pending = PendingApprovalRequest(id: UUID(), taskID: UUID(), reason: "test", target: "https://example.com/a?secret=x", payload: "target", digest: "digest", kind: "safari_click_experiment", previewAvailable: true)
+        let decoded = try JSONDecoder().decode(ApprovalRequest.self, from: JSONEncoder().encode(pending))
+        XCTAssertEqual(decoded.kind, "safari_click_experiment")
+        XCTAssertEqual(decoded.previewAvailable, true)
+        XCTAssertEqual(decoded.target, pending.target)
+    }
+    func testExperimentalApprovalPresentationUsesScrollablePreviewAndRequiresLiveTicket() {
+        let request = ApprovalRequest(id: UUID(), taskID: UUID(), reason: "test", target: "https://example.com/" + String(repeating: "x", count: 1000), payload: String(repeating: "title", count: 100), digest: "digest", kind: "safari_click_experiment", previewAvailable: true)
+        let presentation = ApprovalPresentation(request: request, clickHandlerAvailable: true)
+        XCTAssertTrue(presentation.usesScrollablePreview)
+        XCTAssertTrue(presentation.canApprove)
+        let expired = ApprovalRequest(id: request.id, taskID: request.taskID, reason: "test", target: "失效", payload: "失效", digest: "digest", kind: "safari_click_experiment", previewAvailable: false)
+        XCTAssertFalse(ApprovalPresentation(request: expired, clickHandlerAvailable: true).canApprove)
+        XCTAssertFalse(ApprovalPresentation(request: request, clickHandlerAvailable: false).canApprove)
+    }
+    func testExperimentalApprovalRefreshClearsExpiredAndMissingRequests() {
+        let client = ServiceClient(), taskID = UUID()
+        let request = ApprovalRequest(id: UUID(), taskID: taskID, reason: "test", target: "https://example.com", payload: "target", digest: "digest", kind: "safari_click_experiment", previewAvailable: true)
+        client.applyApprovalRequests([request], taskID: taskID)
+        XCTAssertEqual(client.approvalRequests[taskID]?.previewAvailable, true)
+        let expired = ApprovalRequest(id: request.id, taskID: taskID, reason: "test", target: "失效", payload: "失效", digest: "digest", kind: "safari_click_experiment", previewAvailable: false)
+        client.applyApprovalRequests([expired], taskID: taskID)
+        XCTAssertEqual(client.approvalRequests[taskID]?.previewAvailable, false)
+        client.applyApprovalRequests([], taskID: taskID)
+        XCTAssertNil(client.approvalRequests[taskID])
+    }
+    func testExperimentalApprovalUsesOnlyInjectedFakeHandler() async throws {
+        let client = ServiceClient()
+        let request = ApprovalRequest(id: UUID(), taskID: UUID(), reason: "test", target: "https://example.com", payload: "target", digest: "digest", kind: "safari_click_experiment", previewAvailable: true)
+        do { try await client.approve(request); XCTFail("unregistered click must fail") } catch { }
+        var called = false
+        client.experimentalClickApprovalForTesting = { received in called = received.id == request.id }
+        try await client.approve(request)
+        XCTAssertTrue(called)
+    }
+}
