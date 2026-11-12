@@ -232,3 +232,13 @@ final class PolicyTests: XCTestCase {
         }
     }
 }
+
+extension PolicyTests {
+    func testGenericAccessibilityCannotBypassSafariReadApproval() {
+        let request = ToolRequest(taskID: UUID(), name: "ax_query", sideEffect: .read,
+                                  target: "com.apple.Safari", payload: "{}")
+        let config = PolicyConfig(applicationBundleIDs: ["com.apple.Safari"])
+        XCTAssertEqual(Policy(allowSafariRead: true).evaluate(request, config: config),
+                       .deny(reason: "Safari requires the approved Safari read flow"))
+    }
+}

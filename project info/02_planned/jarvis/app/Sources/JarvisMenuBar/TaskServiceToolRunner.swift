@@ -122,7 +122,8 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
                 description: """
                 Read an app's accessibility tree and return a compact text \
                 rendering. Read-only and never performs an action, but the app's \
-                bundle identifier must be on the approved application allowlist.
+                bundle identifier must be on the approved application allowlist. \
+                Safari is excluded: use safari_read when available and require approval.
                 """,
                 parameters: [
                     "bundleID": LLMToolParameter(type: "string", description: "Bundle identifier of a running app, for example com.apple.finder."),
