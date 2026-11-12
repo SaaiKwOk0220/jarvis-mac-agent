@@ -5,6 +5,15 @@ enum ExactBrowserExperiment {
     static func enabled(experimentalBuild: Bool, bundleID: String?, marker: Bool, optIn: String?) -> Bool {
         experimentalBuild && bundleID == Self.bundleID && marker && optIn == "1"
     }
+    static var toggleAllowed: Bool {
+        #if JARVIS_COMBINED_EXPERIMENT
+        return CombinedExperimentAccess.current && AppStorageNamespace.isTrueBoolean(Bundle.main.object(forInfoDictionaryKey: "JarvisCombinedExperiment"))
+        #elseif JARVIS_EXACT_BROWSER_EXPERIMENT
+        return Bundle.main.bundleIdentifier == bundleID && AppStorageNamespace.isTrueBoolean(Bundle.main.object(forInfoDictionaryKey: "JarvisBrowserExperiment"))
+        #else
+        return false
+        #endif
+    }
     static var current: Bool {
         #if JARVIS_COMBINED_EXPERIMENT
         return CombinedExperimentAccess.enabled(identity: CombinedExperimentAccess.current, optIn: ProcessInfo.processInfo.environment["JARVIS_EXACT_BROWSER_OPT_IN"])

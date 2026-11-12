@@ -69,6 +69,7 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
     /// allowlists the policy enforces, so the model plans requests that can
     /// actually be approved instead of discovering the gate by failing.
     public func tools() -> [LLMTool] {
+        let exactBrowserEnabled = service.isExactBrowserEnabled()
         var catalog: [LLMTool] = [
             LLMTool(
                 name: "browser_open",

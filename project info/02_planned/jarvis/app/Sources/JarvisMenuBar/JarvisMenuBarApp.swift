@@ -208,7 +208,7 @@ private final class Runtime {
                 screenshot: ScreenshotToolExecutor(),
                 accessibility: AccessibilityQueryToolExecutor(),
                 browserOpen: BrowserOpenExecutor(),
-                enableSafariRead: safariReadEnabled, exactBrowserEnabled: ExactBrowserExperiment.current, allowSafariReadToggle: allowSafariReadToggle)
+                enableSafariRead: safariReadEnabled, exactBrowserEnabled: false, allowSafariReadToggle: allowSafariReadToggle, allowExactBrowserToggle: ExactBrowserExperiment.toggleAllowed)
             self.taskService = service
             #if JARVIS_SAFARI_CLICK_EXPERIMENT && (JARVIS_SAFARI_EXPERIMENT_BUILD || JARVIS_COMBINED_EXPERIMENT)
             self.clickModeService = service

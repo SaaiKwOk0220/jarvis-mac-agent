@@ -130,6 +130,9 @@ struct AskJarvisView: View {
     }
 
     @State private var safariReadError: String?
+    @State private var exactBrowserState = false
+    @State private var exactBrowserChanging = false
+    @State private var exactBrowserError: String?
     @State private var safariReadState = false
     @State private var safariReadChanging = false
     @StateObject private var log = AgentRunLog()
@@ -354,8 +357,25 @@ struct AskJarvisView: View {
     private var conversationPanel: some View {
         VStack(alignment: .leading, spacing: 10) {
             #if JARVIS_EXACT_BROWSER_EXPERIMENT || JARVIS_COMBINED_EXPERIMENT
-            Text(ExactBrowserExperiment.current ? "实验模式：打开完整网址前需要逐次审批；浏览器可能重定向或发送网络请求。" : "完整网址实验未启用。")
-                .font(.caption).foregroundStyle(.secondary)
+            if ExactBrowserExperiment.toggleAllowed, let service {
+                Toggle("允许本次运行请求打开完整网址（每次仍需审批）", isOn: Binding(get: { exactBrowserState }, set: { value in
+                    guard !exactBrowserChanging else { return }
+                    exactBrowserChanging = true
+                    Task { @MainActor in
+                        let result = await Task.detached { () -> (Bool, String?) in
+                            do { try service.setExactBrowserEnabled(value); return (service.isExactBrowserEnabled(), nil) }
+                            catch { return (service.isExactBrowserEnabled(), error.localizedDescription) }
+                        }.value
+                        exactBrowserState = result.0; exactBrowserError = result.1; exactBrowserChanging = false
+                    }
+                })).disabled(exactBrowserChanging).onAppear { exactBrowserState = service.isExactBrowserEnabled() }
+                if exactBrowserChanging { Text("正在更新完整网址权限…") }
+                Text("浏览器打开后可能重定向或发送网络请求；已经打开的网页及其后续操作无法撤回。")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("如果打开结果不明，请先检查浏览器，确认后再决定后续操作；重启应用可能使未确认状态消失。若待处理及结果未知的请求合计达到容量上限，请停止使用此功能并逐项核查，不要反复重试。")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let exactBrowserError { Text(exactBrowserError).foregroundStyle(.red) }
+            }
             #endif
             #if JARVIS_SAFARI_EXPERIMENT_BUILD || JARVIS_COMBINED_EXPERIMENT
             HStack {
