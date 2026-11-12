@@ -271,8 +271,13 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     /// pending request on the same task: failure + another pending →
     /// `.awaitingApproval`; failure + another executing → `.running`;
     /// failure + nothing else outstanding → `.failed`.
+    static func validateExecutionCapability(_ request: ToolRequest) throws {
+        guard request.name != "safari_click_experiment" else { throw TaskServiceCapabilityError.unavailable }
+    }
+
     private func execute(_ request: ToolRequest, approval: Approval? = nil) async throws {
         do {
+            try Self.validateExecutionCapability(request)
             try lock.withLock { guard let (_, status) = try requests.fetch(id: request.id), status == .executing else { throw TaskServiceError.requestNotAwaitingApproval }; try requireRunning(request.taskID) }
             if request.name == "safari_read" && (!enableSafariRead || approval == nil) { throw SafariAXReadError.unavailable }
             let picked: any ToolExecutor = {

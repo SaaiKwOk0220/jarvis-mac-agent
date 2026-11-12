@@ -1237,3 +1237,10 @@ extension TaskServiceTests {
         XCTAssertTrue(try fixture.approvals.list().isEmpty)
     }
 }
+
+extension TaskServiceTests {
+    func testUnregisteredExperimentalClickIsDeniedAtExecutionBoundary() throws {
+        let request = ToolRequest(taskID: UUID(), name: "safari_click_experiment", sideEffect: .localWrite, target: "redacted", payload: "opaque")
+        XCTAssertThrowsError(try TaskService.validateExecutionCapability(request))
+    }
+}
