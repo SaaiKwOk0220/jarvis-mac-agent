@@ -1008,6 +1008,47 @@ private final class PCMTestCollector: @unchecked Sendable {
         XCTAssertEqual(sent, ["第一句", "第二句"])
     }
 
+    func testPlaybackRestartsSecondTurnAndAudioMonitorEndsIt() async throws {
+        let backend = FakeVoiceBackend()
+        let speaker = FakeSpeaker()
+        let voice = VoiceCoordinator(backend: backend, speaker: speaker)
+        let session = VoiceConversationSession()
+        let token = session.begin()
+        let restarted = expectation(description: "second recording started")
+        var submitted: [String] = []
+        voice.speak("回答") { completed in
+            session.playbackFinished(completed: completed, token: token, visible: true,
+                                     serviceAvailable: true, isRunning: false, draft: "", voiceBusy: voice.isSpeaking) {
+                Task { @MainActor in
+                    await voice.start(autoSubmit: { submitted.append($0) })
+                    restarted.fulfill()
+                }
+            }
+        }
+        speaker.completion?(true)
+        await fulfillment(of: [restarted], timeout: 1)
+        XCTAssertTrue(voice.isRecording)
+        backend.handler?("第二句")
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1))
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 16_000))
+        buffer.frameLength = 16_000
+        let samples = try XCTUnwrap(buffer.floatChannelData?[0])
+        // This monitor is injected by the test, not wired through the production backend.
+        let detected = expectation(description: "injected monitor detected pause")
+        let monitor = AudioPauseMonitor(pauseDuration: 2) {
+            backend.silenceHandler?()
+            detected.fulfill()
+        }
+        for index in 0..<16_000 { samples[index] = 0.1 }
+        monitor.observe(buffer)
+        for index in 0..<16_000 { samples[index] = 0 }
+        monitor.observe(buffer); monitor.observe(buffer)
+        await fulfillment(of: [detected], timeout: 1)
+        XCTAssertTrue(voice.isFinishing)
+        backend.finishHandler?(true)
+        XCTAssertEqual(submitted, ["第二句"])
+    }
+
     func testInvalidExperimentalIdentityStopsBeforeStorageAccess() {
         for (identifier, marker) in [("local.jarvis.dev", true), ("local.jarvis.vad-experiment", false)] {
             var storageAccessed = false
