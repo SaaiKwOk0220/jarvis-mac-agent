@@ -28,45 +28,9 @@ def append_bounded(current, chunk, limit=MAX_BYTES):
         raise ValueError('PCM limit exceeded')
     return current + chunk
 
-def cleanup_process_group(proc):
-    # The leader may have exited while descendants still hold stdout open.
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    finally:
-        proc.wait()
-
 def run(runtime, model, text, timeout):
-    if sys.platform != 'darwin' or not Path('/usr/bin/sandbox-exec').is_file():
-        raise RuntimeError('macOS sandbox unavailable')
-    if not Path(runtime).is_file() or not Path(model).is_dir():
-        raise ValueError('Runtime or model not found')
-    worker = str(Path(__file__).resolve().with_name('worker.py'))
-    with tempfile.TemporaryDirectory(prefix='jarvis-kokoro-', dir='/private/tmp') as temp:
-        os.chmod(temp, 0o700)
-        sandbox = Path(temp, 'profile.sb'); sandbox.write_text(profile(temp))
-        env = {'TMPDIR': temp, 'HOME': temp, 'HF_HOME': temp, 'HF_HUB_OFFLINE': '1',
-               'TRANSFORMERS_OFFLINE': '1', 'PYTHONDONTWRITEBYTECODE': '1', 'PATH': '/usr/bin:/bin'}
-        proc = subprocess.Popen(['/usr/bin/sandbox-exec', '-f', str(sandbox), runtime, '-B', worker, model],
-                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                env=env, start_new_session=True)
-        try:
-            proc.stdin.write(text.encode('utf-8')); proc.stdin.close()
-            selector = selectors.DefaultSelector(); selector.register(proc.stdout, selectors.EVENT_READ)
-            result = b''; deadline = time.monotonic() + timeout
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0: raise TimeoutError('Synthesis timed out')
-                if not selector.select(remaining): raise TimeoutError('Synthesis timed out')
-                chunk = os.read(proc.stdout.fileno(), 65536)
-                if not chunk: break
-                result = append_bounded(result, chunk)
-            if proc.wait(timeout=max(0.01, deadline-time.monotonic())) != 0 or not result:
-                raise RuntimeError('Synthesis failed')
-            return result
-        finally:
-            cleanup_process_group(proc)
+    # Disabled until a verified child lifecycle mechanism can prevent leaked helpers.
+    raise RuntimeError('Experiment disabled pending safe subprocess isolation')
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)

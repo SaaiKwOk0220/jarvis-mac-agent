@@ -1,3 +1,7 @@
+# HOLD — runner disabled
+
+The runner deliberately fails closed and does not launch the helper. Prior versions could not reliably clean descendants without risking unrelated processes. The details below describe the previous experiment, not current runnable behavior. Do not distribute or use this tool.
+
 # Kokoro isolated experiment
 
 This is a developer experiment, disabled and unconnected to Jarvis. Use only fixed, nonsensitive test text. It requires macOS, Apple Silicon with Metal, `/usr/bin/sandbox-exec`, an independently installed Python environment containing mlx-audio and misaki[zh], and a local Kokoro model directory. Model/runtime are not bundled and no download is performed. Check their provenance, licenses, and versions before use.
