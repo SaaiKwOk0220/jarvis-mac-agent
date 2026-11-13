@@ -2036,19 +2036,69 @@ extension TaskServiceTests {
         let ref = AXUIElementCreateSystemWide()
         let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
         let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
-        let entered = expectation(description: "one action started"), rejected = expectation(description: "other approval rejected")
-        let block = ExperimentalClickBlockingAction(entered)
+        let block = ExperimentalClickRaceAction()
+        defer { block.release.signal() }
         await a.service.installExperimentalClickForTesting(action: { _, _ in block.run(); return .success })
         await b.service.installExperimentalClickForTesting(action: { _, _ in block.run(); return .success })
         let requestA = try await a.service.submitExperimentalClick(taskID: taskA.id, identity: identity, capture: SafariClickCapture { [candidate] })
         let requestB = try await b.service.submitExperimentalClick(taskID: taskB.id, identity: identity, capture: SafariClickCapture { [candidate] })
-        let first = Task { do { try await a.service.approveExperimentalClick(requestID: requestA.id, digest: requestA.payloadDigest) } catch { rejected.fulfill() } }
-        let second = Task { do { try await b.service.approveExperimentalClick(requestID: requestB.id, digest: requestB.payloadDigest) } catch { rejected.fulfill() } }
-        await fulfillment(of: [entered, rejected], timeout: 3)
+        let outcomes = await withTaskGroup(of: ExperimentalClickRaceOutcome.self, returning: [ExperimentalClickRaceOutcome].self) { group in
+            group.addTask {
+                do { try await a.service.approveExperimentalClick(requestID: requestA.id, digest: requestA.payloadDigest); return .success }
+                catch { return .failure(String(reflecting: error)) }
+            }
+            group.addTask {
+                do { try await b.service.approveExperimentalClick(requestID: requestB.id, digest: requestB.payloadDigest); return .success }
+                catch { return .failure(String(reflecting: error)) }
+            }
+            // The winning action waits until the competing attempt finishes.
+            // If both fail closed (e.g. the global AX adapter is busy), both
+            // outcomes are still collected instead of overfulfilling XCTest.
+            let first = await group.next()!
+            block.release.signal()
+            let second = await group.next()!
+            return [first, second]
+        }
+        XCTAssertEqual(try a.approvals.list().filter { $0.decision == .approved }.count, 1, "outcomes: \(outcomes)")
+        XCTAssertLessThanOrEqual(block.count, 1, "outcomes: \(outcomes)")
+        let successes = outcomes.filter { $0 == .success }.count
+        XCTAssertLessThanOrEqual(successes, 1, "outcomes: \(outcomes)")
+        let barrier = try SQLitePersistenceUnitOfWork(database: a.database).hasExperimentalClickBarrier()
+        if successes == 0 { XCTAssertTrue(barrier, "uncertain/failed action must remain blocked: \(outcomes)") }
+        else { XCTAssertEqual(block.count, 1); XCTAssertFalse(barrier) }
+    }
+    func testConcurrentApprovalsFailClosedWhenPressAdapterIsBusy() async throws {
+        let blocker = try Fixture()
+        let blockerTask = try await blocker.service.createTask(title: "blocker")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "occupy global press adapter")
+        let blockingAction = ExperimentalClickBlockingAction(entered)
+        defer { blockingAction.release.signal() }
+        await blocker.service.installExperimentalClickForTesting { _, _ in blockingAction.run(); return .success }
+        let blockedRequest = try await blocker.service.submitExperimentalClick(taskID: blockerTask.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let blocked = Task { try await blocker.service.approveExperimentalClick(requestID: blockedRequest.id, digest: blockedRequest.payloadDigest) }
+        await fulfillment(of: [entered], timeout: 2)
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("jarvis-click-busy-repro-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = directory.appendingPathComponent("test.sqlite").path
+        let a = try Fixture(path: path), b = try Fixture(path: path)
+        let taskA = try await a.service.createTask(title: "a"), taskB = try await b.service.createTask(title: "b")
+        await a.service.installExperimentalClickForTesting { _, _ in XCTFail("busy action must not run"); return .success }
+        await b.service.installExperimentalClickForTesting { _, _ in XCTFail("busy action must not run"); return .success }
+        let requestA = try await a.service.submitExperimentalClick(taskID: taskA.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let requestB = try await b.service.submitExperimentalClick(taskID: taskB.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let first = Task { do { try await a.service.approveExperimentalClick(requestID: requestA.id, digest: requestA.payloadDigest); return "success" } catch { return String(reflecting: error) } }
+        let second = Task { do { try await b.service.approveExperimentalClick(requestID: requestB.id, digest: requestB.payloadDigest); return "success" } catch { return String(reflecting: error) } }
+        let firstResult = await first.value, secondResult = await second.value
+        XCTAssertNotEqual(firstResult, "success")
+        XCTAssertNotEqual(secondResult, "success")
         XCTAssertEqual(try a.approvals.list().filter { $0.decision == .approved }.count, 1)
-        block.release.signal()
-        await first.value
-        await second.value
+        XCTAssertTrue(try SQLitePersistenceUnitOfWork(database: a.database).hasExperimentalClickBarrier())
+        blockingAction.release.signal()
+        _ = try? await blocked.value
     }
     func testExperimentalClickFocusPreflightTimeoutClearsBarrier() async throws {
         let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
@@ -2187,6 +2237,20 @@ private final class ExperimentalClickBlockingAction: @unchecked Sendable {
     let release = DispatchSemaphore(value: 0)
     init(_ entered: XCTestExpectation) { self.entered = entered }
     func run() { entered.fulfill(); _ = release.wait(timeout: .now() + 5) }
+}
+private enum ExperimentalClickRaceOutcome: Equatable, Sendable {
+    case success
+    case failure(String)
+}
+private final class ExperimentalClickRaceAction: @unchecked Sendable {
+    private let lock = NSLock()
+    private var starts = 0
+    let release = DispatchSemaphore(value: 0)
+    var count: Int { lock.lock(); defer { lock.unlock() }; return starts }
+    func run() {
+        lock.lock(); starts += 1; lock.unlock()
+        _ = release.wait(timeout: .now() + 5)
+    }
 }
 private final class ExperimentalClickClock: @unchecked Sendable {
     private let lock = NSLock()
