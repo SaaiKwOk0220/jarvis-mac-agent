@@ -29,9 +29,11 @@ output_dir="${1:-$package_dir/.build/dev-app}"
 mkdir -p "$output_dir"
 output_dir="$(cd "$output_dir" && pwd)"
 if "$combined"; then
-  click_flags=()
-  if [ "${JARVIS_COMBINED_CLICK_EXPERIMENT:-0}" = 1 ]; then click_flags=(-Xswiftc -DJARVIS_SAFARI_CLICK_EXPERIMENT); fi
-  swift build --package-path "$package_dir" --scratch-path "$package_dir/.build/combined-experiment" -Xswiftc -DJARVIS_COMBINED_EXPERIMENT "${click_flags[@]}" --product JarvisMenuBar >&2
+  if [ "${JARVIS_COMBINED_CLICK_EXPERIMENT:-0}" = 1 ]; then
+    swift build --package-path "$package_dir" --scratch-path "$package_dir/.build/combined-experiment" -Xswiftc -DJARVIS_COMBINED_EXPERIMENT -Xswiftc -DJARVIS_SAFARI_CLICK_EXPERIMENT --product JarvisMenuBar >&2
+  else
+    swift build --package-path "$package_dir" --scratch-path "$package_dir/.build/combined-experiment" -Xswiftc -DJARVIS_COMBINED_EXPERIMENT --product JarvisMenuBar >&2
+  fi
   bin_dir="$(swift build --package-path "$package_dir" --scratch-path "$package_dir/.build/combined-experiment" --show-bin-path)"
 elif "$exact"; then
   swift build --package-path "$package_dir" --scratch-path "$package_dir/.build/browser-experiment" -Xswiftc -DJARVIS_EXACT_BROWSER_EXPERIMENT --product JarvisMenuBar >&2

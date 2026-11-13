@@ -10,6 +10,7 @@ printf 'resource' > "$tmp_dir/build/GRDB_GRDB.bundle/test.txt"
 printf 'model' > "$tmp_dir/build/Jarvis_JarvisMenuBar.bundle/silero-v6.2.3.onnx"
 cat > "$tmp_dir/bin/swift" <<'SWIFT'
 #!/bin/sh
+if [ -n "${SWIFT_ARGUMENTS_LOG:-}" ]; then printf '%s\n' "$*" >> "$SWIFT_ARGUMENTS_LOG"; fi
 case "$*" in *--show-bin-path*) printf '%s\n' "$FAKE_BUILD_DIR";; esac
 SWIFT
 chmod +x "$tmp_dir/bin/swift"
@@ -27,7 +28,10 @@ test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$vad_output/Cont
 test -f "$vad_output/Contents/Resources/Jarvis_JarvisMenuBar.bundle/silero-v6.2.3.onnx"
 if PATH="$tmp_dir/bin:$PATH" FAKE_BUILD_DIR="$tmp_dir/build" JARVIS_SAFARI_EXPERIMENT_BUNDLE=1 "$app_dir/scripts/build-dev-app.sh" --experimental "$tmp_dir/both" >/dev/null 2>&1; then exit 1; fi
 
-combined_output="$(PATH="$tmp_dir/bin:$PATH" FAKE_BUILD_DIR="$tmp_dir/build" "$app_dir/scripts/build-dev-app.sh" --combined-experiment "$tmp_dir/combined")"
+combined_output="$(PATH="$tmp_dir/bin:$PATH" FAKE_BUILD_DIR="$tmp_dir/build" SWIFT_ARGUMENTS_LOG="$tmp_dir/no-click-args" /bin/bash "$app_dir/scripts/build-dev-app.sh" --combined-experiment "$tmp_dir/combined")"
+if /usr/bin/grep -q -- '-DJARVIS_SAFARI_CLICK_EXPERIMENT' "$tmp_dir/no-click-args"; then exit 1; fi
+PATH="$tmp_dir/bin:$PATH" FAKE_BUILD_DIR="$tmp_dir/build" SWIFT_ARGUMENTS_LOG="$tmp_dir/click-args" JARVIS_COMBINED_CLICK_EXPERIMENT=1 /bin/bash "$app_dir/scripts/build-dev-app.sh" --combined-experiment "$tmp_dir/combined-click" >/dev/null
+/usr/bin/grep -q -- '-DJARVIS_SAFARI_CLICK_EXPERIMENT' "$tmp_dir/click-args"
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$combined_output/Contents/Info.plist")" = local.jarvis.combined-experiment
 test "$(/usr/libexec/PlistBuddy -c 'Print :JarvisCombinedExperiment' "$combined_output/Contents/Info.plist")" = true
 if PATH="$tmp_dir/bin:$PATH" FAKE_BUILD_DIR="$tmp_dir/build" JARVIS_SAFARI_EXPERIMENT_BUNDLE=1 "$app_dir/scripts/build-dev-app.sh" --combined-experiment "$tmp_dir/invalid-combined" >/dev/null 2>&1; then exit 1; fi
