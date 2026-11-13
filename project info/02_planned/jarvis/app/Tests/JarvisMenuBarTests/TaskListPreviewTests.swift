@@ -14,7 +14,7 @@ import JarvisDomain
             ("history", [running, completed], true, 380.0)
         ] {
             let output = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("jarvis-menu-test-\(name)-\(UUID().uuidString).png")
-            let view = TaskListView(client: client, previewTasks: tasks, previewHistoryExpanded: expanded).disabled(true)
+            let view = TaskListView(client: client, previewTasks: tasks, previewHistoryExpanded: expanded, previewMoreExpanded: name == "history").disabled(true)
             try VisualPreviewHarness.render(view, width: 320, height: height, to: output)
             XCTAssertTrue(FileManager.default.fileExists(atPath: output.path))
             print("JARVIS_MENU_TEST_IMAGE: \(output.path)")

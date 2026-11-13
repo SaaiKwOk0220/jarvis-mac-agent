@@ -3,6 +3,12 @@ import JarvisDomain
 @testable import JarvisMenuBar
 
 final class TaskListVisibilityTests: XCTestCase {
+    func testFailureWithoutCacheDoesNotClaimNoTasks() {
+        let state = TaskListPresentation(tasks: [], history: TaskHistoryVisibility(), hasError: true)
+        XCTAssertEqual(state.emptyMessage, "无法获取任务")
+        let healthy = TaskListPresentation(tasks: [], history: TaskHistoryVisibility(), hasError: false)
+        XCTAssertEqual(healthy.emptyMessage, "暂无进行中的任务")
+    }
     func testErrorKeepsPendingTaskVisibleWithStaleWarning() {
         let task = JarvisTask(title: "测试审批", status: .awaitingApproval)
         let state = TaskListPresentation(tasks: [task], history: TaskHistoryVisibility(), hasError: true)

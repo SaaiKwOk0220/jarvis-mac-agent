@@ -19,25 +19,29 @@ struct TaskListPresentation {
     let hasError: Bool
     var visibleTasks: [JarvisTask] { tasks.filter { history.shows($0.status) } }
     var showsStaleWarning: Bool { hasError && !tasks.isEmpty }
+    var emptyMessage: String { hasError && tasks.isEmpty ? "无法获取任务" : (history.isExpanded ? "暂无任务" : "暂无进行中的任务") }
 }
 
 struct TaskListView: View {
     @State private var history = TaskHistoryVisibility()
+    @State private var moreExpanded = false
     @ObservedObject var client: ServiceClient
     private let previewTasks: [JarvisTask]?
     private var displayedTasks: [JarvisTask] { previewTasks ?? client.tasks }
     private var presentation: TaskListPresentation { .init(tasks: displayedTasks, history: history, hasError: client.serviceError != nil) }
     @Environment(\.openWindow) private var openWindow
 
-    init(client: ServiceClient, previewTasks: [JarvisTask]? = nil, previewHistoryExpanded: Bool = false) {
+    init(client: ServiceClient, previewTasks: [JarvisTask]? = nil, previewHistoryExpanded: Bool = false, previewMoreExpanded: Bool = false) {
         self.client = client
         self.previewTasks = previewTasks
         var initial = TaskHistoryVisibility()
         if previewHistoryExpanded { initial.toggle() }
         _history = State(initialValue: initial)
+        _moreExpanded = State(initialValue: previewMoreExpanded)
     }
 
     var body: some View {
+        ScrollView {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Label("JARVIS", systemImage: "waveform.circle")
@@ -58,7 +62,7 @@ struct TaskListView: View {
             Button { openWindow(id: "welcome") } label: {
                 Label("权限与使用说明", systemImage: "checkmark.shield")
             }.buttonStyle(.plain)
-            DisclosureGroup("更多功能") {
+            DisclosureGroup("更多功能", isExpanded: $moreExpanded) {
                 VStack(alignment: .leading, spacing: 8) {
                     #if JARVIS_SAFARI_CLICK_EXPERIMENT && (JARVIS_SAFARI_EXPERIMENT_BUILD || JARVIS_COMBINED_EXPERIMENT)
                     Button("Safari 点击实验…") { openWindow(id: "safari-click-mode") }
@@ -84,7 +88,7 @@ struct TaskListView: View {
                 if presentation.showsStaleWarning { Text("以下任务可能不是最新状态。").font(.caption).foregroundStyle(.secondary) }
             }
             if presentation.visibleTasks.isEmpty {
-                Text(history.isExpanded ? "暂无任务" : "暂无进行中的任务")
+                Text(presentation.emptyMessage)
                     .font(.caption).foregroundStyle(.secondary).padding(.vertical, 4)
             } else {
                 ScrollView {
@@ -116,6 +120,8 @@ struct TaskListView: View {
         .frame(width: 320)
         .background(LinearGradient(colors: [Color(red: 0.025, green: 0.07, blue: 0.11), Color(red: 0.01, green: 0.025, blue: 0.05)], startPoint: .topLeading, endPoint: .bottomTrailing))
         .preferredColorScheme(.dark)
+        }
+        .frame(maxHeight: 520)
         .task {
             guard previewTasks == nil else { return }
             _ = try? await client.refresh()
