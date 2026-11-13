@@ -92,6 +92,22 @@ class ProbeTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(b'ProbeError', result.stderr)
 
+    def test_response_removes_terminal_controls_preserving_newlines(self):
+        class Untrusted(Connection):
+            def getresponse(self):
+                body = {'message': {'content': 'safe\x1b[31mred\x1b[0m\nnext\x1b]0;title\x07end\x00\u202e'}, 'done': True}
+                return Response(json.dumps(body).encode())
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'a'; path.write_bytes(PNG)
+            with patch.object(vision_probe.http.client, 'HTTPConnection', Untrusted):
+                self.assertEqual(vision_probe.describe(path, 'm', 'q', 11434), 'safered\nnextend')
+
+    def test_model_name_limit_is_enforced_before_network(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(vision_probe.http.client, 'HTTPConnection', side_effect=AssertionError('network called')):
+            path = Path(temp) / 'a'; path.write_bytes(PNG)
+            with self.assertRaises(vision_probe.ProbeError):
+                vision_probe.describe(path, 'm' * 257, 'q', 11434)
+
     def test_rejects_bad_model_question_and_port(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / 'a'; path.write_bytes(PNG)

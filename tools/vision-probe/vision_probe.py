@@ -5,13 +5,17 @@ import base64
 import http.client
 import json
 import os
+import re
 import stat
 import sys
+import unicodedata
 from pathlib import Path
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_QUESTION_CHARS = 8000
+MAX_MODEL_CHARS = 256
+ANSI_SEQUENCE = re.compile(r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]|(?:\x1b\]|\x9d)[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c|$)|\x1b(?:[ -/]*[@-~])?")
 
 class ProbeError(Exception):
     """A safe, user-facing failure that excludes request and response contents."""
@@ -34,10 +38,16 @@ def read_image(path: Path) -> bytes:
     return data
 
 
+def safe_terminal_text(text: str) -> str:
+    """Remove terminal sequences and Unicode controls, retaining newlines."""
+    clean = ANSI_SEQUENCE.sub('', text)
+    return ''.join(char for char in clean if char == '\n' or not unicodedata.category(char).startswith('C'))
+
+
 def describe(path: Path, model: str, question: str, port: int) -> str:
     """Send a bounded image and question to an explicitly named loopback model."""
-    if not model.strip() or not question.strip() or len(question) > MAX_QUESTION_CHARS:
-        raise ProbeError('A model name and a question of at most 8000 characters are required.')
+    if not model.strip() or len(model) > MAX_MODEL_CHARS or not question.strip() or len(question) > MAX_QUESTION_CHARS:
+        raise ProbeError('A model name of at most 256 characters and a question of at most 8000 characters are required.')
     if not 1 <= port <= 65535:
         raise ProbeError('Invalid local Ollama port.')
     data = read_image(path)
@@ -60,7 +70,7 @@ def describe(path: Path, model: str, question: str, port: int) -> str:
                 raise ValueError('invalid result')
         except (ValueError, TypeError, KeyError, AttributeError) as exc:
             raise ProbeError('Local Ollama returned an invalid response.') from exc
-        return content
+        return safe_terminal_text(content)
     except (OSError, http.client.HTTPException) as exc:
         raise ProbeError('Cannot reach local Ollama at 127.0.0.1; check that it is running.') from exc
     finally:
