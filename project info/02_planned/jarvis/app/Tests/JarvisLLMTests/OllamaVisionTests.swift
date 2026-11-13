@@ -33,6 +33,22 @@ final class OllamaVisionTests: XCTestCase {
         XCTAssertThrowsError(try VisionRequest(prompt: "x", image: Data(repeating: 1, count: VisionRequest.maximumImageBytes + 1)))
         XCTAssertThrowsError(try VisionRequest(prompt: "", image: Data([1])))
     }
+    func testCancellationBeforeDelayedResponseCannotReturnSuccess() async throws {
+        let entered = expectation(description: "request started")
+        let release = DispatchSemaphore(value: 0)
+        MockURLProtocol.handler = { request in
+            entered.fulfill()
+            _ = release.wait(timeout: .now() + 3)
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(#"{"message":{"content":"ok"},"done":true}"#.utf8))
+        }
+        let svc = try service()
+        let input = try VisionRequest(prompt: "x", image: Data([1]))
+        let task = Task { try await svc.describe(input) }
+        await fulfillment(of: [entered], timeout: 2)
+        task.cancel(); release.signal()
+        do { _ = try await task.value; XCTFail("cancelled request returned success") }
+        catch is CancellationError { }
+    }
     func testConcurrentRequestsAcrossServiceInstancesAreRejected() async throws {
         let entered = expectation(description: "first request entered")
         let release = DispatchSemaphore(value: 0)

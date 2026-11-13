@@ -96,6 +96,7 @@ public final class OllamaVisionService: @unchecked Sendable {
         catch { bytes.task.cancel(); if Task.isCancelled || (error as? URLError)?.code == .cancelled { throw CancellationError() }; throw VisionError.unavailable }
         guard let result = try? JSONDecoder().decode(Response.self, from: data), result.done,
               !result.message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw VisionError.invalidResponse }
+        try Task.checkCancellation()
         return result.message.content
     }
 }
