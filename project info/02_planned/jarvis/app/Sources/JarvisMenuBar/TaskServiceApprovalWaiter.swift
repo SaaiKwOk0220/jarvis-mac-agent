@@ -48,13 +48,22 @@ public final class TaskServiceApprovalWaiter: ApprovalWaiter, @unchecked Sendabl
             // Reverse so the most recent matching event wins, in case the
             // timeline ever carries more than one terminal entry per digest.
             for event in events.reversed() {
-                guard event.actionDigest == payloadDigest else { continue }
+                guard event.actionDigest == payloadDigest, event.requestID == requestID else { continue }
                 switch event.summary {
+                case "ephemeral tool result":
+                    guard event.result == requestID.uuidString else { continue }
+                    guard let result = try await service.takeEphemeralToolResult(taskID: taskID, requestID: requestID, digest: payloadDigest) else {
+                        return .failed(reason: "Temporary tool result expired or is unavailable.")
+                    }
+                    return .approved(observation: result)
                 case Self.toolResultSummary:
                     return .approved(observation: event.result)
-                case Self.toolFailureSummary:
+                case "experimental click completed":
+                    return .approved(observation: "completed")
+                case Self.toolFailureSummary, "browser open outcome unknown", "experimental click failed":
                     return .failed(reason: event.result)
-                case Self.approvalRejectedSummary:
+                case Self.approvalRejectedSummary, "experimental click mode disabled":
+                    guard event.approvalID != nil else { continue }
                     return .rejected(reason: event.result)
                 default:
                     continue

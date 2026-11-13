@@ -19,6 +19,8 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
     private let service: any TaskServiceAPI
     private let taskID: UUID
     private let appSupportDirectory: URL
+    private let enableSafariRead: Bool
+    private let exactBrowserEnabled: Bool
 
     /// Summary the service writes on the audit event that carries a finished
     /// tool's output; the runner matches observations on this plus the
@@ -40,7 +42,7 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
             appropriateFor: nil,
             create: false
         )) ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        return base.appendingPathComponent("Jarvis", isDirectory: true)
+        return base.appendingPathComponent(AppStorageScope.currentDirectory, isDirectory: true)
     }
 
     /// - Parameters:
@@ -52,18 +54,28 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
     public init(
         service: any TaskServiceAPI,
         taskID: UUID,
-        appSupportDirectory: URL = TaskServiceToolRunner.defaultAppSupportDirectory
+        appSupportDirectory: URL = TaskServiceToolRunner.defaultAppSupportDirectory,
+        enableSafariRead: Bool = false,
+        exactBrowserEnabled: Bool = false
     ) {
         self.service = service
         self.taskID = taskID
         self.appSupportDirectory = appSupportDirectory
+        self.enableSafariRead = enableSafariRead
+        self.exactBrowserEnabled = exactBrowserEnabled
     }
 
     /// The catalog advertised to the model for this run. Descriptions name the
     /// allowlists the policy enforces, so the model plans requests that can
     /// actually be approved instead of discovering the gate by failing.
     public func tools() -> [LLMTool] {
-        [
+        let exactBrowserEnabled = service.isExactBrowserEnabled()
+        var catalog: [LLMTool] = [
+            LLMTool(
+                name: "browser_open",
+                description: exactBrowserEnabled ? "Open a user-requested HTTPS address after approval; the full address may contain sensitive values and will be shown for approval. Browser redirects and network activity may follow. Does not read page contents." : "Open a user-requested HTTPS origin after approval. Paths, query strings, fragments and credentials are rejected. The browser may redirect or send network requests afterward.",
+                parameters: ["url": LLMToolParameter(type: "string", description: exactBrowserEnabled ? "HTTPS address, including path or query; no credentials or fragment." : "HTTPS origin only, without a path, query, fragment, or credentials.")]
+            ),
             LLMTool(
                 name: "shell",
                 description: """
@@ -111,7 +123,8 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
                 description: """
                 Read an app's accessibility tree and return a compact text \
                 rendering. Read-only and never performs an action, but the app's \
-                bundle identifier must be on the approved application allowlist.
+                bundle identifier must be on the approved application allowlist. \
+                Safari is excluded: use safari_read when available and require approval.
                 """,
                 parameters: [
                     "bundleID": LLMToolParameter(type: "string", description: "Bundle identifier of a running app, for example com.apple.finder."),
@@ -123,6 +136,18 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
                 ]
             ),
         ]
+        if service.isSafariReadEnabled() {
+            catalog.insert(LLMTool(name: "safari_read", description: "Capture the user's current focused Safari window and request approval to read its accessibility text. Ask the user to switch to the intended Safari page. The full captured URL is shown only for approval; content is sent to the model after approval. Dynamic pages are not atomic snapshots.", parameters: [:]), at: 0)
+        }
+        #if JARVIS_SAFARI_CLICK_EXPERIMENT && (JARVIS_SAFARI_EXPERIMENT_BUILD || JARVIS_COMBINED_EXPERIMENT)
+        if service.isExperimentalSafariClickEnabled() {
+            catalog.insert(LLMTool(name: "safari_click", description: "Request approval to click a unique accessible element in the current focused Safari window. Ask the user to focus the intended page. The captured full URL, role and title are shown for approval. Dynamic page content may change; never retry an unknown result.", parameters: [
+                "role": LLMToolParameter(type: "string", description: "Exact accessibility role, for example AXButton."),
+                "title": LLMToolParameter(type: "string", description: "Exact accessible title of the element.")
+            ]), at: 0)
+        }
+        #endif
+        return catalog
     }
 
     /// Submits one tool call as a `ToolRequest` and translates the policy
@@ -132,8 +157,25 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
     /// output is read back out of the audit timeline. Unknown tool names never
     /// reach the service: they come back as `.denied` so the model can re-plan.
     public func perform(_ call: LLMToolCall) async throws -> AgentToolOutcome {
-        guard let request = makeRequest(for: call) else {
-            return .denied("unknown tool")
+        if call.name == "safari_click" {
+            #if JARVIS_SAFARI_CLICK_EXPERIMENT && (JARVIS_SAFARI_EXPERIMENT_BUILD || JARVIS_COMBINED_EXPERIMENT)
+            guard service.isExperimentalSafariClickEnabled() else { return .denied("Safari clicking is unavailable") }
+            guard let role = call.arguments["role"], let title = call.arguments["title"],
+                  !role.isEmpty, role.utf8.count <= 128, !title.isEmpty, title.utf8.count <= 512,
+                  Set(call.arguments.keys) == Set(["role", "title"]) else { return .denied("Invalid Safari click target") }
+            let request = try await service.submitExperimentalSafariClick(taskID: taskID, role: role, title: title)
+            return .awaitingApproval(requestID: request.id, payloadDigest: request.payloadDigest, description: "Approve the captured Safari target before clicking.")
+            #else
+            return .denied("Safari clicking is unavailable")
+            #endif
+        }
+        let request: ToolRequest
+        if call.name == "safari_read" {
+            guard service.isSafariReadEnabled() else { return .denied("Safari reading is unavailable") }
+            request = try await service.prepareSafariRead(taskID: taskID)
+        } else {
+            guard let mapped = makeRequest(for: call) else { return .denied("unknown tool") }
+            request = mapped
         }
 
         switch try await service.submit(request: request) {
@@ -152,6 +194,9 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
     /// entry points hit the same allowlists.
     private func makeRequest(for call: LLMToolCall) -> ToolRequest? {
         switch call.name {
+        case "browser_open":
+            let url = call.arguments["url"] ?? ""
+            return ToolRequest(taskID: taskID, name: "browser_open", sideEffect: .externalSend, target: url, payload: "Open in browser")
         case "shell":
             let workingDirectory = resolvedWorkingDirectory(call.arguments["workingDirectory"])
             return ToolRequest(
@@ -206,7 +251,7 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
     private func observation(for request: ToolRequest) async throws -> String {
         let events = try await service.listTimelineEvents(taskID: taskID)
         let match = events.last {
-            $0.actionDigest == request.payloadDigest && $0.summary == Self.toolResultSummary
+            $0.actionDigest == request.payloadDigest && $0.requestID == request.id && $0.summary == Self.toolResultSummary
         }
         return match?.result ?? Self.missingObservationFallback
     }

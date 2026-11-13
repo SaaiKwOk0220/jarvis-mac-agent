@@ -78,6 +78,11 @@ public struct AccessibilityQueryToolExecutor: ToolExecutor, Sendable {
         guard request.sideEffect == .read else {
             throw AccessibilityQueryToolExecutorError.incompatibleSideEffect(request.sideEffect)
         }
+        guard request.name == "ax_query", request.target.contains("."),
+              !request.target.contains("/"), request.target.lowercased() != "com.apple.safari",
+              request.target.unicodeScalars.allSatisfy({ CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-.").contains($0) }) else {
+            throw AccessibilityQueryToolExecutorError.invalidPayload("Unsupported accessibility target")
+        }
         let axQuery = try AXQuery(payload: request.payload, target: request.target)
         let tree = try await query(axQuery)
         return ToolResult(summary: "Accessibility tree of \(axQuery.target):\n\(tree)")
@@ -89,18 +94,20 @@ public struct AccessibilityQueryToolExecutor: ToolExecutor, Sendable {
     /// `.permissionRequired` so the menu bar can point the user at
     /// System Settings > Privacy & Security > Accessibility.
     public static func defaultQuery(_ axQuery: AXQuery) async throws -> String {
+        guard axQuery.target.contains("."), !axQuery.target.contains("/"),
+              axQuery.target.lowercased() != "com.apple.safari",
+              axQuery.target.unicodeScalars.allSatisfy({ CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-.").contains($0) }) else {
+            throw AccessibilityQueryToolExecutorError.invalidPayload("Unsupported accessibility target")
+        }
         guard AXIsProcessTrusted() else {
             let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
             _ = AXIsProcessTrustedWithOptions(options)
             throw AccessibilityQueryToolExecutorError.permissionRequired
         }
 
-        // The target is a bundle identifier; fall back to a raw PID string so
-        // the executor stays usable from callers that already hold one.
+        // Resolve only an application bundle identifier, never a raw PID.
         let pid: pid_t
-        if let intPID = pid_t(axQuery.target) {
-            pid = intPID
-        } else if let app = NSRunningApplication.runningApplications(withBundleIdentifier: axQuery.target).first {
+        if let app = NSRunningApplication.runningApplications(withBundleIdentifier: axQuery.target).first {
             pid = app.processIdentifier
         } else {
             throw AccessibilityQueryToolExecutorError.appNotFound(axQuery.target)

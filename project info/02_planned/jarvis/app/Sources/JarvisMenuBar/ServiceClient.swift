@@ -13,12 +13,14 @@ public struct ApprovalRequest: Codable, Equatable, Identifiable, Sendable {
     public let target: String
     public let payload: String
     public let digest: String
+    public let kind: String?
+    public let previewAvailable: Bool?
 
-    public init(id: UUID, taskID: UUID, reason: String, target: String, payload: String, digest: String) {
-        self.id = id; self.taskID = taskID; self.reason = reason; self.target = target; self.payload = payload; self.digest = digest
+    public init(id: UUID, taskID: UUID, reason: String, target: String, payload: String, digest: String, kind: String? = nil, previewAvailable: Bool? = nil) {
+        self.id = id; self.taskID = taskID; self.reason = reason; self.target = target; self.payload = payload; self.digest = digest; self.kind = kind; self.previewAvailable = previewAvailable
     }
 
-    private enum CodingKeys: String, CodingKey { case id, taskID, reason, approvalReason, target, payload, digest, actionDigest }
+    private enum CodingKeys: String, CodingKey { case id, taskID, reason, approvalReason, target, payload, digest, actionDigest, kind, previewAvailable }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id)
@@ -27,11 +29,13 @@ public struct ApprovalRequest: Codable, Equatable, Identifiable, Sendable {
         target = try c.decodeIfPresent(String.self, forKey: .target) ?? ""
         payload = try c.decodeIfPresent(String.self, forKey: .payload) ?? ""
         digest = try c.decodeIfPresent(String.self, forKey: .digest) ?? c.decode(String.self, forKey: .actionDigest)
+        kind = try c.decodeIfPresent(String.self, forKey: .kind)
+        previewAvailable = try c.decodeIfPresent(Bool.self, forKey: .previewAvailable)
     }
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(id, forKey: .id); try c.encode(taskID, forKey: .taskID); try c.encode(reason, forKey: .reason)
-        try c.encode(target, forKey: .target); try c.encode(payload, forKey: .payload); try c.encode(digest, forKey: .digest)
+        try c.encode(target, forKey: .target); try c.encode(payload, forKey: .payload); try c.encode(digest, forKey: .digest); try c.encodeIfPresent(kind, forKey: .kind); try c.encodeIfPresent(previewAvailable, forKey: .previewAvailable)
     }
 }
 
@@ -79,7 +83,25 @@ public final class ServiceClient: ObservableObject {
     /// `serviceError` instead.
     @Published public private(set) var actionError: String?
 
+    var experimentalClickApprovalForTesting: ((ApprovalRequest) async throws -> Void)?
+    var experimentalClickRefreshForTesting: ((UUID) async throws -> [ApprovalRequest])?
+    var approvalClockForTesting: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    private var lastApprovalClock: TimeInterval?
+    private let approvalFreshnessLifetime: TimeInterval = 2
+    private struct ApprovalFreshness { let taskID: UUID; let digest: String; let generation: UInt64; let deadline: TimeInterval }
+    @Published private var approvalFreshness: [UUID: ApprovalFreshness] = [:]
+    private var approvalGeneration: [UUID: UInt64] = [:]
+    @Published private var approvalMutationCount: [UUID: Int] = [:]
+    @Published private var failedExperimentalApprovals: Set<UUID> = []
+    @Published private var inFlightExperimentalApprovals: Set<UUID> = []
+    var experimentalApprovalCapacityForTesting: Int = 128
+    private var experimentalApprovalCapacity: Int { min(max(experimentalApprovalCapacityForTesting, 0), 128) }
+    private var experimentalApprovalCapacityAvailable: Bool {
+        failedExperimentalApprovals.count + inFlightExperimentalApprovals.count < experimentalApprovalCapacity
+    }
+    var experimentalClickCapacityReached: Bool { !experimentalApprovalCapacityAvailable }
     private var baseURL: URL
+    private var authorizationToken: String?
     private let session: URLSession
     /// Tracks the last-known status for every task returned by `refresh`, so
     /// `notifyTransitions` can diff and emit notifications. Exposed as
@@ -88,8 +110,8 @@ public final class ServiceClient: ObservableObject {
     /// public observable surface.
     var previousStatuses: [UUID: TaskStatus] = [:]
 
-    public init(baseURL: URL = URL(string: "http://127.0.0.1:8080")!, session: URLSession = .shared) {
-        self.baseURL = baseURL; self.session = session
+    public init(baseURL: URL = URL(string: "http://127.0.0.1:8080")!, session: URLSession = .shared, authorizationToken: String? = nil) {
+        self.baseURL = baseURL; self.session = session; self.authorizationToken = authorizationToken
         #if canImport(UserNotifications)
         // `swift run` is a bare executable, which UserNotifications cannot register. A packaged app can.
         if Self.notificationsAreAvailable {
@@ -101,9 +123,13 @@ public final class ServiceClient: ObservableObject {
         }
     }
 
-    public func configure(baseURL: URL) {
-        guard baseURL.scheme?.lowercased() == "http", (baseURL.host == "127.0.0.1" || baseURL.host == "localhost") else { return }
+    public func configure(baseURL: URL, authorizationToken: String? = nil) {
+        guard baseURL.scheme?.lowercased() == "http", baseURL.host == "127.0.0.1", baseURL.user == nil, baseURL.password == nil else { return }
+        for taskID in Array(approvalGeneration.keys) { approvalGeneration[taskID, default: 0] &+= 1 }
+        approvalRequests.removeAll()
+        approvalFreshness.removeAll()
         self.baseURL = baseURL
+        self.authorizationToken = authorizationToken
     }
 
     @discardableResult
@@ -148,7 +174,7 @@ public final class ServiceClient: ObservableObject {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(["title": trimmedTitle])
         do {
-            let (data, response) = try await session.data(for: request)
+            let (data, response) = try await send(request)
             try Self.validate(response: response, data: data)
             let task: JarvisTask
             do { task = try Self.decoder.decode(JarvisTask.self, from: data) }
@@ -170,22 +196,62 @@ public final class ServiceClient: ObservableObject {
 
     /// Loads digest-bound approval metadata when the service exposes the optional task requests route.
     public func loadApprovalRequests(taskID: UUID) async throws -> [ApprovalRequest] {
+        let generation = beginApprovalRefresh(taskID: taskID)
         let (data, _) = try await request(path: "/tasks/\(taskID.uuidString)/requests", method: "GET")
         do {
             let requests = try Self.decoder.decode([ApprovalRequest].self, from: data)
-            // Key by taskID so the UI can resolve the active pending request for a
-            // task with `approvalRequests[task.id]`. A task may now hold several
-            // pending requests at once (see the multi-pending-approval change in
-            // TaskService); this dictionary collapses them and the last one in the
-            // response wins. That is accurate for the single-request case and safe
-            // — if lossy — for the multi-pending case; showing all pendings is a
-            // follow-up UI change.
-            for request in requests {
-                approvalRequests[request.taskID] = request
-            }
+            try Task.checkCancellation()
+            commitApprovalRefresh(requests, taskID: taskID, generation: generation)
             serviceError = nil
             return requests
-        } catch { throw ServiceClientError.decoding }
+        } catch is CancellationError { throw CancellationError() }
+        catch { throw ServiceClientError.decoding }
+    }
+
+    private func approvalTime() -> TimeInterval? {
+        let now = approvalClockForTesting()
+        guard now.isFinite, now >= 0, lastApprovalClock.map({ now >= $0 }) ?? true else { return nil }
+        lastApprovalClock = now
+        return now
+    }
+    @discardableResult func beginApprovalRefresh(taskID: UUID) -> UInt64 {
+        let generation = approvalGeneration[taskID, default: 0] &+ 1
+        approvalGeneration[taskID] = generation
+        approvalFreshness = approvalFreshness.filter { $0.value.taskID != taskID }
+        return generation
+    }
+    func commitApprovalRefresh(_ requests: [ApprovalRequest], taskID: UUID, generation: UInt64) {
+        guard approvalGeneration[taskID] == generation else { return }
+        var next = approvalRequests.filter { $0.value.taskID != taskID }
+        for request in requests where request.taskID == taskID && next[request.id] == nil { next[request.id] = request }
+        approvalRequests = next
+        var freshness = approvalFreshness.filter { $0.value.taskID != taskID }
+        if let now = approvalTime(), (now + approvalFreshnessLifetime).isFinite {
+            for request in requests where request.taskID == taskID && next[request.id] == request && request.previewAvailable == true {
+                freshness[request.id] = ApprovalFreshness(taskID: taskID, digest: request.digest, generation: generation, deadline: now + approvalFreshnessLifetime)
+            }
+        }
+        approvalFreshness = freshness
+    }
+    func applyApprovalRequests(_ requests: [ApprovalRequest], taskID: UUID) {
+        let generation = beginApprovalRefresh(taskID: taskID)
+        commitApprovalRefresh(requests, taskID: taskID, generation: generation)
+    }
+    func beginApprovalMutation(taskID: UUID) {
+        approvalMutationCount[taskID, default: 0] += 1
+        beginApprovalRefresh(taskID: taskID)
+    }
+    func endApprovalMutation(taskID: UUID) {
+        let count = approvalMutationCount[taskID, default: 0]
+        if count <= 1 { approvalMutationCount.removeValue(forKey: taskID) } else { approvalMutationCount[taskID] = count - 1 }
+        beginApprovalRefresh(taskID: taskID)
+    }
+    func isApprovalFresh(_ request: ApprovalRequest) -> Bool {
+        guard let now = approvalTime(), experimentalApprovalCapacityAvailable,
+              !failedExperimentalApprovals.contains(request.id), !inFlightExperimentalApprovals.contains(request.id), approvalMutationCount[request.taskID, default: 0] == 0, let freshness = approvalFreshness[request.id], freshness.taskID == request.taskID,
+              freshness.digest == request.digest, now < freshness.deadline, approvalGeneration[request.taskID] == freshness.generation,
+              approvalRequests[request.id] == request, request.previewAvailable == true else { return false }
+        return true
     }
 
     public func loadTimeline(taskID: UUID) async throws -> [TimelineEvent] {
@@ -212,9 +278,98 @@ public final class ServiceClient: ObservableObject {
         }
     }
 
-    public func approve(_ request: ApprovalRequest) async throws { try await approve(requestID: request.id, digest: request.digest) }
+    var experimentalClickApprovalAvailable: Bool {
+        if experimentalClickApprovalForTesting != nil { return true }
+        #if JARVIS_SAFARI_CLICK_EXPERIMENT && (JARVIS_SAFARI_EXPERIMENT_BUILD || JARVIS_COMBINED_EXPERIMENT)
+        guard AppStorageNamespace.isTrueBoolean(Bundle.main.object(forInfoDictionaryKey: "JarvisSafariClickExperiment")) else { return false }
+        #if JARVIS_COMBINED_EXPERIMENT
+        return CombinedExperimentAccess.current
+        #else
+        return Bundle.main.bundleIdentifier == "local.jarvis.safari-click-experiment" &&
+            AppStorageNamespace.isTrueBoolean(Bundle.main.object(forInfoDictionaryKey: "JarvisSafariExperiment"))
+        #endif
+        #else
+        return false
+        #endif
+    }
+    #if JARVIS_SAFARI_CLICK_EXPERIMENT && (JARVIS_SAFARI_EXPERIMENT_BUILD || JARVIS_COMBINED_EXPERIMENT)
+    func submitExperimentalSafariClick(taskID: UUID, role: String, title: String) async throws -> ToolRequest {
+        guard experimentalClickApprovalAvailable else { throw ServiceClientError.unavailable }
+        var request = URLRequest(url: baseURL.appendingPathComponent("tasks/\(taskID.uuidString)/safari-click"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(["role": role, "title": title])
+        do {
+            let (data, response) = try await send(request)
+            try Self.validate(response: response, data: data)
+            let result = try Self.decoder.decode(ToolRequest.self, from: data)
+            _ = try? await refresh()
+            _ = try? await loadApprovalRequests(taskID: taskID)
+            return result
+        } catch let error as ServiceClientError { actionError = error.localizedDescription; throw error }
+        catch { actionError = ServiceClientError.unavailable.localizedDescription; throw ServiceClientError.unavailable }
+    }
+    #endif
+
+    public func approve(_ request: ApprovalRequest) async throws {
+        if request.kind == "safari_click_experiment" {
+            let unknownMessage = "操作结果可能未知，请先检查页面，切勿自动重试。"
+            if failedExperimentalApprovals.contains(request.id) { actionError = unknownMessage; throw ServiceClientError.unavailable }
+            if !experimentalApprovalCapacityAvailable { actionError = "未知结果记录已达上限，请先核实此前操作；当前会话暂停新的实验审批。"; throw ServiceClientError.unavailable }
+            var handlerInvoked = false
+            do {
+                guard isApprovalFresh(request), !request.digest.isEmpty, experimentalClickApprovalAvailable else { throw ServiceClientError.unavailable }
+                if let refresh = experimentalClickRefreshForTesting {
+                    let generation = beginApprovalRefresh(taskID: request.taskID)
+                    let requests = try await refresh(request.taskID)
+                    try Task.checkCancellation()
+                    commitApprovalRefresh(requests, taskID: request.taskID, generation: generation)
+                } else { _ = try await loadApprovalRequests(taskID: request.taskID) }
+                try Task.checkCancellation()
+                guard isApprovalFresh(request), experimentalApprovalCapacityAvailable else { throw ServiceClientError.unavailable }
+                inFlightExperimentalApprovals.insert(request.id)
+                defer { inFlightExperimentalApprovals.remove(request.id) }
+                beginApprovalMutation(taskID: request.taskID)
+                defer { endApprovalMutation(taskID: request.taskID) }
+                try Task.checkCancellation()
+                handlerInvoked = true
+                if let handler = experimentalClickApprovalForTesting {
+                    try await handler(request)
+                } else {
+                    #if JARVIS_SAFARI_CLICK_EXPERIMENT && (JARVIS_SAFARI_EXPERIMENT_BUILD || JARVIS_COMBINED_EXPERIMENT)
+                    try await mutate(path: "/requests/\(request.id.uuidString)/safari-click-approve", body: ["digest": request.digest])
+                    _ = try await loadApprovalRequests(taskID: request.taskID)
+                    #else
+                    throw ServiceClientError.unavailable
+                    #endif
+                }
+                try Task.checkCancellation()
+                actionError = nil
+                return
+            } catch is CancellationError {
+                beginApprovalRefresh(taskID: request.taskID)
+                if handlerInvoked { failedExperimentalApprovals.insert(request.id); actionError = unknownMessage }
+                throw CancellationError()
+            } catch let error as ServiceClientError {
+                if handlerInvoked { failedExperimentalApprovals.insert(request.id) }
+                if case let .http(_, message) = error,
+                   message == "已有点击正在进行或结果未确认，请等待或核对页面和实验记录；当前版本没有解除入口。" {
+                    actionError = message
+                } else { actionError = handlerInvoked ? unknownMessage : error.localizedDescription }
+                throw error
+            } catch {
+                if handlerInvoked { failedExperimentalApprovals.insert(request.id) }
+                actionError = handlerInvoked ? unknownMessage : ServiceClientError.unavailable.localizedDescription
+                throw ServiceClientError.unavailable
+            }
+        }
+        try await approve(requestID: request.id, digest: request.digest)
+    }
 
     public func reject(requestID: UUID) async throws {
+        let taskID = approvalRequests[requestID]?.taskID
+        if let taskID { beginApprovalMutation(taskID: taskID) }
+        defer { if let taskID { endApprovalMutation(taskID: taskID) } }
         do {
             try await mutate(path: "/requests/\(requestID.uuidString)/reject")
             try await refresh()
@@ -231,6 +386,8 @@ public final class ServiceClient: ObservableObject {
     public func reject(_ request: ApprovalRequest) async throws { try await reject(requestID: request.id) }
 
     public func cancel(taskID: UUID) async throws {
+        beginApprovalMutation(taskID: taskID)
+        defer { endApprovalMutation(taskID: taskID) }
         do {
             try await mutate(path: "/tasks/\(taskID.uuidString)/cancel")
             try await refresh()
@@ -307,7 +464,7 @@ public final class ServiceClient: ObservableObject {
             urlRequest.httpMethod = "POST"
             urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
             urlRequest.httpBody = try JSONEncoder().encode(request)
-            let (data, response) = try await session.data(for: urlRequest)
+            let (data, response) = try await send(urlRequest)
             try Self.validate(response: response, data: data)
             // After submitting, refresh tasks + approval metadata so the
             // task-detail window opened by the caller sees the new request.
@@ -355,7 +512,7 @@ public final class ServiceClient: ObservableObject {
             urlRequest.httpMethod = "POST"
             urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
             urlRequest.httpBody = try JSONEncoder().encode(request)
-            let (data, response) = try await session.data(for: urlRequest)
+            let (data, response) = try await send(urlRequest)
             try Self.validate(response: response, data: data)
             _ = try await refresh()
             _ = try await loadApprovalRequests(taskID: taskID)
@@ -406,7 +563,7 @@ public final class ServiceClient: ObservableObject {
             urlRequest.httpMethod = "POST"
             urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
             urlRequest.httpBody = try JSONEncoder().encode(request)
-            let (data, response) = try await session.data(for: urlRequest)
+            let (data, response) = try await send(urlRequest)
             try Self.validate(response: response, data: data)
             _ = try await refresh()
             _ = try await loadApprovalRequests(taskID: taskID)
@@ -462,7 +619,7 @@ public final class ServiceClient: ObservableObject {
             urlRequest.httpMethod = "POST"
             urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
             urlRequest.httpBody = try JSONEncoder().encode(request)
-            let (data, response) = try await session.data(for: urlRequest)
+            let (data, response) = try await send(urlRequest)
             try Self.validate(response: response, data: data)
             _ = try await refresh()
             _ = try await loadApprovalRequests(taskID: taskID)
@@ -490,7 +647,7 @@ public final class ServiceClient: ObservableObject {
             appropriateFor: nil,
             create: false
         )) ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        return appSupport.appendingPathComponent("Jarvis/screenshots", isDirectory: true)
+        return appSupport.appendingPathComponent(AppStorageScope.currentDirectory, isDirectory: true).appendingPathComponent("screenshots", isDirectory: true)
     }
 
     private func mutate(path: String, body: [String: String]? = nil) async throws {
@@ -499,17 +656,26 @@ public final class ServiceClient: ObservableObject {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let body { request.httpBody = try JSONEncoder().encode(body) }
         do {
-            let (data, response) = try await session.data(for: request)
+            let (data, response) = try await send(request)
             try Self.validate(response: response, data: data)
         } catch let error as ServiceClientError { throw error }
         catch { throw ServiceClientError.unavailable }
+    }
+
+    private func send(_ original: URLRequest) async throws -> (Data, URLResponse) {
+        var request = original
+        if let authorizationToken {
+            guard let url = request.url, url.scheme?.lowercased() == "http", url.host == "127.0.0.1", url.user == nil, url.password == nil else { throw ServiceClientError.unavailable }
+            request.setValue("Bearer \(authorizationToken)", forHTTPHeaderField: "Authorization")
+        }
+        return try await session.data(for: request, delegate: LoopbackNoRedirectDelegate.shared)
     }
 
     private func request(path: String, method: String) async throws -> (Data, HTTPURLResponse) {
         var request = URLRequest(url: baseURL.appendingPathComponent(path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))))
         request.httpMethod = method
         do {
-            let (data, response) = try await session.data(for: request)
+            let (data, response) = try await send(request)
             try Self.validate(response: response, data: data)
             guard let http = response as? HTTPURLResponse else { throw ServiceClientError.invalidResponse }
             return (data, http)
@@ -553,5 +719,13 @@ public final class ServiceClient: ObservableObject {
 
     public static func decodeAPIError(_ data: Data, decoder: JSONDecoder = JSONDecoder()) throws -> APIError {
         do { return try decoder.decode(APIError.self, from: data) } catch { throw ServiceClientError.decoding }
+    }
+}
+
+/// Do not forward the in-memory bearer token through HTTP redirects.
+final class LoopbackNoRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    static let shared = LoopbackNoRedirectDelegate()
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+        completionHandler(nil)
     }
 }

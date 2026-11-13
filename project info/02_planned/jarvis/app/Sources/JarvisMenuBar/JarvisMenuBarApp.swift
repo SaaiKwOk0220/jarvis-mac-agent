@@ -15,9 +15,53 @@ struct JarvisMenuBarApp: App {
     private let instanceLock: SingleInstanceLock
 
     init() {
+        #if JARVIS_COMBINED_EXPERIMENT
+        guard CombinedExperimentAccess.current else {
+            FileHandle.standardError.write(Data("Invalid combined experimental identity.\n".utf8)); exit(EXIT_FAILURE)
+        }
+        #endif
+        do {
+            try VADBuildAccess.validateStartup(
+                experimentalBuild: VADBuildAccess.experimentalBuild,
+                bundleID: Bundle.main.bundleIdentifier,
+                isolation: Bundle.main.object(forInfoDictionaryKey: "JarvisExperimentalIsolation") as? Bool == true
+            )
+        } catch {
+            FileHandle.standardError.write(Data("实验构建身份或数据隔离配置无效，已停止启动。\n".utf8))
+            exit(EXIT_FAILURE)
+        }
+        #if JARVIS_SAFARI_EXPERIMENT_BUILD && !JARVIS_SAFARI_CLICK_EXPERIMENT
+        guard Bundle.main.bundleIdentifier == "local.jarvis.safari-experiment",
+              Bundle.main.object(forInfoDictionaryKey: "JarvisSafariExperiment") as? Bool == true else {
+            FileHandle.standardError.write(Data("Invalid experimental bundle identity.\n".utf8))
+            exit(EXIT_FAILURE)
+        }
+        #endif
+        #if JARVIS_EXACT_BROWSER_EXPERIMENT
+        guard Bundle.main.bundleIdentifier == ExactBrowserExperiment.bundleID,
+              Bundle.main.object(forInfoDictionaryKey: "JarvisBrowserExperiment") as? Bool == true else {
+            FileHandle.standardError.write(Data("Invalid experimental bundle identity.\n".utf8)); exit(EXIT_FAILURE)
+        }
+        #endif
+        #if JARVIS_SAFARI_CLICK_EXPERIMENT
+        #if JARVIS_COMBINED_EXPERIMENT
+        guard CombinedExperimentAccess.current,
+              AppStorageNamespace.isTrueBoolean(Bundle.main.object(forInfoDictionaryKey: "JarvisSafariClickExperiment")) else {
+            FileHandle.standardError.write(Data("Invalid combined click identity.\n".utf8)); exit(EXIT_FAILURE)
+        }
+        #elseif JARVIS_SAFARI_EXPERIMENT_BUILD
+        guard Bundle.main.bundleIdentifier == "local.jarvis.safari-click-experiment",
+              AppStorageNamespace.isTrueBoolean(Bundle.main.object(forInfoDictionaryKey: "JarvisSafariExperiment")),
+              AppStorageNamespace.isTrueBoolean(Bundle.main.object(forInfoDictionaryKey: "JarvisSafariClickExperiment")) else {
+            FileHandle.standardError.write(Data("Invalid click experiment identity.\n".utf8)); exit(EXIT_FAILURE)
+        }
+        #else
+        FileHandle.standardError.write(Data("Click experiment requires an isolated build.\n".utf8)); exit(EXIT_FAILURE)
+        #endif
+        #endif
         do { instanceLock = try SingleInstanceLock() }
         catch {
-            let message = "Jarvis is already running, or its instance lock is unavailable. Close older Jarvis instances and try again."
+            let message = StartupFailure.message(for: error)
             FileHandle.standardError.write(Data("\(message)\n".utf8))
             let alert = NSAlert()
             alert.messageText = "Jarvis could not start"
@@ -32,7 +76,30 @@ struct JarvisMenuBarApp: App {
         registerGlobalHotkey()
     }
 
+    private var askView: some View {
+        AskJarvisView(client: client, service: runtime.taskService,
+                      voiceDraftStore: runtime.voiceDraftStore,
+                      memoryContextProvider: runtime.memoryContextProvider)
+            .frame(minWidth: 520, minHeight: 460)
+    }
+
     var body: some Scene {
+        #if JARVIS_SAFARI_EXPERIMENT_BUILD || JARVIS_COMBINED_EXPERIMENT
+        Window("Ask Jarvis", id: "ask-jarvis") { askView }
+            .defaultSize(width: 620, height: 560)
+        #endif
+        #if JARVIS_SAFARI_CLICK_EXPERIMENT && (JARVIS_SAFARI_EXPERIMENT_BUILD || JARVIS_COMBINED_EXPERIMENT)
+        Window("Safari 点击实验", id: "safari-click-mode") {
+            if let service = runtime.clickModeService {
+                SafariClickModeView(service: service).frame(minWidth: 500, minHeight: 260)
+            } else { Text("实验服务不可用") }
+        }
+        .defaultSize(width: 560, height: 320)
+        Window("请求 Safari 点击", id: "safari-click-request") {
+            SafariClickRequestView(client: client).frame(minWidth: 500, minHeight: 300)
+        }
+        .defaultSize(width: 560, height: 360)
+        #endif
         Window("Welcome to Jarvis", id: "welcome") {
             WelcomeView()
                 .frame(minWidth: 540, minHeight: 460)
@@ -68,15 +135,10 @@ struct JarvisMenuBarApp: App {
                 .frame(minWidth: 420, minHeight: 360)
         }
         .defaultSize(width: 520, height: 460)
-        Window("Ask Jarvis", id: "ask-jarvis") {
-            AskJarvisView(
-                client: client,
-                service: runtime.taskService,
-                memoryContextProvider: runtime.memoryContextProvider
-            )
-            .frame(minWidth: 520, minHeight: 460)
-        }
-        .defaultSize(width: 620, height: 560)
+        #if !JARVIS_SAFARI_EXPERIMENT_BUILD && !JARVIS_COMBINED_EXPERIMENT
+        Window("Ask Jarvis", id: "ask-jarvis") { askView }
+            .defaultSize(width: 620, height: 560)
+        #endif
         Window("Memory", id: "memory") {
             if let memory = runtime.memory {
                 MemoryView(memory: memory)
@@ -87,6 +149,14 @@ struct JarvisMenuBarApp: App {
             }
         }
         .defaultSize(width: 540, height: 500)
+        Window("图片理解实验", id: "vision-image") {
+            VisionImageView().frame(minWidth: 500, minHeight: 440)
+        }
+        .defaultSize(width: 600, height: 560)
+        Window("Safari 窗口理解实验", id: "vision-safari-window") {
+            SafariWindowVisionView().frame(minWidth: 500, minHeight: 440)
+        }
+        .defaultSize(width: 600, height: 560)
     }
 }
 
@@ -100,6 +170,10 @@ private final class Runtime {
     /// to `TaskServiceToolRunner`; both paths end up at this one service, so
     /// the agent loop is bound by the same policy gate as every other task.
     private(set) var taskService: (any TaskServiceAPI)?
+    private(set) var voiceDraftStore: VoiceDraftStore?
+    #if JARVIS_SAFARI_CLICK_EXPERIMENT && (JARVIS_SAFARI_EXPERIMENT_BUILD || JARVIS_COMBINED_EXPERIMENT)
+    private(set) var clickModeService: TaskService?
+    #endif
 
     /// The user's memory store, or `nil` when initialisation failed. The
     /// "Memory" window shows an unavailable message in that case, and the
@@ -108,14 +182,23 @@ private final class Runtime {
 
     init(client: ServiceClient) {
         do {
-            let appSupport = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
-                appropriateFor: nil, create: true).appendingPathComponent("Jarvis", isDirectory: true)
-            try FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true)
+            let supportParent = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                appropriateFor: nil, create: true)
+            let appSupport = try PrivateAppStorage.prepare(parent: supportParent, directoryName: AppStorageScope.currentDirectory)
             let database = try Database(path: appSupport.appendingPathComponent("jarvis.sqlite").path)
             try database.migrate()
+            self.voiceDraftStore = try VoiceDraftStore(database: database)
             self.memory = try SQLiteMemoryStore(database: database)
+            // QA-only, process-scoped opt-in; unavailable by default.
+            #if JARVIS_COMBINED_EXPERIMENT
+            let safariReadEnabled = false
+            let allowSafariReadToggle = CombinedExperimentAccess.current
+            #else
+            let safariReadEnabled = AppStorageNamespace.safariReadEnabledInCurrentBuild(bundleID: Bundle.main.bundleIdentifier, flag: ProcessInfo.processInfo.environment["JARVIS_EXPERIMENTAL_SAFARI_READ"])
+            let allowSafariReadToggle = false
+            #endif
             let service = try TaskService(taskRepository: SQLiteTaskRepository(database: database),
-                auditRepository: SQLiteAuditRepository(database: database), policy: Policy(),
+                auditRepository: SQLiteAuditRepository(database: database), policy: Policy(allowSafariRead: safariReadEnabled || allowSafariReadToggle),
                 policyConfig: PolicyConfig(
                     approvedDirectories: [appSupport.path],
                     commandNames: ["shell", "swift", "xcodebuild"],
@@ -131,18 +214,30 @@ private final class Runtime {
                 terminal: TerminalToolExecutor(),
                 webFetch: WebFetchToolExecutor(),
                 screenshot: ScreenshotToolExecutor(),
-                accessibility: AccessibilityQueryToolExecutor())
+                accessibility: AccessibilityQueryToolExecutor(),
+                browserOpen: BrowserOpenExecutor(),
+                enableSafariRead: safariReadEnabled, exactBrowserEnabled: false, allowSafariReadToggle: allowSafariReadToggle, allowExactBrowserToggle: ExactBrowserExperiment.toggleAllowed)
             self.taskService = service
+            #if JARVIS_SAFARI_CLICK_EXPERIMENT && (JARVIS_SAFARI_EXPERIMENT_BUILD || JARVIS_COMBINED_EXPERIMENT)
+            self.clickModeService = service
+            #endif
             let server = LoopbackServer(service: service)
             self.server = server
             Task { @MainActor in
-                if let port = try? await server.start() {
-                    client.configure(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+                if let token = server.authorizationToken, let port = try? await server.start() {
+                    client.configure(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: token)
                     _ = try? await client.refresh()
                 }
             }
         } catch {
-            // The UI remains available and reports an unavailable service if setup fails.
+            let message = StartupFailure.message(for: error)
+            Task { @MainActor in
+                let alert = NSAlert()
+                alert.messageText = "无法安全打开 Jarvis 数据"
+                alert.informativeText = message
+                alert.alertStyle = .warning
+                alert.runModal()
+            }
         }
     }
 

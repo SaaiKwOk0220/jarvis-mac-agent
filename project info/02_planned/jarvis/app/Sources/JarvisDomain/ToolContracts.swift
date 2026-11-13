@@ -146,6 +146,29 @@ public protocol TaskServiceAPI: Sendable {
     func complete(taskID: UUID) async throws
     func listPendingApprovalRequests(taskID: UUID) async throws -> [PendingApprovalRequest]
     func listTimelineEvents(taskID: UUID) async throws -> [TimelineEvent]
+    func takeEphemeralToolResult(taskID: UUID, requestID: UUID, digest: String) async throws -> String?
+    func prepareSafariRead(taskID: UUID) async throws -> ToolRequest
+    func isSafariReadAvailable() async -> Bool
+    func isExactBrowserEnabled() -> Bool
+    func setExactBrowserEnabled(_ enabled: Bool) throws
+    func isSafariReadEnabled() -> Bool
+    func setSafariReadEnabled(_ enabled: Bool) throws
+    func isExperimentalSafariClickEnabled() -> Bool
+    func submitExperimentalSafariClick(taskID: UUID, role: String, title: String) async throws -> ToolRequest
+}
+
+public enum TaskServiceCapabilityError: Error { case unavailable }
+
+public extension TaskServiceAPI {
+    func isExactBrowserEnabled() -> Bool { false }
+    func setExactBrowserEnabled(_ enabled: Bool) throws { throw TaskServiceCapabilityError.unavailable }
+    func isSafariReadAvailable() async -> Bool { false }
+    func isSafariReadEnabled() -> Bool { false }
+    func setSafariReadEnabled(_ enabled: Bool) throws { throw TaskServiceCapabilityError.unavailable }
+    func prepareSafariRead(taskID: UUID) async throws -> ToolRequest { throw TaskServiceCapabilityError.unavailable }
+    func isExperimentalSafariClickEnabled() -> Bool { false }
+    func submitExperimentalSafariClick(taskID: UUID, role: String, title: String) async throws -> ToolRequest { throw TaskServiceCapabilityError.unavailable }
+    func takeEphemeralToolResult(taskID: UUID, requestID: UUID, digest: String) async throws -> String? { nil }
 }
 
 /// Outcome returned by `TaskServiceAPI.submit(request:)`. Declared in
@@ -165,9 +188,11 @@ public struct PendingApprovalRequest: Codable, Equatable, Sendable, Identifiable
     public let target: String
     public let payload: String
     public let digest: String
+    public let kind: String?
+    public let previewAvailable: Bool?
 
-    public init(id: UUID, taskID: UUID, reason: String, target: String, payload: String, digest: String) {
-        self.id = id; self.taskID = taskID; self.reason = reason; self.target = target; self.payload = payload; self.digest = digest
+    public init(id: UUID, taskID: UUID, reason: String, target: String, payload: String, digest: String, kind: String? = nil, previewAvailable: Bool? = nil) {
+        self.id = id; self.taskID = taskID; self.reason = reason; self.target = target; self.payload = payload; self.digest = digest; self.kind = kind; self.previewAvailable = previewAvailable
     }
 }
 
@@ -182,11 +207,12 @@ public struct TimelineEvent: Codable, Equatable, Sendable, Identifiable {
     public let summary: String
     public let result: String
     public let approvalID: UUID?
+    public let requestID: UUID?
 
     public init(id: UUID, timestamp: Date, worker: String, target: String, sideEffect: SideEffect,
-                actionDigest: String, summary: String, result: String, approvalID: UUID?) {
+                actionDigest: String, summary: String, result: String, approvalID: UUID?, requestID: UUID? = nil) {
         self.id = id; self.timestamp = timestamp; self.worker = worker; self.target = target
         self.sideEffect = sideEffect; self.actionDigest = actionDigest; self.summary = summary
-        self.result = result; self.approvalID = approvalID
+        self.result = result; self.approvalID = approvalID; self.requestID = requestID
     }
 }

@@ -52,6 +52,7 @@ public struct AgentSession: Sendable {
     /// `onEvent`; this session emits the same events plus nothing new.
     public func run(
         goal: String,
+        history: [LLMMessage] = [],
         onEvent: (@Sendable (AgentLoopEvent) -> Void)? = nil
     ) async throws -> AgentLoopResult {
         var messages: [LLMMessage] = [
@@ -63,6 +64,11 @@ public struct AgentSession: Sendable {
                 messages.append(LLMMessage(role: .system, content: context))
             }
         }
+        // Prior dialogue is ordinary conversation, never a tool execution or
+        // an authorization. Reject privileged roles and old tool-call payloads.
+        messages.append(contentsOf: history.suffix(10).filter {
+            ($0.role == .user || $0.role == .assistant) && $0.toolCalls == nil && $0.toolCallID == nil && !$0.content.isEmpty
+        })
         messages.append(LLMMessage(role: .user, content: goal))
 
         for _ in 0..<maxIterations {
@@ -98,6 +104,9 @@ public struct AgentSession: Sendable {
                         messages.append(LLMMessage(role: .tool, content: observation, toolCallID: call.id))
                     case .rejected(let reason):
                         onEvent?(.toolCallDenied(name: call.name, reason: reason))
+                        // A refused computer action ends this run: feeding it
+                        // back to the model could cause an automatic retry.
+                        if call.name == "safari_click" { return .failed(reason: "Safari click was rejected: \(reason)") }
                         messages.append(LLMMessage(role: .tool, content: "denied: \(reason)", toolCallID: call.id))
                     case .failed(let reason):
                         return .failed(reason: reason)
@@ -109,6 +118,7 @@ public struct AgentSession: Sendable {
 
                 case .denied(let reason):
                     onEvent?(.toolCallDenied(name: call.name, reason: reason))
+                    if call.name == "safari_click" { return .failed(reason: reason) }
                     messages.append(LLMMessage(role: .tool, content: "denied: \(reason)", toolCallID: call.id))
                 }
             }

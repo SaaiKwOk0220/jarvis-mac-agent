@@ -40,7 +40,10 @@ public struct OllamaProvider: LLMProvider {
         do {
             (data, response) = try await session.data(for: request)
         } catch {
-            throw LLMError.unavailable(String(describing: error))
+            if error is CancellationError || (error as? URLError)?.code == .cancelled || Task.isCancelled {
+                throw CancellationError()
+            }
+            throw LLMError.ollamaUnavailable(String(describing: error))
         }
 
         guard let http = response as? HTTPURLResponse else {

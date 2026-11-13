@@ -84,6 +84,35 @@ public final class Database: @unchecked Sendable {
             try database.execute(sql: "CREATE UNIQUE INDEX IF NOT EXISTS audit_events_event_order ON audit_events(event_order)")
         }
 
+        migrator.registerMigration("link audit events to tool requests") { database in
+            let columns = Set(try database.columns(in: "audit_events").map(\.name))
+            if !columns.contains("request_id") {
+                try database.alter(table: "audit_events") { $0.add(column: "request_id", .text) }
+            }
+        }
+
+        // An approval may already have caused a click even if its result could
+        // not be persisted. Never clear this barrier merely because of restart.
+        migrator.registerMigration("persist experimental click barriers") { database in
+            try database.execute(sql: "CREATE TABLE IF NOT EXISTS experimental_click_barriers (request_id TEXT PRIMARY KEY NOT NULL)")
+            // Conservatively import pre-barrier approved clicks that lack a
+            // confirmed completed state, including cancelled/failed requests.
+            try database.execute(sql: """
+                INSERT OR IGNORE INTO experimental_click_barriers (request_id)
+                SELECT DISTINCT r.id FROM tool_requests r JOIN approvals a ON a.tool_request_id = r.id
+                WHERE r.name = 'safari_click_experiment' AND a.decision = 'approved' AND r.status <> 'completed'
+                """)
+        }
+        // A started URL open can have an unknown outcome after a crash or database failure.
+        migrator.registerMigration("persist exact browser barriers") { database in
+            try database.execute(sql: "CREATE TABLE IF NOT EXISTS exact_browser_barriers (request_id TEXT PRIMARY KEY NOT NULL)")
+            try database.execute(sql: """
+                INSERT OR IGNORE INTO exact_browser_barriers (request_id)
+                SELECT DISTINCT r.id FROM tool_requests r JOIN approvals a ON a.tool_request_id = r.id
+                WHERE r.name = 'browser_open' AND r.payload LIKE 'ticket:%'
+                  AND a.decision = 'approved' AND r.status <> 'completed'
+                """)
+        }
         try migrator.migrate(queue)
     }
 

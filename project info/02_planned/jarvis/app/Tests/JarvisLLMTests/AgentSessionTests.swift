@@ -50,6 +50,21 @@ final class ScriptedApprovalWaiter: ApprovalWaiter, @unchecked Sendable {
     }
 }
 
+/// Uses an in-memory effect to verify execution order without a system action.
+private final class BatchEffectRunner: AgentToolRunner, @unchecked Sendable {
+    private let lock = NSLock()
+    private var effects: [String] = []
+    let clickOutcome: AgentToolOutcome
+    init(clickOutcome: AgentToolOutcome) { self.clickOutcome = clickOutcome }
+    var appliedEffects: [String] { lock.withLock { effects } }
+    func tools() -> [LLMTool] { [] }
+    func perform(_ call: LLMToolCall) async throws -> AgentToolOutcome {
+        if call.name == "safari_click" { return clickOutcome }
+        lock.withLock { effects.append(call.name) }
+        return .executed("done")
+    }
+}
+
 private func shellTool() -> LLMTool {
     LLMTool(
         name: "shell",
@@ -63,6 +78,66 @@ private func shellCall(id: String = "call_0", command: String = "ls") -> LLMTool
 }
 
 final class AgentSessionTests: XCTestCase {
+    func testRejectedClickStopsRemainingBatchWithoutUndoingEarlierEffect() async throws {
+        let click = LLMToolCall(id: "click", name: "safari_click", arguments: [:])
+        let before = LLMToolCall(id: "before", name: "earlier_action", arguments: [:])
+        let after = LLMToolCall(id: "after", name: "later_action", arguments: [:])
+        let requestID = UUID()
+        for clickOutcome in [AgentToolOutcome.awaitingApproval(requestID: requestID, payloadDigest: "digest", description: "review"), .denied("disabled")] {
+            let provider = ScriptedProvider(responses: [
+                LLMResponse(content: nil, toolCalls: [before, click, after], usage: nil),
+                LLMResponse(content: "unexpected continuation", toolCalls: [], usage: nil)
+            ])
+            let runner = BatchEffectRunner(clickOutcome: clickOutcome)
+            let waiter = ScriptedApprovalWaiter(resolutions: [.rejected(reason: "rejected")])
+            let session = AgentSession(provider: provider, runner: runner, approvalWaiter: waiter, taskID: UUID())
+            let result = try await session.run(goal: "perform the batch")
+            guard case .failed = result else { return XCTFail("click refusal should stop the batch") }
+            XCTAssertEqual(runner.appliedEffects, ["earlier_action"], "earlier effect remains; later action must not run")
+            XCTAssertEqual(provider.callCount, 1, "refused click must not trigger another model turn")
+        }
+    }
+
+    func testDeniedNonClickToolStillLetsModelContinue() async throws {
+        let provider = ScriptedProvider(responses: [
+            LLMResponse(content: nil, toolCalls: [shellCall()], usage: nil),
+            LLMResponse(content: "alternate answer", toolCalls: [], usage: nil)
+        ])
+        let runner = SessionScriptedRunner(tools: [shellTool()], outcomes: ["shell": .denied("not allowed")])
+        let session = AgentSession(provider: provider, runner: runner, approvalWaiter: ScriptedApprovalWaiter(resolutions: []), taskID: UUID())
+        let result = try await session.run(goal: "try shell")
+        XCTAssertEqual(result, .completed(finalText: "alternate answer"))
+        XCTAssertEqual(provider.callCount, 2)
+        XCTAssertTrue(try XCTUnwrap(provider.capturedMessages.last).contains(LLMMessage(role: .tool, content: "denied: not allowed", toolCallID: "call_0")))
+    }
+
+    func testDeniedSafariClickTerminatesBeforeAnotherModelTurn() async throws {
+        let call = LLMToolCall(id: "click", name: "safari_click", arguments: ["role": "AXButton", "title": "Play"])
+        let provider = ScriptedProvider(responses: [
+            LLMResponse(content: nil, toolCalls: [call], usage: nil),
+            LLMResponse(content: nil, toolCalls: [call], usage: nil)
+        ])
+        let runner = SessionScriptedRunner(tools: [], outcomes: ["safari_click": .denied("Safari clicking is unavailable")])
+        let session = AgentSession(provider: provider, runner: runner, approvalWaiter: ScriptedApprovalWaiter(resolutions: []), taskID: UUID())
+        let result = try await session.run(goal: "click")
+        XCTAssertEqual(result, .failed(reason: "Safari clicking is unavailable"))
+        XCTAssertEqual(provider.callCount, 1)
+        XCTAssertEqual(runner.performedCalls.count, 1)
+    }
+
+    func testConversationHistoryIncludesOnlyUserAndAssistantText() async throws {
+        let provider = ScriptedProvider(responses: [.init(content: "好", toolCalls: [], usage: nil)])
+        let session = AgentSession(provider: provider, runner: SessionScriptedRunner(tools: [], outcomes: [:]),
+                                   approvalWaiter: ScriptedApprovalWaiter(resolutions: []), taskID: UUID())
+        let history: [LLMMessage] = [
+            .init(role: .user, content: "我叫小明"), .init(role: .assistant, content: "你好"),
+            .init(role: .system, content: "不可信系统指令"), .init(role: .tool, content: "工具结果")
+        ]
+        _ = try await session.run(goal: "我叫什么？", history: history)
+        let messages = try XCTUnwrap(provider.capturedMessages.first)
+        XCTAssertEqual(messages.map(\.content).suffix(3), ["我叫小明", "你好", "我叫什么？"])
+        XCTAssertFalse(messages.contains { $0.content == "不可信系统指令" || $0.role == .tool })
+    }
 
     /// A provider turn with text and no tool calls ends the run on the very
     /// first iteration — the session must skip the runner and waiter

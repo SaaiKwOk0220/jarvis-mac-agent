@@ -6,11 +6,7 @@ struct ApprovalView: View {
     let task: JarvisTask
     @State private var submittingRequestID: UUID?
 
-    /// All pending approvals for this task, ordered by submission time so the
-    /// UI is stable across re-renders. PR #10 lets a single task hold several
-    /// pendings at once; the previous view resolved to a single object via
-    /// `client.approvalRequests[task.id]` and silently dropped every request
-    /// except the last one.
+    /// All requests for this task, ordered by ID for a stable presentation.
     private var pendingRequests: [ApprovalRequest] {
         client.approvalRequests.values
             .filter { $0.taskID == task.id }
@@ -29,16 +25,52 @@ struct ApprovalView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     GroupBox("Digest-bound preview") {
                         VStack(alignment: .leading, spacing: 6) {
-                            LabeledContent("Reason", value: request.reason)
-                            LabeledContent("Target", value: request.target)
+                            if isExperimentalClick(request) {
+                                Text(request.reason).font(.caption).fixedSize(horizontal: false, vertical: true)
+                                Text("完整网址与目标（可滚动查看；可能包含敏感参数）。批准后请在 15 秒内切回原 Safari 窗口。")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                ScrollView([.horizontal, .vertical]) {
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        Text(request.target).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                                        Text(request.payload).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                                    }.font(.system(.caption, design: .monospaced)).frame(maxWidth: .infinity, alignment: .leading)
+                                }.frame(minHeight: 90, maxHeight: 220)
+                            } else if isSafariRead(request) {
+                                Text(request.reason).font(.caption).fixedSize(horizontal: false, vertical: true)
+                                Text("Full captured URL (scroll to inspect; may contain sensitive values)")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                ScrollView([.horizontal, .vertical]) {
+                                    Text(request.target)
+                                        .font(.system(.caption, design: .monospaced))
+                                        .textSelection(.enabled)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }.frame(maxHeight: 100)
+                            } else if request.payload.hasPrefix("ticket:") {
+                                Text("完整目标网址（可能包含敏感信息，请滚动核对）").font(.caption)
+                                ScrollView { Text(request.target).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+                                    .frame(minHeight: 44, maxHeight: 120)
+                                Text("批准仅覆盖初始网址。浏览器可能重定向、运行脚本并发送网络请求；原始任务文字可能保存在本机。")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            } else {
+                                LabeledContent("Target", value: request.target)
+                            }
                             LabeledContent("Action digest", value: request.digest)
-                            Text(request.payload)
-                                .font(.system(.caption, design: .monospaced))
-                                .textSelection(.enabled)
-                                .lineLimit(5)
-                            Text("Approval is bound to this exact digest; changing the payload or target invalidates it.")
+                            if !isExperimentalClick(request) {
+                                Text(request.payload)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .textSelection(.enabled)
+                                    .lineLimit(5)
+                            }
+                            Text(isSafariRead(request)
+                                 ? "The request digest binds a one-time in-memory ticket to this captured URL and window. The full URL expires from the ticket after one minute."
+                                 : "Approval is bound to this exact digest; changing the payload or target invalidates it.")
                                 .font(.caption).foregroundStyle(.secondary)
                         }.frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    if isExperimentalClick(request) && client.experimentalClickCapacityReached {
+                        Text("未知结果记录已达上限，请先核实此前操作；当前会话暂停新的实验审批。")
+                            .font(.caption).foregroundStyle(.orange)
                     }
                     HStack {
                         Button("Reject", role: .destructive) {
@@ -46,16 +78,32 @@ struct ApprovalView: View {
                         }
                             .disabled(submittingRequestID != nil)
                         Spacer()
-                        Button("Approve") {
-                            submit(.approve, request: request)
+                        TimelineView(.periodic(from: .now, by: 1)) { _ in
+                            Button("Approve") {
+                                submit(.approve, request: request)
+                            }
+                            .disabled(submittingRequestID != nil || !ApprovalPresentation(request: request, clickHandlerAvailable: client.experimentalClickApprovalAvailable && client.isApprovalFresh(request)).canApprove || (isSafariRead(request) && !request.target.hasPrefix("https://")))
                         }
-                            .disabled(submittingRequestID != nil || request.digest.isEmpty)
                     }
                 }
             }
         }
         .onAppear { /* digest is read directly per-request now */ }
-        .onChange(of: client.approvalRequests) { _, _ in /* nothing to refresh */ }
+        .onChange(of: client.approvalRequests) { _, _ in /* digest is read from the current request */ }
+        .task {
+            while !Task.isCancelled {
+                if pendingRequests.contains(where: isExperimentalClick) {
+                    _ = try? await client.loadApprovalRequests(taskID: task.id)
+                }
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    private func isExperimentalClick(_ request: ApprovalRequest) -> Bool { request.kind == "safari_click_experiment" }
+
+    private func isSafariRead(_ request: ApprovalRequest) -> Bool {
+        request.payload == "Read accessibility text from this captured Safari window"
     }
 
     private enum Decision { case approve, reject }
@@ -75,5 +123,13 @@ struct ApprovalView: View {
                 // client.actionError already published by ServiceClient
             }
         }
+    }
+}
+struct ApprovalPresentation {
+    let usesScrollablePreview: Bool
+    let canApprove: Bool
+    init(request: ApprovalRequest, clickHandlerAvailable: Bool) {
+        usesScrollablePreview = request.kind == "safari_click_experiment"
+        canApprove = !request.digest.isEmpty && (!usesScrollablePreview || (request.previewAvailable == true && clickHandlerAvailable))
     }
 }

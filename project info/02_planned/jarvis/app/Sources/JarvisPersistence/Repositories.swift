@@ -13,6 +13,7 @@ public struct AuditEvent: Codable, Identifiable, Sendable, Equatable {
     public let summary: String
     public let result: String
     public let approvalID: UUID?
+    public let requestID: UUID?
 
     public init(
         id: UUID = UUID(),
@@ -24,7 +25,8 @@ public struct AuditEvent: Codable, Identifiable, Sendable, Equatable {
         actionDigest: String,
         summary: String,
         result: String,
-        approvalID: UUID?
+        approvalID: UUID?,
+        requestID: UUID? = nil
     ) {
         self.id = id
         self.timestamp = timestamp
@@ -36,6 +38,7 @@ public struct AuditEvent: Codable, Identifiable, Sendable, Equatable {
         self.summary = summary
         self.result = result
         self.approvalID = approvalID
+        self.requestID = requestID
     }
 }
 
@@ -215,6 +218,12 @@ public final class SQLiteToolRequestRepository: ToolRequestRepository, @unchecke
     }
 }
 
+public enum ExperimentalClickBarrierError: Error, Sendable { case unresolved }
+public enum ExactBrowserBarrierError: Error, LocalizedError, Sendable {
+    case unresolved
+    public var errorDescription: String? { "A previous browser open has an unresolved outcome. Check the browser and do not retry automatically." }
+}
+
 public final class SQLitePersistenceUnitOfWork: PersistenceUnitOfWork, @unchecked Sendable {
     public let database: Database
     public init(database: Database) { self.database = database }
@@ -245,6 +254,110 @@ public final class SQLitePersistenceUnitOfWork: PersistenceUnitOfWork, @unchecke
             try updateToolRequest(request.id, to: .executing, db: db)
             try insertApproval(approval, db: db)
             for audit in audits { try insertAudit(audit, db: db) }
+        }
+    }
+    public func hasExactBrowserBarrier() throws -> Bool {
+        try database.read { db in try Row.fetchOne(db, sql: "SELECT request_id FROM exact_browser_barriers LIMIT 1") != nil }
+    }
+
+    /// Insert a cross-instance barrier in the same transaction as the approval.
+    public func approveExactBrowser(_ request: ToolRequest, approval: Approval, taskStatus: TaskStatus, audits: [AuditEvent]) throws {
+        try database.write { db in
+            guard request.name == "browser_open", request.payload.hasPrefix("ticket:"), approval.decision == .approved,
+                  approval.toolRequestID == request.id, approval.actionDigest == request.payloadDigest else { throw PersistenceError.invalidStoredToolRequest }
+            guard try Row.fetchOne(db, sql: "SELECT request_id FROM exact_browser_barriers LIMIT 1") == nil else { throw ExactBrowserBarrierError.unresolved }
+            try ensureTaskStatus(request.taskID, in: Self.requestAcceptingTaskStatuses, db: db)
+            guard let row = try Row.fetchOne(db, sql: "SELECT task_id, status, payload_digest FROM tool_requests WHERE id = ?", arguments: [request.id.uuidString]),
+                  (row["task_id"] as String) == request.taskID.uuidString,
+                  (row["status"] as String) == ToolRequestStatus.pending.rawValue,
+                  (row["payload_digest"] as String) == request.payloadDigest else { throw PersistenceError.invalidStoredToolRequest }
+            try db.execute(sql: "INSERT INTO exact_browser_barriers (request_id) VALUES (?)", arguments: [request.id.uuidString])
+            try updateTask(request.taskID, to: taskStatus, db: db)
+            try updateToolRequest(request.id, to: .executing, db: db)
+            try insertApproval(approval, db: db)
+            for audit in audits { try insertAudit(audit, db: db) }
+        }
+    }
+
+    /// Caller must prove the open attempt did not start; cancellation remains terminal.
+    public func finishExactBrowserNotStarted(_ request: ToolRequest, taskStatus: TaskStatus, audits: [AuditEvent]) throws {
+        try database.write { db in
+            guard request.name == "browser_open", request.payload.hasPrefix("ticket:"),
+                  try Row.fetchOne(db, sql: "SELECT request_id FROM exact_browser_barriers WHERE request_id = ?", arguments: [request.id.uuidString]) != nil,
+                  let row = try Row.fetchOne(db, sql: "SELECT task_id, status, payload_digest FROM tool_requests WHERE id = ?", arguments: [request.id.uuidString]),
+                  (row["task_id"] as String) == request.taskID.uuidString,
+                  (row["payload_digest"] as String) == request.payloadDigest else { throw PersistenceError.invalidStoredToolRequest }
+            let status = row["status"] as String
+            guard status == ToolRequestStatus.executing.rawValue || status == ToolRequestStatus.cancelled.rawValue else { throw PersistenceError.invalidStoredToolRequest }
+            if status == ToolRequestStatus.executing.rawValue {
+                try updateToolRequest(request.id, to: .failed, db: db)
+                try updateTask(request.taskID, to: taskStatus, db: db)
+            }
+            for audit in audits { try insertAudit(audit, db: db) }
+            try db.execute(sql: "DELETE FROM exact_browser_barriers WHERE request_id = ?", arguments: [request.id.uuidString])
+        }
+    }
+
+    /// The barrier clears only in the same transaction as confirmed success.
+    public func finishExactBrowserCompleted(_ request: ToolRequest, taskStatus: TaskStatus, audits: [AuditEvent]) throws {
+        try database.write { db in
+            guard request.name == "browser_open", request.payload.hasPrefix("ticket:"),
+                  try Row.fetchOne(db, sql: "SELECT request_id FROM exact_browser_barriers WHERE request_id = ?", arguments: [request.id.uuidString]) != nil,
+                  let row = try Row.fetchOne(db, sql: "SELECT task_id, status, payload_digest FROM tool_requests WHERE id = ?", arguments: [request.id.uuidString]),
+                  (row["task_id"] as String) == request.taskID.uuidString,
+                  (row["status"] as String) == ToolRequestStatus.executing.rawValue,
+                  (row["payload_digest"] as String) == request.payloadDigest else { throw PersistenceError.invalidStoredToolRequest }
+            try updateToolRequest(request.id, to: .completed, db: db)
+            try updateTask(request.taskID, to: taskStatus, db: db)
+            for audit in audits { try insertAudit(audit, db: db) }
+            try db.execute(sql: "DELETE FROM exact_browser_barriers WHERE request_id = ?", arguments: [request.id.uuidString])
+        }
+    }
+    public func hasExperimentalClickBarrier() throws -> Bool {
+        try database.read { db in try Row.fetchOne(db, sql: "SELECT request_id FROM experimental_click_barriers LIMIT 1") != nil }
+    }
+    /// Check and create a durable cross-process barrier in the same transaction
+    /// that commits the approval, before any click can start.
+    public func approveExperimentalClick(_ request: ToolRequest, approval: Approval, taskStatus: TaskStatus, audits: [AuditEvent]) throws {
+        try database.write { db in
+            guard request.name == "safari_click_experiment", approval.decision == .approved,
+                  approval.toolRequestID == request.id, approval.actionDigest == request.payloadDigest else { throw PersistenceError.invalidStoredToolRequest }
+            let blocked = try Row.fetchOne(db, sql: "SELECT request_id FROM experimental_click_barriers LIMIT 1") != nil
+            guard !blocked else { throw ExperimentalClickBarrierError.unresolved }
+            try ensureTaskStatus(request.taskID, in: Self.requestAcceptingTaskStatuses, db: db)
+            guard let row = try Row.fetchOne(db, sql: "SELECT task_id, status, payload_digest FROM tool_requests WHERE id = ?", arguments: [request.id.uuidString]),
+                  (row["task_id"] as String) == request.taskID.uuidString,
+                  (row["status"] as String) == ToolRequestStatus.pending.rawValue,
+                  (row["payload_digest"] as String) == request.payloadDigest else { throw PersistenceError.invalidStoredToolRequest }
+            try db.execute(sql: "INSERT INTO experimental_click_barriers (request_id) VALUES (?)", arguments: [request.id.uuidString])
+            try updateTask(request.taskID, to: taskStatus, db: db)
+            try updateToolRequest(request.id, to: .executing, db: db)
+            try insertApproval(approval, db: db)
+            for audit in audits { try insertAudit(audit, db: db) }
+        }
+    }
+    /// Clear only when a confirmed successful click and its audit both commit.
+    public func finishExperimentalClickCompleted(_ request: ToolRequest, taskStatus: TaskStatus, audits: [AuditEvent]) throws {
+        try finishExperimentalClickConfirmed(request, status: .completed, taskStatus: taskStatus, audits: audits)
+    }
+    /// Caller must have an atomic gate result proving no action started.
+    public func finishExperimentalClickNotStarted(_ request: ToolRequest, taskStatus: TaskStatus, audits: [AuditEvent]) throws {
+        try finishExperimentalClickConfirmed(request, status: .failed, taskStatus: taskStatus, audits: audits)
+    }
+    private func finishExperimentalClickConfirmed(_ request: ToolRequest, status: ToolRequestStatus, taskStatus: TaskStatus, audits: [AuditEvent]) throws {
+        try database.write { db in
+            guard request.name == "safari_click_experiment",
+                  try Row.fetchOne(db, sql: "SELECT request_id FROM experimental_click_barriers WHERE request_id = ?", arguments: [request.id.uuidString]) != nil else { throw PersistenceError.invalidStoredToolRequest }
+            guard let row = try Row.fetchOne(db, sql: "SELECT task_id, status, payload_digest FROM tool_requests WHERE id = ?", arguments: [request.id.uuidString]),
+                  (row["task_id"] as String) == request.taskID.uuidString,
+                  (row["status"] as String) == ToolRequestStatus.executing.rawValue,
+                  (row["payload_digest"] as String) == request.payloadDigest else { throw PersistenceError.invalidStoredToolRequest }
+            let taskStatusValue: String? = try Row.fetchOne(db, sql: "SELECT status FROM tasks WHERE id = ?", arguments: [request.taskID.uuidString])?["status"]
+            guard let taskStatusValue, taskStatusValue != TaskStatus.cancelled.rawValue else { throw PersistenceError.invalidStoredTask }
+            try updateToolRequest(request.id, to: status, db: db)
+            try updateTask(request.taskID, to: taskStatus, db: db)
+            for audit in audits { try insertAudit(audit, db: db) }
+            try db.execute(sql: "DELETE FROM experimental_click_barriers WHERE request_id = ?", arguments: [request.id.uuidString])
         }
     }
     public func rejectRequest(_ request: ToolRequest, approval: Approval, taskStatus: TaskStatus, audits: [AuditEvent]) throws {
@@ -313,7 +426,7 @@ private func insertApproval(_ approval: Approval, db: GRDB.Database) throws { tr
 private func nextAuditOrder(db: GRDB.Database) throws -> Int64 {
     try Int64.fetchOne(db, sql: "SELECT COALESCE(MAX(event_order), 0) + 1 FROM audit_events") ?? 1
 }
-private func insertAudit(_ event: AuditEvent, db: GRDB.Database) throws { try db.execute(sql: "INSERT INTO audit_events (id,timestamp,task_id,worker,target,side_effect,action_digest,summary,result,approval_id,event_order) VALUES (?,?,?,?,?,?,?,?,?,?,?)", arguments: [event.id.uuidString,event.timestamp,event.taskID.uuidString,redactSecrets(event.worker),redactSecrets(event.target),event.sideEffect.rawValue,redactSecrets(event.actionDigest),redactSecrets(event.summary),redactSecrets(event.result),event.approvalID?.uuidString,try nextAuditOrder(db: db)]) }
+private func insertAudit(_ event: AuditEvent, db: GRDB.Database) throws { try db.execute(sql: "INSERT INTO audit_events (id,timestamp,task_id,worker,target,side_effect,action_digest,summary,result,approval_id,event_order,request_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", arguments: [event.id.uuidString,event.timestamp,event.taskID.uuidString,redactSecrets(event.worker),redactSecrets(event.target),event.sideEffect.rawValue,redactSecrets(event.actionDigest),redactSecrets(event.summary),redactSecrets(event.result),event.approvalID?.uuidString,try nextAuditOrder(db: db),event.requestID?.uuidString]) }
 
 public final class SQLiteAuditRepository: AuditRepository, @unchecked Sendable {
     public let database: Database
@@ -327,8 +440,8 @@ public final class SQLiteAuditRepository: AuditRepository, @unchecked Sendable {
             try db.execute(
                 sql: """
                     INSERT INTO audit_events
-                    (id, timestamp, task_id, worker, target, side_effect, action_digest, summary, result, approval_id, event_order)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, timestamp, task_id, worker, target, side_effect, action_digest, summary, result, approval_id, event_order, request_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                 arguments: [
                     event.id.uuidString,
@@ -342,6 +455,7 @@ public final class SQLiteAuditRepository: AuditRepository, @unchecked Sendable {
                     redactSecrets(event.result),
                     event.approvalID?.uuidString,
                     try nextAuditOrder(db: db),
+                    event.requestID?.uuidString,
                 ]
             )
         }
@@ -500,7 +614,11 @@ private func auditEvent(from row: Row) throws -> AuditEvent {
             actionDigest: try row.decode(forColumn: "action_digest"),
             summary: try row.decode(forColumn: "summary"),
             result: try row.decode(forColumn: "result"),
-            approvalID: approvalID
+            approvalID: approvalID,
+            requestID: try (row.decode(String?.self, forColumn: "request_id")).map { text in
+                guard let id = UUID(uuidString: text) else { throw PersistenceError.invalidStoredAuditEvent }
+                return id
+            }
         )
     } catch {
         throw PersistenceError.invalidStoredAuditEvent

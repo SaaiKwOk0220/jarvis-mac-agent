@@ -70,7 +70,7 @@ final class ServiceClientTests: XCTestCase {
         let port = try await server.start()
         defer { server.stop() }
 
-        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: server.authorizationToken)
         let requests = try await client.loadApprovalRequests(taskID: task.id)
         XCTAssertEqual(requests.count, 1)
         XCTAssertEqual(requests[0].id, request.id)
@@ -91,7 +91,7 @@ final class ServiceClientTests: XCTestCase {
         let port = try await server.start()
         defer { server.stop() }
 
-        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: server.authorizationToken)
         let events = try await client.loadTimeline(taskID: task.id)
         XCTAssertEqual(events.map(\.summary), ["task created"])
         XCTAssertEqual(client.timelineEvents[task.id]?.count, 1)
@@ -106,7 +106,7 @@ final class ServiceClientTests: XCTestCase {
         let port = try await server.start()
         defer { server.stop() }
 
-        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: server.authorizationToken)
         let task = try await client.createTask(title: "Created from menu")
         XCTAssertEqual(task.title, "Created from menu")
         XCTAssertEqual(client.selectedTask?.id, task.id)
@@ -123,7 +123,7 @@ final class ServiceClientTests: XCTestCase {
         let port = try await server.start()
         defer { server.stop() }
 
-        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: server.authorizationToken)
         let task = try await client.createTask(title: "Conflict approve")
         try await client.startDemoApproval(taskID: task.id)
         let request = try XCTUnwrap(client.approvalRequests.values.first)
@@ -152,7 +152,7 @@ final class ServiceClientTests: XCTestCase {
         let port = try await server.start()
         defer { server.stop() }
 
-        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: server.authorizationToken)
         let task = try await client.createTask(title: "Conflict cancel")
 
         try await client.cancel(taskID: task.id)
@@ -179,7 +179,7 @@ final class ServiceClientTests: XCTestCase {
         let port = try await server.start()
         defer { server.stop() }
 
-        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: server.authorizationToken)
         let task = try await client.createTask(title: "Clear action error")
         try await client.cancel(taskID: task.id)
         do { try await client.cancel(taskID: task.id); XCTFail("Expected throw") } catch { }
@@ -199,7 +199,7 @@ final class ServiceClientTests: XCTestCase {
         let port = try await server.start()
         defer { server.stop() }
 
-        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: server.authorizationToken)
         let task = try await client.createTask(title: "Demo approval")
         try await client.startDemoApproval(taskID: task.id)
         let request = try XCTUnwrap(client.approvalRequests.values.first)
@@ -211,11 +211,8 @@ final class ServiceClientTests: XCTestCase {
         XCTAssertTrue(client.timelineEvents[task.id]?.contains { $0.summary == "approval accepted" } == true)
     }
 
-    /// Bug C: ApprovalView used `approvalRequests.values.first(where:)`, which is
-    /// non-deterministic when multiple requests exist for the same task. The fix
-    /// re-keys the dictionary by `taskID` so `approvalRequests[task.id]` is the
-    /// canonical lookup the view relies on.
-    func testLoadApprovalRequestsStoresRequestsKeyedByTaskID() async throws {
+    /// Requests are independently addressable by request ID.
+    func testLoadApprovalRequestsStoresRequestsKeyedByRequestID() async throws {
         let database = try Database(path: ":memory:")
         try database.migrate()
         let service = try TaskService(
@@ -235,22 +232,16 @@ final class ServiceClientTests: XCTestCase {
         let server = LoopbackServer(service: service)
         let port = try await server.start()
         defer { server.stop() }
-        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: server.authorizationToken)
 
         _ = try await client.loadApprovalRequests(taskID: task.id)
         XCTAssertEqual(client.approvalRequests.count, 1)
-        XCTAssertNotNil(client.approvalRequests[task.id],
-            "approvalRequests must be keyed by taskID so ApprovalView can resolve with [task.id]")
-        XCTAssertEqual(client.approvalRequests[task.id]?.id, request.id)
-        XCTAssertEqual(client.approvalRequests[task.id]?.digest, request.payloadDigest)
+        XCTAssertNotNil(client.approvalRequests[request.id])
+        XCTAssertEqual(client.approvalRequests[request.id]?.digest, request.payloadDigest)
     }
 
-    /// Documents the current ServiceClient contract: `approvalRequests` is keyed by taskID,
-    /// so multiple pending requests for the same task collapse to the *last* one received in the
-    /// server response. ApprovalView uses this directly via `client.approvalRequests[task.id]`;
-    /// if a UI change wants to surface every pending, it must fetch via `loadApprovalRequests`
-    /// and aggregate rather than rely on the dictionary.
-    func testMultiplePendingApprovalsForSameTaskCollapseToLast() async throws {
+    /// Multiple requests for the same task remain independently visible.
+    func testMultiplePendingApprovalsForSameTaskRemainVisible() async throws {
         let database = try Database(path: ":memory:")
         try database.migrate()
         let service = try TaskService(
@@ -273,15 +264,13 @@ final class ServiceClientTests: XCTestCase {
         let server = LoopbackServer(service: service)
         let port = try await server.start()
         defer { server.stop() }
-        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: server.authorizationToken)
 
         let fetched = try await client.loadApprovalRequests(taskID: task.id)
         XCTAssertEqual(fetched.count, 2, "Server should return both pending requests for the task")
-        XCTAssertEqual(client.approvalRequests.count, 1, "ServiceClient dict collapses to one entry per taskID")
-        let resolved = try XCTUnwrap(client.approvalRequests[task.id],
-            "After load, the last entry received must be resolvable via [task.id]")
-        XCTAssertTrue([first.id, second.id].contains(resolved.id),
-            "Collapsed entry must be one of the two requests; got \(resolved.id)")
+        XCTAssertEqual(client.approvalRequests.count, 2)
+        XCTAssertNotNil(client.approvalRequests[first.id])
+        XCTAssertNotNil(client.approvalRequests[second.id])
     }
 
     /// Bug D: NewTaskView used to call `client.select(task)` after `createTask`,
@@ -297,7 +286,7 @@ final class ServiceClientTests: XCTestCase {
         let port = try await server.start()
         defer { server.stop() }
 
-        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: server.authorizationToken)
         // NewTaskView flow: just call createTask; do not call select.
         let task = try await client.createTask(title: "From new task view")
         XCTAssertEqual(client.selectedTask?.id, task.id,
@@ -321,7 +310,7 @@ final class ServiceClientTests: XCTestCase {
         let port = try await server.start()
         defer { server.stop() }
 
-        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: server.authorizationToken)
         let task = try await client.createTask(title: "Menu complete task")
 
         // Drive a .read request so the task lands in .running (the new
@@ -369,7 +358,7 @@ final class ServiceClientTests: XCTestCase {
         let port = try await server.start()
         defer { server.stop() }
 
-        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: server.authorizationToken)
         // Inject stale entries that no longer correspond to any task on the server.
         let stale1 = UUID()
         let stale2 = UUID()
@@ -414,7 +403,7 @@ final class ServiceClientTests: XCTestCase {
         let port = try await server.start()
         defer { server.stop() }
 
-        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: server.authorizationToken)
         let task = try await client.createTask(title: "Menu shell command")
 
         try await client.submitShellCommand(
@@ -478,7 +467,7 @@ final class ServiceClientTests: XCTestCase {
         let port = try await server.start()
         defer { server.stop() }
 
-        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: server.authorizationToken)
         let task = try await client.createTask(title: "Menu fetch URL")
 
         let targetURL = "https://example.com/page"
@@ -531,7 +520,7 @@ final class ServiceClientTests: XCTestCase {
         let port = try await server.start()
         defer { server.stop() }
 
-        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: server.authorizationToken)
         let task = try await client.createTask(title: "Menu screenshot")
 
         try await client.submitScreenshot(
@@ -610,7 +599,7 @@ final class ServiceClientTests: XCTestCase {
             taskRepository: tasks,
             auditRepository: audit,
             policy: Policy(),
-            policyConfig: PolicyConfig(applicationBundleIDs: ["com.apple.Safari"]),
+            policyConfig: PolicyConfig(applicationBundleIDs: ["com.apple.finder"]),
             accessibility: AccessibilityQueryToolExecutor(query: { _ in "AXApplication \"Safari\"" }),
             requestRepository: requests,
             approvalRepository: approvals,
@@ -620,12 +609,12 @@ final class ServiceClientTests: XCTestCase {
         let port = try await server.start()
         defer { server.stop() }
 
-        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+        let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, authorizationToken: server.authorizationToken)
         let task = try await client.createTask(title: "Menu accessibility query")
 
         try await client.submitAccessibilityQuery(
             taskID: task.id,
-            target: "com.apple.Safari",
+            target: "com.apple.finder",
             maxDepth: 6
         )
 
@@ -654,7 +643,7 @@ final class ServiceClientTests: XCTestCase {
         XCTAssertEqual(storedRequest.taskID, task.id)
         XCTAssertEqual(storedRequest.name, "ax_query")
         XCTAssertEqual(storedRequest.sideEffect, .read)
-        XCTAssertEqual(storedRequest.target, "com.apple.Safari",
+        XCTAssertEqual(storedRequest.target, "com.apple.finder",
             "target must be the bundle identifier so the policy app allowlist applies")
         XCTAssertEqual(storedRequest.payload, "{\"maxDepth\":6}")
 
@@ -664,7 +653,7 @@ final class ServiceClientTests: XCTestCase {
         let expectedDigest = ToolRequest.actionDigest(
             name: "ax_query",
             sideEffect: .read,
-            target: "com.apple.Safari",
+            target: "com.apple.finder",
             payload: "{\"maxDepth\":6}"
         )
         XCTAssertEqual(storedRequest.payloadDigest, expectedDigest,
@@ -673,4 +662,226 @@ final class ServiceClientTests: XCTestCase {
         XCTAssertNil(client.actionError,
             "submitAccessibilityQuery must not leave actionError populated on success")
     }
+}
+
+@MainActor
+extension ServiceClientTests {
+    func testExperimentalApprovalMetadataSurvivesServiceEncoding() throws {
+        let pending = PendingApprovalRequest(id: UUID(), taskID: UUID(), reason: "test", target: "https://example.com/a?secret=x", payload: "target", digest: "digest", kind: "safari_click_experiment", previewAvailable: true)
+        let decoded = try JSONDecoder().decode(ApprovalRequest.self, from: JSONEncoder().encode(pending))
+        XCTAssertEqual(decoded.kind, "safari_click_experiment")
+        XCTAssertEqual(decoded.previewAvailable, true)
+        XCTAssertEqual(decoded.target, pending.target)
+    }
+    func testExperimentalApprovalPresentationUsesScrollablePreviewAndRequiresLiveTicket() {
+        let request = ApprovalRequest(id: UUID(), taskID: UUID(), reason: "test", target: "https://example.com/" + String(repeating: "x", count: 1000), payload: String(repeating: "title", count: 100), digest: "digest", kind: "safari_click_experiment", previewAvailable: true)
+        let presentation = ApprovalPresentation(request: request, clickHandlerAvailable: true)
+        XCTAssertTrue(presentation.usesScrollablePreview)
+        XCTAssertTrue(presentation.canApprove)
+        let expired = ApprovalRequest(id: request.id, taskID: request.taskID, reason: "test", target: "失效", payload: "失效", digest: "digest", kind: "safari_click_experiment", previewAvailable: false)
+        XCTAssertFalse(ApprovalPresentation(request: expired, clickHandlerAvailable: true).canApprove)
+        XCTAssertFalse(ApprovalPresentation(request: request, clickHandlerAvailable: false).canApprove)
+    }
+    func testExperimentalApprovalRefreshClearsExpiredAndMissingRequests() {
+        let client = ServiceClient(), taskID = UUID()
+        let request = ApprovalRequest(id: UUID(), taskID: taskID, reason: "test", target: "https://example.com", payload: "target", digest: "digest", kind: "safari_click_experiment", previewAvailable: true)
+        client.applyApprovalRequests([request], taskID: taskID)
+        XCTAssertEqual(client.approvalRequests[request.id]?.previewAvailable, true)
+        let expired = ApprovalRequest(id: request.id, taskID: taskID, reason: "test", target: "失效", payload: "失效", digest: "digest", kind: "safari_click_experiment", previewAvailable: false)
+        client.applyApprovalRequests([expired], taskID: taskID)
+        XCTAssertEqual(client.approvalRequests[request.id]?.previewAvailable, false)
+        client.applyApprovalRequests([], taskID: taskID)
+        XCTAssertNil(client.approvalRequests[request.id])
+    }
+    func testApprovalRefreshGenerationsIsolateRequestsAndTasks() {
+        let client = ServiceClient(), taskA = UUID(), taskB = UUID()
+        let click = ApprovalRequest(id: UUID(), taskID: taskA, reason: "test", target: "https://example.com/a", payload: "a", digest: "a", kind: "safari_click_experiment", previewAvailable: true)
+        let ordinary = ApprovalRequest(id: UUID(), taskID: taskA, reason: "test", target: "file", payload: "b", digest: "b")
+        let other = ApprovalRequest(id: UUID(), taskID: taskB, reason: "test", target: "file", payload: "c", digest: "c")
+        let old = client.beginApprovalRefresh(taskID: taskA)
+        let newer = client.beginApprovalRefresh(taskID: taskA)
+        let otherGeneration = client.beginApprovalRefresh(taskID: taskB)
+        client.commitApprovalRefresh([other], taskID: taskB, generation: otherGeneration)
+        client.commitApprovalRefresh([click, ordinary], taskID: taskA, generation: newer)
+        XCTAssertEqual(client.approvalRequests.count, 3)
+        XCTAssertTrue(client.isApprovalFresh(click))
+        client.commitApprovalRefresh([], taskID: taskA, generation: old)
+        XCTAssertEqual(client.approvalRequests.count, 3)
+        let changed = ApprovalRequest(id: click.id, taskID: taskA, reason: "test", target: click.target, payload: click.payload, digest: "new", kind: "safari_click_experiment", previewAvailable: true)
+        let next = client.beginApprovalRefresh(taskID: taskA)
+        XCTAssertFalse(client.isApprovalFresh(click))
+        client.commitApprovalRefresh([changed], taskID: taskA, generation: next)
+        XCTAssertFalse(client.isApprovalFresh(click))
+        XCTAssertTrue(client.isApprovalFresh(changed))
+        client.beginApprovalMutation(taskID: taskA)
+        XCTAssertFalse(client.isApprovalFresh(changed))
+        let during = client.beginApprovalRefresh(taskID: taskA)
+        client.commitApprovalRefresh([changed], taskID: taskA, generation: during)
+        XCTAssertFalse(client.isApprovalFresh(changed))
+        client.endApprovalMutation(taskID: taskA)
+        XCTAssertFalse(client.isApprovalFresh(changed))
+        XCTAssertNotNil(client.approvalRequests[other.id])
+        XCTAssertNil(client.approvalRequests[ordinary.id])
+        let expired = ApprovalRequest(id: click.id, taskID: taskA, reason: "test", target: "expired", payload: "expired", digest: "new", kind: "safari_click_experiment", previewAvailable: false)
+        let last = client.beginApprovalRefresh(taskID: taskA)
+        client.commitApprovalRefresh([expired], taskID: taskA, generation: last)
+        XCTAssertFalse(client.isApprovalFresh(changed))
+        XCTAssertFalse(client.isApprovalFresh(expired))
+        let beforeReconfigure = client.beginApprovalRefresh(taskID: taskA)
+        client.configure(baseURL: URL(string: "http://127.0.0.1:9090")!)
+        client.commitApprovalRefresh([changed], taskID: taskA, generation: beforeReconfigure)
+        XCTAssertFalse(client.isApprovalFresh(changed))
+        XCTAssertNil(client.approvalRequests[changed.id])
+    }
+    func testExperimentalFreshnessExpiresAndRefreshBeforeApprovalRevalidatesTarget() async throws {
+        let client = ServiceClient(), taskID = UUID()
+        var now: TimeInterval = 10
+        client.approvalClockForTesting = { now }
+        let request = ApprovalRequest(id: UUID(), taskID: taskID, reason: "test", target: "https://example.com/a", payload: "target", digest: "digest", kind: "safari_click_experiment", previewAvailable: true)
+        client.applyApprovalRequests([request], taskID: taskID)
+        XCTAssertTrue(client.isApprovalFresh(request))
+        now = 13
+        XCTAssertFalse(client.isApprovalFresh(request))
+        var calls = 0
+        client.experimentalClickApprovalForTesting = { _ in calls += 1 }
+        client.experimentalClickRefreshForTesting = { _ in [request] }
+        do { try await client.approve(request); XCTFail("expired preview") } catch { }
+        client.applyApprovalRequests([request], taskID: taskID)
+        let changed = ApprovalRequest(id: request.id, taskID: taskID, reason: "test", target: "https://example.com/b", payload: "target", digest: "digest", kind: "safari_click_experiment", previewAvailable: true)
+        client.experimentalClickRefreshForTesting = { _ in [changed] }
+        do { try await client.approve(request); XCTFail("changed target") } catch { }
+        XCTAssertEqual(calls, 0)
+        client.experimentalClickRefreshForTesting = { _ in [request] }
+        client.applyApprovalRequests([request], taskID: taskID)
+        try await client.approve(request)
+        XCTAssertEqual(calls, 1)
+        now = 12
+        client.applyApprovalRequests([request], taskID: taskID)
+        XCTAssertFalse(client.isApprovalFresh(request))
+    }
+    func testApprovalRefreshInFlightCannotRestoreChangedTarget() async throws {
+        let client = ServiceClient(), taskID = UUID()
+        let request = ApprovalRequest(id: UUID(), taskID: taskID, reason: "test", target: "https://example.com/a", payload: "old", digest: "digest", kind: "safari_click_experiment", previewAvailable: true)
+        let changed = ApprovalRequest(id: request.id, taskID: taskID, reason: "test", target: "https://example.com/b", payload: "new", digest: "digest", kind: "safari_click_experiment", previewAvailable: true)
+        client.applyApprovalRequests([request], taskID: taskID)
+        let entered = expectation(description: "refresh waiting")
+        let pause = ApprovalRefreshPause(entered: entered)
+        client.experimentalClickRefreshForTesting = { _ in await pause.wait(); return [request] }
+        var calls = 0
+        client.experimentalClickApprovalForTesting = { _ in calls += 1 }
+        let attempt = Task { try await client.approve(request) }
+        await fulfillment(of: [entered], timeout: 2)
+        client.applyApprovalRequests([changed], taskID: taskID)
+        pause.release()
+        do { try await attempt.value; XCTFail("old request approved") } catch { }
+        XCTAssertEqual(calls, 0)
+        XCTAssertTrue(client.isApprovalFresh(changed))
+        XCTAssertFalse(client.isApprovalFresh(request))
+    }
+    func testExperimentalApprovalCancellationDuringRefreshPreventsHandler() async throws {
+        let client = ServiceClient(), taskID = UUID()
+        let request = ApprovalRequest(id: UUID(), taskID: taskID, reason: "test", target: "https://example.com/a", payload: "target", digest: "digest", kind: "safari_click_experiment", previewAvailable: true)
+        client.applyApprovalRequests([request], taskID: taskID)
+        let entered = expectation(description: "refresh waiting"), pause = ApprovalRefreshPause(entered: entered)
+        client.experimentalClickRefreshForTesting = { _ in await pause.wait(); return [request] }
+        var calls = 0
+        client.experimentalClickApprovalForTesting = { _ in calls += 1 }
+        let attempt = Task { try await client.approve(request) }
+        await fulfillment(of: [entered], timeout: 2)
+        attempt.cancel()
+        pause.release()
+        do { try await attempt.value; XCTFail("cancelled approval succeeded") } catch { }
+        XCTAssertEqual(calls, 0)
+        XCTAssertFalse(client.isApprovalFresh(request))
+    }
+    func testExperimentalApprovalCancellationAfterHandlerStartsIsUnknown() async throws {
+        let client = ServiceClient(), taskID = UUID()
+        let request = ApprovalRequest(id: UUID(), taskID: taskID, reason: "test", target: "https://example.com/a", payload: "target", digest: "digest", kind: "safari_click_experiment", previewAvailable: true)
+        client.applyApprovalRequests([request], taskID: taskID)
+        client.experimentalClickRefreshForTesting = { _ in [request] }
+        let entered = expectation(description: "handler started"), pause = ApprovalRefreshPause(entered: entered)
+        client.experimentalClickApprovalForTesting = { _ in await pause.wait() }
+        let attempt = Task { try await client.approve(request) }
+        await fulfillment(of: [entered], timeout: 2)
+        attempt.cancel(); pause.release()
+        do { try await attempt.value; XCTFail("cancelled handler succeeded") } catch { }
+        client.applyApprovalRequests([request], taskID: taskID)
+        XCTAssertFalse(client.isApprovalFresh(request))
+        XCTAssertTrue(client.actionError?.contains("结果可能未知") == true)
+    }
+    func testExperimentalApprovalFailureShowsErrorAndCannotRepeat() async throws {
+        let client = ServiceClient(), taskID = UUID()
+        let request = ApprovalRequest(id: UUID(), taskID: taskID, reason: "test", target: "https://example.com/a", payload: "target", digest: "digest", kind: "safari_click_experiment", previewAvailable: true)
+        client.applyApprovalRequests([request], taskID: taskID)
+        client.experimentalClickRefreshForTesting = { _ in [request] }
+        var calls = 0
+        client.experimentalClickApprovalForTesting = { _ in calls += 1; throw ServiceClientError.http(status: 409, message: "approval failed") }
+        do { try await client.approve(request); XCTFail("failure expected") } catch { }
+        XCTAssertNotNil(client.actionError)
+        XCTAssertFalse(client.isApprovalFresh(request))
+        XCTAssertTrue(client.actionError?.contains("结果可能未知") == true)
+        client.applyApprovalRequests([request], taskID: taskID)
+        XCTAssertFalse(client.isApprovalFresh(request))
+        do { try await client.approve(request); XCTFail("repeat accepted") } catch { }
+        XCTAssertEqual(calls, 1)
+    }
+    func testExperimentalApprovalUnknownCapacityFailsClosedWithoutEviction() async throws {
+        let client = ServiceClient(), taskID = UUID()
+        client.experimentalApprovalCapacityForTesting = 2
+        var calls = 0
+        client.experimentalClickApprovalForTesting = { _ in calls += 1; throw ServiceClientError.unavailable }
+        for _ in 0..<2 {
+            let request = ApprovalRequest(id: UUID(), taskID: taskID, reason: "test", target: "https://example.com/a", payload: "target", digest: "digest", kind: "safari_click_experiment", previewAvailable: true)
+            client.applyApprovalRequests([request], taskID: taskID)
+            client.experimentalClickRefreshForTesting = { _ in [request] }
+            do { try await client.approve(request); XCTFail("failure expected") } catch { }
+            client.applyApprovalRequests([request], taskID: taskID)
+            XCTAssertFalse(client.isApprovalFresh(request))
+        }
+        let third = ApprovalRequest(id: UUID(), taskID: taskID, reason: "test", target: "https://example.com/b", payload: "target", digest: "digest", kind: "safari_click_experiment", previewAvailable: true)
+        client.applyApprovalRequests([third], taskID: taskID)
+        client.experimentalClickRefreshForTesting = { _ in [third] }
+        XCTAssertFalse(client.isApprovalFresh(third))
+        do { try await client.approve(third); XCTFail("capacity exceeded") } catch { }
+        XCTAssertEqual(calls, 2)
+    }
+    func testExperimentalApprovalCapacityReservesInFlightSlot() async throws {
+        let client = ServiceClient(), taskA = UUID(), taskB = UUID()
+        client.experimentalApprovalCapacityForTesting = 1
+        let first = ApprovalRequest(id: UUID(), taskID: taskA, reason: "test", target: "https://example.com/a", payload: "target", digest: "a", kind: "safari_click_experiment", previewAvailable: true)
+        let second = ApprovalRequest(id: UUID(), taskID: taskB, reason: "test", target: "https://example.com/b", payload: "target", digest: "b", kind: "safari_click_experiment", previewAvailable: true)
+        client.applyApprovalRequests([first], taskID: taskA)
+        client.applyApprovalRequests([second], taskID: taskB)
+        client.experimentalClickRefreshForTesting = { id in id == taskA ? [first] : [second] }
+        let entered = expectation(description: "first started"), pause = ApprovalRefreshPause(entered: entered)
+        var calls = 0
+        client.experimentalClickApprovalForTesting = { _ in calls += 1; await pause.wait() }
+        let firstTask = Task { try await client.approve(first) }
+        await fulfillment(of: [entered], timeout: 2)
+        XCTAssertFalse(client.isApprovalFresh(second))
+        do { try await client.approve(second); XCTFail("capacity exceeded") } catch { }
+        XCTAssertEqual(calls, 1)
+        pause.release()
+        try await firstTask.value
+    }
+    func testExperimentalApprovalUsesOnlyInjectedFakeHandler() async throws {
+        let client = ServiceClient()
+        let request = ApprovalRequest(id: UUID(), taskID: UUID(), reason: "test", target: "https://example.com", payload: "target", digest: "digest", kind: "safari_click_experiment", previewAvailable: true)
+        do { try await client.approve(request); XCTFail("unregistered click must fail") } catch { }
+        var called = false
+        client.experimentalClickApprovalForTesting = { received in called = received.id == request.id }
+        client.experimentalClickRefreshForTesting = { _ in [request] }
+        client.applyApprovalRequests([request], taskID: request.taskID)
+        try await client.approve(request)
+        XCTAssertTrue(called)
+    }
+}
+
+@MainActor
+private final class ApprovalRefreshPause {
+    let entered: XCTestExpectation
+    var continuation: CheckedContinuation<Void, Never>?
+    init(entered: XCTestExpectation) { self.entered = entered }
+    func wait() async { await withCheckedContinuation { continuation = $0; entered.fulfill() } }
+    func release() { continuation?.resume(); continuation = nil }
 }

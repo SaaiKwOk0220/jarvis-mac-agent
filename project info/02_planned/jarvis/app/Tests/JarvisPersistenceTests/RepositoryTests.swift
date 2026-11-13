@@ -5,6 +5,22 @@ import XCTest
 @testable import JarvisPersistence
 
 final class RepositoryTests: XCTestCase {
+    func testLegacyAuditMigrationPreservesUnboundEvents() throws {
+        let database = try JarvisPersistence.Database(path: ":memory:")
+        try database.migrate()
+        let taskID = UUID()
+        let repository = SQLiteAuditRepository(database: database)
+        try repository.append(AuditEvent(taskID: taskID, worker: "task-service", target: "local", sideEffect: .read, actionDigest: "old", summary: "tool result", result: "old value", approvalID: nil))
+        try database.write { db in
+            try db.execute(sql: "ALTER TABLE audit_events DROP COLUMN request_id")
+            try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier = ?", arguments: ["link audit events to tool requests"])
+        }
+        try database.migrate()
+        let event = try XCTUnwrap(repository.events(for: taskID).first)
+        XCTAssertEqual(event.result, "old value")
+        XCTAssertNil(event.requestID)
+    }
+
     func testMigrationCreatesTheRequiredTables() throws {
         let database = try JarvisPersistence.Database(path: ":memory:")
 

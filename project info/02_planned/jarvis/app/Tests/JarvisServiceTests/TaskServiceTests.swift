@@ -6,6 +6,248 @@ import JarvisPolicy
 @testable import JarvisService
 
 final class TaskServiceTests: XCTestCase {
+    func testExactBrowserApprovalTransactionFailurePreservesPreview() async throws {
+        #if !JARVIS_EXACT_BROWSER_EXPERIMENT && !JARVIS_COMBINED_EXPERIMENT
+        throw XCTSkip("Exact browser feature is unavailable in ordinary builds")
+        #endif
+        let recorder = BrowserRecorder()
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in recorder.record(url); return true }, exactOpener: { url in recorder.record(url); return true }), exactBrowserEnabled: true)
+        let task = try await fixture.service.createTask(title: "Open")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private", payload: "Open in browser")
+        _ = try await fixture.service.submit(request: request)
+        let before = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        let digest = try XCTUnwrap(before.first?.digest)
+        try fixture.database.write { db in
+            try db.execute(sql: "CREATE TRIGGER fail_approval BEFORE INSERT ON approvals BEGIN SELECT RAISE(ABORT, 'test failure'); END")
+        }
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approve(requestID: request.id, digest: digest))
+        let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        XCTAssertEqual(pending.first?.target, "https://example.com/private")
+        let count = await recorder.count
+        XCTAssertEqual(count, 0)
+    }
+    func testExactBrowserExpiredTicketCannotExecute() async throws {
+        #if !JARVIS_EXACT_BROWSER_EXPERIMENT && !JARVIS_COMBINED_EXPERIMENT
+        throw XCTSkip("Exact browser feature is unavailable in ordinary builds")
+        #endif
+        let recorder = BrowserRecorder()
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in recorder.record(url); return true }, exactOpener: { url in recorder.record(url); return true }), exactBrowserEnabled: true, browserTicketLifetime: 0.05)
+        let task = try await fixture.service.createTask(title: "Open")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private", payload: "Open in browser")
+        _ = try await fixture.service.submit(request: request)
+        let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        let digest = try XCTUnwrap(pending.first?.digest)
+        try await Task.sleep(for: .milliseconds(100))
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approve(requestID: request.id, digest: digest))
+        let count = await recorder.count
+        XCTAssertEqual(count, 0)
+        XCTAssertEqual(fixture.service.testBrowserTicketCount, 0)
+    }
+    func testExactBrowserTransactionFailureRevokesTicket() async throws {
+        #if !JARVIS_EXACT_BROWSER_EXPERIMENT && !JARVIS_COMBINED_EXPERIMENT
+        throw XCTSkip("Exact browser feature is unavailable in ordinary builds")
+        #endif
+        let fixture = try Fixture(exactBrowserEnabled: true)
+        let task = try await fixture.service.createTask(title: "Open")
+        try fixture.database.write { db in
+            try db.execute(sql: "CREATE TRIGGER fail_browser_insert BEFORE INSERT ON tool_requests BEGIN SELECT RAISE(ABORT, 'test failure'); END")
+        }
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private?secret=x", payload: "Open in browser")
+        await XCTAssertThrowsErrorAsync(try await fixture.service.submit(request: request))
+        XCTAssertEqual(fixture.service.testBrowserTicketCount, 0)
+        XCTAssertNil(try fixture.requests.fetch(id: request.id))
+    }
+    func testExactBrowserRejectAndCancelCannotExecute() async throws {
+        #if !JARVIS_EXACT_BROWSER_EXPERIMENT && !JARVIS_COMBINED_EXPERIMENT
+        throw XCTSkip("Exact browser feature is unavailable in ordinary builds")
+        #endif
+        let recorder = BrowserRecorder()
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in recorder.record(url); return true }, exactOpener: { url in recorder.record(url); return true }), exactBrowserEnabled: true)
+        for shouldCancel in [false, true] {
+            let task = try await fixture.service.createTask(title: "Open")
+            let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private?secret=x", payload: "Open in browser")
+            _ = try await fixture.service.submit(request: request)
+            let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+            let digest = try XCTUnwrap(pending.first?.digest)
+            if shouldCancel { try await fixture.service.cancel(taskID: task.id) }
+            else { try await fixture.service.reject(requestID: request.id) }
+            await XCTAssertThrowsErrorAsync(try await fixture.service.approve(requestID: request.id, digest: digest))
+        }
+        let count = await recorder.count
+        XCTAssertEqual(count, 0)
+    }
+    func testExactBrowserPendingTicketFailsAfterServiceRestart() async throws {
+        #if !JARVIS_EXACT_BROWSER_EXPERIMENT && !JARVIS_COMBINED_EXPERIMENT
+        throw XCTSkip("Exact browser feature is unavailable in ordinary builds")
+        #endif
+        let recorder = BrowserRecorder()
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in recorder.record(url); return true }, exactOpener: { url in recorder.record(url); return true }), exactBrowserEnabled: true)
+        let task = try await fixture.service.createTask(title: "Open")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private?secret=x", payload: "Open in browser")
+        _ = try await fixture.service.submit(request: request)
+        let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        let restarted = try fixture.makeService()
+        await XCTAssertThrowsErrorAsync(try await restarted.approve(requestID: request.id, digest: pending[0].digest))
+        let count = await recorder.count
+        XCTAssertEqual(count, 0)
+    }
+    func testExactBrowserURLRemainsEphemeralUntilApproved() async throws {
+        #if !JARVIS_EXACT_BROWSER_EXPERIMENT && !JARVIS_COMBINED_EXPERIMENT
+        throw XCTSkip("Exact browser feature is unavailable in ordinary builds")
+        #endif
+        let recorder = BrowserRecorder()
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in recorder.record(url); return true }, exactOpener: { url in recorder.record(url); return true }), exactBrowserEnabled: true)
+        let task = try await fixture.service.createTask(title: "Open")
+        let secret = "private-path-token"
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/\(secret)?token=\(secret)", payload: "Open in browser")
+        let decision = try await fixture.service.submit(request: request)
+        guard case .requireApproval = decision else { return XCTFail("Exact destination must require approval") }
+        let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        XCTAssertEqual(pending.first?.target, request.target)
+        XCTAssertFalse(try fixture.requests.fetch(id: request.id)!.0.target.contains(secret))
+        XCTAssertTrue(try fixture.audit.events(for: task.id).allSatisfy { !$0.target.contains(secret) && !$0.result.contains(secret) && !$0.summary.contains(secret) })
+        try await fixture.service.approve(requestID: request.id, digest: pending[0].digest)
+        try await fixture.waitForRequest(id: request.id, status: .completed)
+        let persisted = try XCTUnwrap(fixture.requests.fetch(id: request.id)?.0)
+        XCTAssertFalse(persisted.target.contains(secret))
+        XCTAssertFalse(persisted.payload.contains(secret))
+        XCTAssertTrue(try fixture.audit.events(for: task.id).allSatisfy {
+            !$0.target.contains(secret) && !$0.result.contains(secret) && !$0.summary.contains(secret)
+        })
+        let count = await recorder.count
+        XCTAssertEqual(count, 1)
+        XCTAssertEqual(recorder.lastURL?.absoluteString, request.target)
+    }
+
+    func testBrowserOpenRequiresApprovalAndRedactsAuditPath() async throws {
+        let recorder = BrowserRecorder()
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in recorder.record(url); return true }, exactOpener: { url in recorder.record(url); return true }))
+        let task = try await fixture.service.createTask(title: "Open page")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/", payload: "Open in browser")
+        let decision = try await fixture.service.submit(request: request)
+        XCTAssertEqual(decision, .requireApproval(reason: "opens the initial origin only; afterward the browser may navigate anywhere, redirect, run scripts, and send network requests; the domain and your original task text may be stored locally"))
+        let before = await recorder.count
+        XCTAssertEqual(before, 0)
+        let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        XCTAssertEqual(pending.first?.target, request.target)
+        let events = try fixture.audit.events(for: task.id)
+        XCTAssertTrue(events.allSatisfy { !$0.target.contains("private-path") && !$0.result.contains("private-path") })
+        try await fixture.service.approve(requestID: request.id, digest: request.payloadDigest)
+        try await fixture.waitForRequest(id: request.id, status: .completed)
+        let after = await recorder.count
+        XCTAssertEqual(after, 1)
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approve(requestID: request.id, digest: request.payloadDigest))
+        let afterRepeat = await recorder.count
+        XCTAssertEqual(afterRepeat, 1)
+        let completedEvents = try fixture.audit.events(for: task.id)
+        XCTAssertTrue(completedEvents.allSatisfy { !$0.target.contains("private-path") && !$0.result.contains("private-path") })
+    }
+
+    func testBrowserRejectAndCancellationNeverOpen() async throws {
+        for cancel in [false, true] {
+            let recorder = BrowserRecorder()
+            let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in recorder.record(url); return true }, exactOpener: { url in recorder.record(url); return true }))
+            let task = try await fixture.service.createTask(title: "Open")
+            let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/", payload: "Open in browser")
+            _ = try await fixture.service.submit(request: request)
+            if cancel { try await fixture.service.cancel(taskID: task.id) }
+            else { try await fixture.service.reject(requestID: request.id) }
+            await XCTAssertThrowsErrorAsync(try await fixture.service.approve(requestID: request.id, digest: request.payloadDigest))
+            let count = await recorder.count
+            XCTAssertEqual(count, 0)
+        }
+    }
+
+    func testPendingBrowserOpenIsNotAutomaticallyReplayedAfterServiceRestart() async throws {
+        let recorder = BrowserRecorder()
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in recorder.record(url); return true }, exactOpener: { url in recorder.record(url); return true }))
+        let task = try await fixture.service.createTask(title: "Open")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/", payload: "Open in browser")
+        _ = try await fixture.service.submit(request: request)
+        let restarted = try fixture.makeService()
+        try await Task.sleep(for: .milliseconds(100))
+        let pending = try await restarted.listPendingApprovalRequests(taskID: task.id)
+        XCTAssertEqual(pending.count, 1)
+        let count = await recorder.count
+        XCTAssertEqual(count, 0)
+    }
+
+    func testBrowserExecutorRevalidatesMalformedRequest() async throws {
+        let recorder = BrowserRecorder()
+        let executor = BrowserOpenExecutor(opener: { url in recorder.record(url); return true }, exactOpener: { url in recorder.record(url); return true })
+        let request = ToolRequest(taskID: UUID(), name: "browser_open", sideEffect: .externalSend, target: "https://example.com/?secret=x", payload: "Open in browser")
+        await XCTAssertThrowsErrorAsync(try await executor.execute(request))
+        let count = await recorder.count
+        XCTAssertEqual(count, 0)
+    }
+
+    func testInternalExactExecutorRejectsCredentials() async throws {
+        let recorder = BrowserRecorder()
+        let executor = BrowserOpenExecutor(opener: { url in recorder.record(url); return true }, exactOpener: { url in recorder.record(url); return true })
+        let request = ToolRequest(taskID: UUID(), name: "browser_open", sideEffect: .externalSend, target: "https://user:pass@example.com/private", payload: "Open in browser")
+        let gate = ExactBrowserSessionGate()
+        gate.setEnabled(true)
+        let generation = try XCTUnwrap(gate.capture())
+        await XCTAssertThrowsErrorAsync(try await executor.executeApprovedExact(request, gate: gate, generation: generation))
+        let count = await recorder.count
+        XCTAssertEqual(count, 0)
+    }
+
+    func testBrowserOpenWithoutExecutorCannotFallBackToNoOp() async throws {
+        let fixture = try Fixture()
+        let task = try await fixture.service.createTask(title: "Open")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/", payload: "Open in browser")
+        _ = try await fixture.service.submit(request: request)
+        try await fixture.service.approve(requestID: request.id, digest: request.payloadDigest)
+        try await fixture.waitForRequest(id: request.id, status: .failed)
+        XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .failed)
+        XCTAssertFalse(try fixture.audit.events(for: task.id).contains { $0.summary == "tool result" })
+    }
+
+    @MainActor
+    func testCancelledQueuedMainActorOpenDoesNotCallSystemOpener() async {
+        var didOpen = false
+        let task = Task { @MainActor in
+            BrowserOpenExecutor.openOnMainActorIfNotCancelled(URL(string: "https://example.com/")!) { _ in
+                didOpen = true
+                return true
+            }
+        }
+        task.cancel()
+        let result = await task.value
+        XCTAssertFalse(result)
+        XCTAssertFalse(didOpen)
+    }
+
+    func testRejectedSensitiveURLDoesNotEnterRequestApprovalOrAuditStorage() async throws {
+        let fixture = try Fixture()
+        let task = try await fixture.service.createTask(title: "Open page")
+        let secret = "sensitive-path-token"
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/\(secret)?token=\(secret)", payload: "Open in browser")
+        let decision = try await fixture.service.submit(request: request)
+        XCTAssertEqual(decision, .deny(reason: "invalid browser destination"))
+        XCTAssertNil(try fixture.requests.fetch(id: request.id))
+        let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        XCTAssertTrue(pending.isEmpty)
+        XCTAssertTrue(try fixture.approvals.list().isEmpty)
+        let events = try fixture.audit.events(for: task.id)
+        XCTAssertFalse(events.isEmpty)
+        XCTAssertTrue(events.allSatisfy { !$0.target.contains(secret) && !$0.result.contains(secret) && !$0.summary.contains(secret) })
+    }
+
+    func testCancellationAfterBrowserOpenCannotUndoOpen() async throws {
+        let recorder = BrowserRecorder()
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { url in recorder.record(url); return true }, exactOpener: { url in recorder.record(url); return true }))
+        let task = try await fixture.service.createTask(title: "Open")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/", payload: "Open in browser")
+        _ = try await fixture.service.submit(request: request)
+        try await fixture.service.approve(requestID: request.id, digest: request.payloadDigest)
+        try await fixture.waitForRequest(id: request.id, status: .completed)
+        try await fixture.service.cancel(taskID: task.id)
+        let count = await recorder.count
+        XCTAssertEqual(count, 1)
+    }
+
     func testLegalTransitionsPersistTheNewStatus() async throws {
         let fixture = try Fixture()
         let task = try await fixture.service.createTask(title: "Build release")
@@ -295,6 +537,7 @@ final class TaskServiceTests: XCTestCase {
         defer { server.stop() }
 
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/tasks")!)
+        request.setValue("Bearer \(try XCTUnwrap(server.authorizationToken))", forHTTPHeaderField: "Authorization")
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = Data("{\"title\":\"Socket task\"}".utf8)
@@ -529,7 +772,7 @@ final class TaskServiceTests: XCTestCase {
             taskID: task.id,
             name: "ax_query",
             sideEffect: .read,
-            target: "com.apple.Safari",
+            target: "com.apple.finder",
             payload: ""
         )
 
@@ -917,8 +1160,8 @@ private final class Fixture: @unchecked Sendable {
     let approvals: SQLiteApprovalRepository
     let service: TaskService
 
-    init(executor: any ToolExecutor = NoOpToolExecutor(), terminal: TerminalToolExecutor? = nil, webFetch: WebFetchToolExecutor? = nil, screenshot: ScreenshotToolExecutor? = nil, accessibility: AccessibilityQueryToolExecutor? = nil) throws {
-        database = try Database(path: ":memory:")
+    init(path: String = ":memory:", executor: any ToolExecutor = NoOpToolExecutor(), terminal: TerminalToolExecutor? = nil, webFetch: WebFetchToolExecutor? = nil, screenshot: ScreenshotToolExecutor? = nil, accessibility: AccessibilityQueryToolExecutor? = nil, browserOpen: BrowserOpenExecutor? = nil, exactBrowserEnabled: Bool = false, browserTicketLifetime: TimeInterval = 300) throws {
+        database = try Database(path: path)
         try database.migrate()
         tasks = SQLiteTaskRepository(database: database)
         audit = SQLiteAuditRepository(database: database)
@@ -929,14 +1172,14 @@ private final class Fixture: @unchecked Sendable {
             commandNames: ["shell", "swift", "xcodebuild"],
             browserProfiles: ["default"],
             sites: ["example.com"],
-            applicationBundleIDs: ["com.apple.Safari"]
+            applicationBundleIDs: ["com.apple.Safari", "com.apple.finder"]
         )
         service = try TaskService(
             taskRepository: tasks,
             auditRepository: audit,
             policy: Policy(),
-            policyConfig: policyConfig, executor: executor, terminal: terminal, webFetch: webFetch, screenshot: screenshot, accessibility: accessibility,
-            requestRepository: requests, approvalRepository: approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: database)
+            policyConfig: policyConfig, executor: executor, terminal: terminal, webFetch: webFetch, screenshot: screenshot, accessibility: accessibility, browserOpen: browserOpen,
+            requestRepository: requests, approvalRepository: approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: database), exactBrowserEnabled: exactBrowserEnabled, browserTicketLifetime: browserTicketLifetime
         )
     }
 
@@ -1043,3 +1286,2127 @@ private func XCTAssertThrowsErrorAsync<T>(
         errorHandler(error)
     }
 }
+
+private final class BrowserRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded = 0
+    private var last: URL?
+    var count: Int { lock.withLock { recorded } }
+    var lastURL: URL? { lock.withLock { last } }
+    func record(_ url: URL) { lock.withLock { recorded += 1; last = url } }
+}
+
+private struct AllowTestSafariPolicy: PolicyEvaluator {
+    func evaluate(_ request: ToolRequest, config: PolicyConfig) -> PolicyDecision {
+        request.name == "safari_read" ? .requireApproval(reason: "test only") : .deny(reason: "not used")
+    }
+}
+
+extension TaskServiceTests {
+    func testSafariResultIsSingleUseAndNeverWrittenToAudit() async throws {
+        #if !JARVIS_SAFARI_EXPERIMENT_BUILD && !JARVIS_COMBINED_EXPERIMENT
+        throw XCTSkip("Safari service is unavailable in ordinary builds")
+        #endif
+        let fixture = try Fixture()
+        let secret = "private-page-unique-contents"
+        let capture = SafariStaticFixture(text: secret)
+        let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: AllowTestSafariPolicy(), enableSafariRead: true, requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
+        service.safariCaptureFactory = { capture }
+        let task = try await service.createTask(title: "read page")
+        let request = try await service.prepareSafariRead(taskID: task.id)
+        _ = try await service.submit(request: request)
+        try await service.approve(requestID: request.id, digest: request.payloadDigest)
+        try await fixture.waitForRequest(id: request.id, status: .completed)
+        let audit = try fixture.audit.events(for: task.id)
+        XCTAssertTrue(audit.contains { $0.summary == "ephemeral tool result" && $0.result == request.id.uuidString && $0.requestID == request.id })
+        XCTAssertTrue(audit.allSatisfy { !$0.result.contains(secret) && !$0.target.contains(secret) })
+        let wrong = try await service.takeEphemeralToolResult(taskID: task.id, requestID: request.id, digest: "wrong")
+        XCTAssertNil(wrong)
+        let result = try await service.takeEphemeralToolResult(taskID: task.id, requestID: request.id, digest: request.payloadDigest)
+        XCTAssertEqual(result, secret)
+        let again = try await service.takeEphemeralToolResult(taskID: task.id, requestID: request.id, digest: request.payloadDigest)
+        XCTAssertNil(again)
+    }
+}
+
+private actor DelayedPage {
+    private var continuation: CheckedContinuation<Void, Never>?
+    func wait() async { await withCheckedContinuation { continuation = $0 } }
+    func hasStarted() -> Bool { continuation != nil }
+    func release() { continuation?.resume(); continuation = nil }
+}
+
+extension TaskServiceTests {
+    func testCancellationWhileSafariResultPendingDoesNotStoreOrPublishIt() async throws {
+        #if !JARVIS_SAFARI_EXPERIMENT_BUILD && !JARVIS_COMBINED_EXPERIMENT
+        throw XCTSkip("Safari service is unavailable in ordinary builds")
+        #endif
+        let fixture = try Fixture(), page = DelayedPage()
+        let capture = SafariStaticFixture(text: "private-cancelled-page", page: page)
+        let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: AllowTestSafariPolicy(), enableSafariRead: true, requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
+        service.safariCaptureFactory = { capture }
+        let task = try await service.createTask(title: "read page")
+        let request = try await service.prepareSafariRead(taskID: task.id)
+        _ = try await service.submit(request: request)
+        try await service.approve(requestID: request.id, digest: request.payloadDigest)
+        for _ in 0..<100 { if await page.hasStarted() { break }; try await Task.sleep(for: .milliseconds(10)) }
+        let started = await page.hasStarted()
+        XCTAssertTrue(started)
+        try await service.cancel(taskID: task.id)
+        await page.release()
+        await service.waitForTrackedExecution(request.id)
+        let result = try await service.takeEphemeralToolResult(taskID: task.id, requestID: request.id, digest: request.payloadDigest)
+        XCTAssertNil(result)
+        let events = try fixture.audit.events(for: task.id)
+        XCTAssertFalse(events.contains { $0.summary == "ephemeral tool result" || $0.result.contains("private-cancelled-page") })
+    }
+}
+
+private actor SafariCaptureFixture: SafariTargetCapturing {
+    let target = SafariCapturedTarget(url: "https://example.com/private?token=supersecret", processID: 77, windowIdentity: UUID())
+    func capture() async throws -> SafariCapturedTarget { target }
+    func verify(_ target: SafariCapturedTarget) async throws { guard target == self.target else { throw SafariAXReadError.targetChanged } }
+    func read(_ target: SafariCapturedTarget) async throws -> String { "private page text" }
+}
+
+extension TaskServiceTests {
+    func testSafariCapturePreviewApprovalAndReadRemainPrivate() async throws {
+        #if !JARVIS_SAFARI_EXPERIMENT_BUILD && !JARVIS_COMBINED_EXPERIMENT
+        throw XCTSkip("Safari service is unavailable in ordinary builds")
+        #endif
+        let fixture = try Fixture()
+        let capture = SafariCaptureFixture()
+        let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: Policy(allowSafariRead: true), enableSafariRead: true, requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
+        service.safariCaptureFactory = { capture }
+        let task = try await service.createTask(title: "read current page")
+        let request = try await service.prepareSafariRead(taskID: task.id)
+        XCTAssertFalse(String(decoding: try JSONEncoder().encode(request), as: UTF8.self).contains("supersecret"))
+        let decision = try await service.submit(request: request)
+        guard case .requireApproval = decision else { return XCTFail("explicit approval is required") }
+        let persisted = try XCTUnwrap(fixture.requests.fetch(id: request.id)?.0)
+        XCTAssertFalse(persisted.target.contains("supersecret"))
+        XCTAssertFalse(persisted.payload.contains("supersecret"))
+        let pending = try await service.listPendingApprovalRequests(taskID: task.id)
+        XCTAssertEqual(pending.first?.target, "https://example.com/private?token=supersecret")
+        XCTAssertTrue(pending.first?.reason.contains("not an atomic snapshot") == true)
+        try await service.approve(requestID: request.id, digest: request.payloadDigest)
+        try await fixture.waitForRequest(id: request.id, status: .completed)
+        let result = try await service.takeEphemeralToolResult(taskID: task.id, requestID: request.id, digest: request.payloadDigest)
+        XCTAssertEqual(result, "private page text")
+        let events = try fixture.audit.events(for: task.id)
+        XCTAssertTrue(events.allSatisfy { !$0.target.contains("supersecret") && !$0.result.contains("supersecret") && !$0.result.contains("private page text") })
+    }
+}
+
+private actor SafariStaticFixture: SafariTargetCapturing {
+    let target = SafariCapturedTarget(url: "https://example.com/", processID: 77, windowIdentity: UUID())
+    let text: String
+    let page: DelayedPage?
+    init(text: String, page: DelayedPage? = nil) { self.text = text; self.page = page }
+    func capture() async throws -> SafariCapturedTarget { target }
+    func verify(_ target: SafariCapturedTarget) async throws { guard target == self.target else { throw SafariAXReadError.targetChanged } }
+    func read(_ target: SafariCapturedTarget) async throws -> String { if let page { await page.wait() }; return text }
+}
+
+extension TaskServiceTests {
+    func testSafariFeatureIsDisabledByDefault() async throws {
+        let fixture = try Fixture()
+        let task = try await fixture.service.createTask(title: "read page")
+        let available = await fixture.service.isSafariReadAvailable()
+        XCTAssertFalse(available)
+        await XCTAssertThrowsErrorAsync(try await fixture.service.prepareSafariRead(taskID: task.id))
+    }
+
+    func testSafariApprovalCannotBeReplayedAfterRestartOrChangedDigest() async throws {
+        #if !JARVIS_SAFARI_EXPERIMENT_BUILD && !JARVIS_COMBINED_EXPERIMENT
+        throw XCTSkip("Safari service is unavailable in ordinary builds")
+        #endif
+        let fixture = try Fixture()
+        let capture = SafariCaptureFixture()
+        let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: Policy(allowSafariRead: true), enableSafariRead: true, requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
+        service.safariCaptureFactory = { capture }
+        let task = try await service.createTask(title: "read page")
+        let request = try await service.prepareSafariRead(taskID: task.id)
+        _ = try await service.submit(request: request)
+        await XCTAssertThrowsErrorAsync(try await service.approve(requestID: request.id, digest: "wrong"))
+        let restarted = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: Policy(allowSafariRead: true), enableSafariRead: true, requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
+        let pending = try await restarted.listPendingApprovalRequests(taskID: task.id)
+        XCTAssertTrue(pending.first?.target.contains("expired") == true)
+        await XCTAssertThrowsErrorAsync(try await restarted.approve(requestID: request.id, digest: request.payloadDigest))
+        let audit = try fixture.audit.events(for: task.id)
+        XCTAssertTrue(audit.allSatisfy { !$0.result.contains("supersecret") && !$0.target.contains("supersecret") })
+    }
+
+    func testRejectedSafariPreviewCannotBeApprovedAgain() async throws {
+        #if !JARVIS_SAFARI_EXPERIMENT_BUILD && !JARVIS_COMBINED_EXPERIMENT
+        throw XCTSkip("Safari service is unavailable in ordinary builds")
+        #endif
+        let fixture = try Fixture(), capture = SafariCaptureFixture()
+        let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: Policy(allowSafariRead: true), enableSafariRead: true, requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
+        service.safariCaptureFactory = { capture }
+        let task = try await service.createTask(title: "read page")
+        let request = try await service.prepareSafariRead(taskID: task.id)
+        _ = try await service.submit(request: request)
+        try await service.reject(requestID: request.id)
+        await XCTAssertThrowsErrorAsync(try await service.approve(requestID: request.id, digest: request.payloadDigest))
+        let pending = try await service.listPendingApprovalRequests(taskID: task.id)
+        XCTAssertTrue(pending.isEmpty)
+    }
+}
+
+private struct UnsafeAllowSafariPolicy: PolicyEvaluator {
+    func evaluate(_ request: ToolRequest, config: PolicyConfig) -> PolicyDecision { .allow }
+}
+
+extension TaskServiceTests {
+    func testSafariCannotExecuteWhenInjectedPolicyWouldAllowWithoutApproval() async throws {
+        #if !JARVIS_SAFARI_EXPERIMENT_BUILD && !JARVIS_COMBINED_EXPERIMENT
+        throw XCTSkip("Safari service is unavailable in ordinary builds")
+        #endif
+        let fixture = try Fixture(), capture = SafariCaptureFixture()
+        let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: UnsafeAllowSafariPolicy(), enableSafariRead: true, requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
+        service.safariCaptureFactory = { capture }
+        let task = try await service.createTask(title: "read page")
+        let request = try await service.prepareSafariRead(taskID: task.id)
+        let decision = try await service.submit(request: request)
+        XCTAssertEqual(decision, .deny(reason: "Safari reading requires explicit approval"))
+        XCTAssertNil(try fixture.requests.fetch(id: request.id))
+    }
+
+    func testSafariRejectedOrCancelledPreviewCannotBeUsed() async throws {
+        #if !JARVIS_SAFARI_EXPERIMENT_BUILD && !JARVIS_COMBINED_EXPERIMENT
+        throw XCTSkip("Safari service is unavailable in ordinary builds")
+        #endif
+        for cancel in [false, true] {
+            let fixture = try Fixture(), capture = SafariCaptureFixture()
+            let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: Policy(allowSafariRead: true), enableSafariRead: true, requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
+            service.safariCaptureFactory = { capture }
+            let task = try await service.createTask(title: "read page")
+            let request = try await service.prepareSafariRead(taskID: task.id)
+            _ = try await service.submit(request: request)
+            if cancel { try await service.cancel(taskID: task.id) }
+            else { try await service.reject(requestID: request.id) }
+            await XCTAssertThrowsErrorAsync(try await service.approve(requestID: request.id, digest: request.payloadDigest))
+            let result = try await service.takeEphemeralToolResult(taskID: task.id, requestID: request.id, digest: request.payloadDigest)
+            XCTAssertNil(result)
+        }
+    }
+}
+
+extension TaskServiceTests {
+    func testDisablingSafariRevokesUndeliveredResultAcrossReenable() async throws {
+        #if !JARVIS_SAFARI_EXPERIMENT_BUILD && !JARVIS_COMBINED_EXPERIMENT
+        throw XCTSkip("Safari service is unavailable in ordinary builds")
+        #endif
+        let fixture = try Fixture(), capture = SafariCaptureFixture()
+        let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: Policy(allowSafariRead: true), enableSafariRead: true, requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
+        service.safariCaptureFactory = { capture }
+        let task = try await service.createTask(title: "read page")
+        let request = try await service.prepareSafariRead(taskID: task.id)
+        _ = try await service.submit(request: request)
+        try await service.approve(requestID: request.id, digest: request.payloadDigest)
+        try await fixture.waitForRequest(id: request.id, status: .completed)
+        try service.setSafariReadEnabled(false)
+        try service.setSafariReadEnabled(true)
+        let result = try await service.takeEphemeralToolResult(taskID: task.id, requestID: request.id, digest: request.payloadDigest)
+        XCTAssertNil(result)
+    }
+
+    func testUnregisteredExperimentalClickCannotBeSubmittedOrApprovedAfterRestart() async throws {
+        let fixture = try Fixture()
+        let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: UnsafeAllowSafariPolicy(), requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
+        let task = try await service.createTask(title: "click")
+        let request = ToolRequest(taskID: task.id, name: "safari_click_experiment", sideEffect: .localWrite, target: "redacted", payload: UUID().uuidString)
+        await XCTAssertThrowsErrorAsync(try await service.submit(request: request))
+        XCTAssertNil(try fixture.requests.fetch(id: request.id))
+        try service.transition(taskID: task.id, to: .planning)
+        try service.transition(taskID: task.id, to: .running)
+        try SQLitePersistenceUnitOfWork(database: fixture.database).submitRequest(request, status: .pending, taskStatus: .awaitingApproval, audits: [])
+        let restarted = try fixture.makeService()
+        await XCTAssertThrowsErrorAsync(try await restarted.approve(requestID: request.id, digest: request.payloadDigest))
+        XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .pending)
+        XCTAssertTrue(try fixture.approvals.list().isEmpty)
+    }
+}
+
+extension TaskServiceTests {
+    func testDisablingSafariDuringReadSuppressesOldGenerationResult() async throws {
+        #if !JARVIS_SAFARI_EXPERIMENT_BUILD && !JARVIS_COMBINED_EXPERIMENT
+        throw XCTSkip("Safari service is unavailable in ordinary builds")
+        #endif
+        let fixture = try Fixture(), page = DelayedPage()
+        let capture = SafariStaticFixture(text: "private-in-flight", page: page)
+        let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: Policy(allowSafariRead: true), enableSafariRead: true, requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
+        service.safariCaptureFactory = { capture }
+        let task = try await service.createTask(title: "read page")
+        let request = try await service.prepareSafariRead(taskID: task.id)
+        _ = try await service.submit(request: request)
+        try await service.approve(requestID: request.id, digest: request.payloadDigest)
+        for _ in 0..<100 where !(await page.hasStarted()) { try await Task.sleep(for: .milliseconds(10)) }
+        let started = await page.hasStarted()
+        XCTAssertTrue(started)
+        try service.setSafariReadEnabled(false)
+        try service.setSafariReadEnabled(true)
+        await page.release()
+        await service.waitForTrackedExecution(request.id)
+        let result = try await service.takeEphemeralToolResult(taskID: task.id, requestID: request.id, digest: request.payloadDigest)
+        XCTAssertNil(result)
+        let events = try fixture.audit.events(for: task.id)
+        XCTAssertFalse(events.contains { $0.result.contains("private-in-flight") || $0.summary == "ephemeral tool result" })
+    }
+}
+
+extension TaskServiceTests {
+    func testSafariToggleFailsClosedUnlessExplicitlyAllowed() throws {
+        let fixture = try Fixture()
+        XCTAssertThrowsError(try fixture.service.setSafariReadEnabled(true))
+        XCTAssertFalse(fixture.service.isSafariReadEnabled())
+    }
+}
+
+extension TaskServiceTests {
+    #if !JARVIS_SAFARI_EXPERIMENT_BUILD && !JARVIS_COMBINED_EXPERIMENT
+    func testOrdinaryBuildCannotEnableSafariEvenWithExplicitArguments() async throws {
+        let fixture = try Fixture()
+        let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: Policy(allowSafariRead: true), enableSafariRead: true, allowSafariReadToggle: true)
+        XCTAssertFalse(service.isSafariReadEnabled())
+        XCTAssertThrowsError(try service.setSafariReadEnabled(true))
+        let task = try await service.createTask(title: "read page")
+        await XCTAssertThrowsErrorAsync(try await service.prepareSafariRead(taskID: task.id))
+    }
+    #endif
+
+    func testUnregisteredExperimentalClickIsDeniedAtExecutionBoundary() throws {
+        let request = ToolRequest(taskID: UUID(), name: "safari_click_experiment", sideEffect: .localWrite, target: "redacted", payload: "opaque")
+        XCTAssertThrowsError(try TaskService.validateExecutionCapability(request))
+    }
+}
+
+#if os(macOS)
+import ApplicationServices
+import SQLite3
+extension TaskServiceTests {
+    func testExperimentalClickCommitsApprovalBeforeFakeAction() async throws {
+        let fixture = try Fixture()
+        let service = fixture.service
+        let task = try await service.createTask(title: "experimental click")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/private", role: "AXButton", title: "Secret title", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let capture = SafariClickCapture { [candidate] }
+        let action = ExperimentalClickActionCounter()
+        await service.installExperimentalClickForTesting(action: { _, _ in
+            if (try? fixture.approvals.list().contains { $0.decision == .approved }) == true { action.increment() }
+            return .success
+        })
+        let request = try await service.submitExperimentalClick(taskID: task.id, identity: identity, capture: capture)
+        XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .pending)
+        XCTAssertEqual(action.value, 0)
+        try await service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest)
+        XCTAssertEqual(action.value, 1)
+        XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .completed)
+        let audits = try fixture.audit.events(for: task.id)
+        XCTAssertFalse(String(describing: audits).contains("Secret title"))
+        XCTAssertFalse(String(describing: audits).contains("example.com/private"))
+    }
+}
+extension TaskServiceTests {
+    private func experimentalFixture() async throws -> (Fixture, JarvisTask, ToolRequest, ExperimentalClickActionCounter) {
+        let fixture = try Fixture(), action = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "click")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/private", role: "AXButton", title: "Secret", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        await fixture.service.installExperimentalClickForTesting(action: { _, _ in action.increment(); return .success })
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        return (fixture, task, request, action)
+    }
+    func testExperimentalClickActionFailureRecordsUnknownOutcome() async throws {
+        let fixture = try Fixture(), action = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "click")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/private", role: "AXButton", title: "Secret", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        await fixture.service.installExperimentalClickForTesting(action: { _, _ in action.increment(); return .failure })
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
+        XCTAssertEqual(action.value, 1)
+        let events = try fixture.audit.events(for: task.id)
+        XCTAssertTrue(events.contains { $0.result == "action outcome unknown; do not retry automatically" })
+        XCTAssertFalse(String(describing: events).contains("Secret"))
+    }
+    func testExperimentalClickSubmitTransactionFailureReleasesCapture() async throws {
+        let fixture = try Fixture(), action = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "click")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/private", role: "AXButton", title: "Secret", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let capture = SafariClickCapture { [candidate] }
+        await fixture.service.installExperimentalClickForTesting(action: { _, _ in action.increment(); return .success })
+        try fixture.database.write { db in try db.execute(sql: "CREATE TRIGGER reject_click_request BEFORE INSERT ON tool_requests BEGIN SELECT RAISE(ABORT, 'test failure'); END") }
+        await XCTAssertThrowsErrorAsync(try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: capture))
+        do { try await capture.verify(expected: identity); XCTFail("failed transaction retained capture") } catch { }
+        XCTAssertEqual(action.value, 0)
+    }
+    func testExperimentalClickExpiredTicketNeverActs() async throws {
+        let fixture = try Fixture(), action = ExperimentalClickActionCounter(), clock = ExperimentalClickClock()
+        let task = try await fixture.service.createTask(title: "click")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/private", role: "AXButton", title: "Secret", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        await fixture.service.installExperimentalClickForTesting(lifetime: 5, clock: { clock.read() }, action: { _, _ in action.increment(); return .success })
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        clock.advance()
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
+        XCTAssertEqual(action.value, 0)
+    }
+    func testExperimentalClickCancelDuringVerificationNeverActs() async throws {
+        let fixture = try Fixture(), action = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "click")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/private", role: "AXButton", title: "Secret", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "verification")
+        let gate = ExperimentalClickVerificationGate(entered: entered)
+        let capture = SafariClickCapture { await gate.visit(); return [candidate] }
+        await fixture.service.installExperimentalClickForTesting(action: { _, _ in action.increment(); return .success })
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: capture)
+        let approval = Task { try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest) }
+        await fulfillment(of: [entered], timeout: 2)
+        try await fixture.service.cancel(taskID: task.id)
+        await gate.release()
+        do { try await approval.value; XCTFail("cancelled click succeeded") } catch { }
+        XCTAssertEqual(action.value, 0)
+        XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .cancelled)
+    }
+    func testExperimentalClickCancelAfterActionStartsRecordsUnknownOutcome() async throws {
+        let fixture = try Fixture()
+        let task = try await fixture.service.createTask(title: "click")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/private", role: "AXButton", title: "Secret", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "action started")
+        let block = ExperimentalClickBlockingAction(entered)
+        await fixture.service.installExperimentalClickForTesting(action: { _, _ in block.run(); return .success })
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let approval = Task { try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest) }
+        await fulfillment(of: [entered], timeout: 2)
+        try await fixture.service.cancel(taskID: task.id)
+        let events = try fixture.audit.events(for: task.id)
+        XCTAssertTrue(events.contains { $0.result == "action outcome unknown; do not retry automatically" })
+        block.release.signal()
+        _ = try? await approval.value
+    }
+    func testExperimentalClickCancelAuditTransactionFailureKeepsUnknownForRetry() async throws {
+        let fixture = try Fixture()
+        let task = try await fixture.service.createTask(title: "click")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/private", role: "AXButton", title: "Secret", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "action started")
+        let block = ExperimentalClickBlockingAction(entered)
+        await fixture.service.installExperimentalClickForTesting(action: { _, _ in block.run(); return .success })
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let approval = Task { try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest) }
+        await fulfillment(of: [entered], timeout: 2)
+        try fixture.database.write { db in try db.execute(sql: "CREATE TRIGGER reject_cancel_audit BEFORE INSERT ON audit_events WHEN NEW.summary = 'task cancelled' BEGIN SELECT RAISE(ABORT, 'test'); END") }
+        await XCTAssertThrowsErrorAsync(try await fixture.service.cancel(taskID: task.id))
+        try fixture.database.write { db in try db.execute(sql: "DROP TRIGGER reject_cancel_audit") }
+        try await fixture.service.cancel(taskID: task.id)
+        let events = try fixture.audit.events(for: task.id)
+        XCTAssertTrue(events.contains { $0.result == "action outcome unknown; do not retry automatically" })
+        block.release.signal()
+        _ = try? await approval.value
+    }
+    func testExperimentalClickTaskCancellationAfterCommitClosesPendingRequest() async throws {
+        let fixture = try Fixture(), action = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "click")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/private", role: "AXButton", title: "Secret", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "committed")
+        let gate = ExperimentalClickVerificationGate(entered: entered, blockAt: 1)
+        await fixture.service.installExperimentalClickForTesting(afterSubmit: { await gate.visit() }, action: { _, _ in action.increment(); return .success })
+        let submission = Task { try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] }) }
+        await fulfillment(of: [entered], timeout: 2)
+        submission.cancel()
+        await gate.release()
+        do { _ = try await submission.value; XCTFail("cancelled submission succeeded") } catch { }
+        let pending = try fixture.requests.list(status: .pending).filter { $0.0.taskID == task.id }
+        XCTAssertTrue(pending.isEmpty)
+        XCTAssertEqual(action.value, 0)
+    }
+    func testExperimentalClickCompletionTransactionFailureRecordsUnknownOutcome() async throws {
+        let (fixture, task, request, action) = try await experimentalFixture()
+        try fixture.database.write { db in try db.execute(sql: "CREATE TRIGGER reject_click_complete BEFORE UPDATE ON tool_requests WHEN NEW.status = 'completed' BEGIN SELECT RAISE(ABORT, 'test'); END") }
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
+        XCTAssertEqual(action.value, 1)
+        let events = try fixture.audit.events(for: task.id)
+        XCTAssertTrue(events.contains { $0.result == "action outcome unknown; do not retry automatically" })
+        XCTAssertFalse(String(describing: events).contains("Secret"))
+    }
+    func testExperimentalClickCompletionAndFailureWritesBothFailReturnsUnknown() async throws {
+        let (fixture, _, request, action) = try await experimentalFixture()
+        try fixture.database.write { db in try db.execute(sql: "CREATE TRIGGER reject_finish BEFORE UPDATE ON tool_requests WHEN NEW.status IN ('completed', 'failed') BEGIN SELECT RAISE(ABORT, 'test'); END") }
+        do {
+            try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest)
+            XCTFail("persistence failures accepted")
+        } catch SafariPressFailure.actionOutcomeUnknown { }
+        catch { XCTFail("expected unknown outcome, got \(error)") }
+        XCTAssertEqual(action.value, 1)
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
+        XCTAssertEqual(action.value, 1)
+    }
+    func testExperimentalClickCompensationFailureShowsRecoveryInstruction() async throws {
+        let fixture = try Fixture(), action = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "click")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/private", role: "AXButton", title: "Secret", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let gate = ExperimentalClickVerificationGate(entered: expectation(description: "committed"), blockAt: 1)
+        let entered = gate.entered
+        await fixture.service.installExperimentalClickForTesting(afterSubmit: { await gate.visit() }, action: { _, _ in action.increment(); return .success })
+        let submission = Task { try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] }) }
+        await fulfillment(of: [entered], timeout: 2)
+        try fixture.database.write { db in try db.execute(sql: "CREATE TRIGGER reject_compensation BEFORE INSERT ON approvals BEGIN SELECT RAISE(ABORT, 'test'); END") }
+        submission.cancel()
+        await gate.release()
+        do { _ = try await submission.value; XCTFail("cancelled submission succeeded") } catch { }
+        let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        XCTAssertEqual(pending.count, 1)
+        XCTAssertTrue(pending[0].payload.contains("拒绝"))
+        XCTAssertTrue(pending[0].payload.contains("重新发起"))
+        XCTAssertEqual(action.value, 0)
+    }
+    func testExperimentalClickPreviewIsBoundAndNeverPersisted() async throws {
+        let (fixture, task, request, _) = try await experimentalFixture()
+        let previews = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        let preview = try XCTUnwrap(previews.first)
+        XCTAssertEqual(preview.target, "https://example.com/private")
+        XCTAssertTrue(preview.payload.contains("AXButton"))
+        XCTAssertTrue(preview.payload.contains("Secret"))
+        XCTAssertTrue(preview.payload.contains("启用"))
+        XCTAssertTrue(preview.payload.contains("风险"))
+        XCTAssertTrue(preview.payload.contains("非原子"))
+        XCTAssertTrue(preview.payload.contains("不可撤销"))
+        let persisted = try XCTUnwrap(fixture.requests.fetch(id: request.id)?.0)
+        XCTAssertFalse(String(describing: persisted).contains("Secret"))
+        XCTAssertFalse(String(describing: persisted).contains("example.com/private"))
+        XCTAssertFalse(String(describing: try fixture.audit.events(for: task.id)).contains("Secret"))
+        let forged = ToolRequest(id: request.id, taskID: task.id, name: request.name, sideEffect: request.sideEffect, target: request.target, payload: UUID().uuidString)
+        try fixture.database.write { db in try db.execute(sql: "UPDATE tool_requests SET payload = ?, payload_digest = ? WHERE id = ?", arguments: [forged.payload, forged.payloadDigest, request.id.uuidString]) }
+        let tampered = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        XCTAssertFalse(tampered[0].payload.contains("Secret"))
+        XCTAssertTrue(tampered[0].payload.contains("失效"))
+    }
+    func testExperimentalClickPreviewDisappearsOnExpiryRestartAndReject() async throws {
+        let fixture = try Fixture(), action = ExperimentalClickActionCounter(), clock = ExperimentalClickClock()
+        let task = try await fixture.service.createTask(title: "click")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com:8443/private", role: "AXButton", title: "Secret", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        await fixture.service.installExperimentalClickForTesting(lifetime: 5, clock: { clock.read() }, action: { _, _ in action.increment(); return .success })
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let previews = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        XCTAssertEqual(previews[0].target, "https://example.com:8443/private")
+        let restarted = try fixture.makeService()
+        let afterRestart = try await restarted.listPendingApprovalRequests(taskID: task.id)
+        XCTAssertTrue(afterRestart[0].payload.contains("失效"))
+        clock.advance()
+        let afterExpiry = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        XCTAssertTrue(afterExpiry[0].payload.contains("失效"))
+        XCTAssertFalse(afterExpiry[0].payload.contains("Secret"))
+        try await fixture.service.reject(requestID: request.id)
+        let afterRejection = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        XCTAssertTrue(afterRejection.isEmpty)
+    }
+    func testExperimentalClickPreviewShowsExactDistinctURLsAndEscapesControls() async throws {
+        let fixture = try Fixture()
+        let actualTask = try await fixture.service.createTask(title: "click")
+        let ref = AXUIElementCreateSystemWide()
+        let url = "https://example.com/a?secret=one"
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: url, role: "AXButton", title: "Safe\u{202E}Danger\nNext", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        await fixture.service.installExperimentalClickForTesting(action: { _, _ in .success })
+        _ = try await fixture.service.submitExperimentalClick(taskID: actualTask.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        var other = identity
+        other.url = "https://example.com/b?secret=two"
+        let otherCandidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: other)
+        _ = try await fixture.service.submitExperimentalClick(taskID: actualTask.id, identity: other, capture: SafariClickCapture { [otherCandidate] })
+        let previews = try await fixture.service.listPendingApprovalRequests(taskID: actualTask.id)
+        XCTAssertEqual(Set(previews.map(\.target)), Set([url, other.url]))
+        XCTAssertTrue(previews[0].payload.contains("\\u{202E}"))
+        XCTAssertTrue(previews[0].payload.contains("\\u{000A}"))
+        XCTAssertFalse(previews[0].payload.contains("\u{202E}"))
+        let allStored = String(describing: try fixture.requests.list(status: .pending)) + String(describing: try fixture.audit.events(for: actualTask.id))
+        XCTAssertFalse(allStored.contains("secret=one"))
+        XCTAssertFalse(allStored.contains("secret=two"))
+        XCTAssertFalse(allStored.contains("Danger"))
+    }
+    func testExperimentalClickPreviewRejectsOverlongTitle() async throws {
+        let fixture = try Fixture()
+        let actualTask = try await fixture.service.createTask(title: "click")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: String(repeating: "x", count: 600), enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        await fixture.service.installExperimentalClickForTesting(action: { _, _ in .success })
+        let request = try await fixture.service.submitExperimentalClick(taskID: actualTask.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let previews = try await fixture.service.listPendingApprovalRequests(taskID: actualTask.id)
+        XCTAssertTrue(previews[0].payload.contains("失效"))
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
+    }
+    func testExperimentalClickRejectsLongURLAndRole() async throws {
+        for isURL in [true, false] {
+            let fixture = try Fixture(), task = try await fixture.service.createTask(title: "click")
+            let ref = AXUIElementCreateSystemWide()
+            let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/" + (isURL ? String(repeating: "a", count: 2100) : "a"), role: isURL ? "AXButton" : String(repeating: "r", count: 129), title: "title", enabled: true, requestDigest: "")
+            let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+            await fixture.service.installExperimentalClickForTesting(action: { _, _ in XCTFail("oversized target executed"); return .success })
+            let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+            let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+            XCTAssertEqual(pending[0].previewAvailable, false)
+            await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
+        }
+    }
+    func testExperimentalClickSecretsNeverReachSQLiteOrWAL() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("jarvis-click-privacy-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let databaseURL = directory.appendingPathComponent("test.sqlite")
+        var handle: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(databaseURL.path, &handle), SQLITE_OK)
+        XCTAssertEqual(sqlite3_exec(handle, "PRAGMA journal_mode=WAL", nil, nil, nil), SQLITE_OK)
+        XCTAssertEqual(sqlite3_close(handle), SQLITE_OK)
+        let fixture = try Fixture(path: databaseURL.path)
+        let task = try await fixture.service.createTask(title: "privacy")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/path?token=JARVIS_URL_PRIVATE_3871", role: "AXButton", title: "JARVIS_TITLE_PRIVATE_9234", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        await fixture.service.installExperimentalClickForTesting(action: { _, _ in .success })
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let preview = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        XCTAssertTrue(preview[0].target.contains("JARVIS_URL_PRIVATE_3871"))
+        try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest)
+        let walURL = URL(fileURLWithPath: databaseURL.path + "-wal")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: walURL.path))
+        for url in [databaseURL, walURL] {
+            let data = try Data(contentsOf: url)
+            XCTAssertNil(data.range(of: Data("JARVIS_URL_PRIVATE_3871".utf8)))
+            XCTAssertNil(data.range(of: Data("JARVIS_TITLE_PRIVATE_9234".utf8)))
+        }
+    }
+    func testExperimentalClickDoublePersistenceFailureCannotReplayAfterServiceRestart() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("jarvis-click-restart-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = directory.appendingPathComponent("test.sqlite").path
+        let fixture = try Fixture(path: path), action = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "click")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "target", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        await fixture.service.installExperimentalClickForTesting(action: { _, _ in action.increment(); return .success })
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        try fixture.database.write { db in try db.execute(sql: "CREATE TRIGGER reject_finish BEFORE UPDATE ON tool_requests WHEN NEW.status IN ('completed', 'failed') BEGIN SELECT RAISE(ABORT, 'test'); END") }
+        do { try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest); XCTFail("write failure") }
+        catch SafariPressFailure.actionOutcomeUnknown { }
+        catch { XCTFail("expected unknown: \(error)") }
+        XCTAssertEqual(action.value, 1)
+        let restarted = try Fixture(path: path)
+        await restarted.service.installExperimentalClickForTesting(action: { _, _ in action.increment(); return .success })
+        await XCTAssertThrowsErrorAsync(try await restarted.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
+        XCTAssertEqual(action.value, 1)
+        XCTAssertEqual(try restarted.requests.fetch(id: request.id)?.1, .executing)
+        let second = try await restarted.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        await XCTAssertThrowsErrorAsync(try await restarted.service.approveExperimentalClick(requestID: second.id, digest: second.payloadDigest))
+        XCTAssertEqual(action.value, 1, "an unresolved earlier click must block a fresh request ID")
+    }
+    func testExperimentalClickBarrierBlocksConcurrentApprovalAndClearsOnSuccess() async throws {
+        let fixture = try Fixture(), other = try fixture.makeService(), counter = ExperimentalClickActionCounter()
+        let firstTask = try await fixture.service.createTask(title: "first")
+        let secondTask = try await other.createTask(title: "second")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "first click started"), block = ExperimentalClickBlockingAction(entered)
+        await fixture.service.installExperimentalClickForTesting(action: { _, _ in block.run(); return .success })
+        await other.installExperimentalClickForTesting(action: { _, _ in counter.increment(); return .success })
+        let first = try await fixture.service.submitExperimentalClick(taskID: firstTask.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let second = try await other.submitExperimentalClick(taskID: secondTask.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let execution = Task { try await fixture.service.approveExperimentalClick(requestID: first.id, digest: first.payloadDigest) }
+        await fulfillment(of: [entered], timeout: 2)
+        await XCTAssertThrowsErrorAsync(try await other.approveExperimentalClick(requestID: second.id, digest: second.payloadDigest))
+        XCTAssertEqual(counter.value, 0)
+        block.release.signal()
+        try await execution.value
+        let third = try await other.submitExperimentalClick(taskID: secondTask.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        try await other.approveExperimentalClick(requestID: third.id, digest: third.payloadDigest)
+        XCTAssertEqual(counter.value, 1)
+    }
+    func testExperimentalClickBarrierSurvivesCancellationAfterActionStart() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "cancel first")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "click started"), block = ExperimentalClickBlockingAction(entered)
+        await fixture.service.installExperimentalClickForTesting(action: { _, _ in block.run(); return .success })
+        let first = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let execution = Task { try await fixture.service.approveExperimentalClick(requestID: first.id, digest: first.payloadDigest) }
+        await fulfillment(of: [entered], timeout: 2)
+        try await fixture.service.cancel(taskID: task.id)
+        block.release.signal()
+        _ = try? await execution.value
+        let other = try fixture.makeService()
+        await other.installExperimentalClickForTesting(action: { _, _ in counter.increment(); return .success })
+        let otherTask = try await other.createTask(title: "new task")
+        let second = try await other.submitExperimentalClick(taskID: otherTask.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        await XCTAssertThrowsErrorAsync(try await other.approveExperimentalClick(requestID: second.id, digest: second.payloadDigest))
+        XCTAssertEqual(counter.value, 0)
+    }
+    func testExperimentalClickApprovalTransactionFailureLeavesNoBarrier() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "rollback")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        await fixture.service.installExperimentalClickForTesting(action: { _, _ in counter.increment(); return .success })
+        let first = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        try fixture.database.write { db in try db.execute(sql: "CREATE TRIGGER reject_click_approval2 BEFORE INSERT ON approvals BEGIN SELECT RAISE(ABORT, 'test failure'); END") }
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: first.id, digest: first.payloadDigest))
+        try fixture.database.write { db in try db.execute(sql: "DROP TRIGGER reject_click_approval2") }
+        let second = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        try await fixture.service.approveExperimentalClick(requestID: second.id, digest: second.payloadDigest)
+        XCTAssertEqual(counter.value, 1)
+    }
+    func testExperimentalClickBarrierMigrationImportsLegacyUnresolvedApproval() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "legacy")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        await fixture.service.installExperimentalClickForTesting(action: { _, _ in counter.increment(); return .success })
+        let legacy = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let approval = Approval(toolRequestID: legacy.id, actionDigest: legacy.payloadDigest, decision: .approved)
+        let uow = SQLitePersistenceUnitOfWork(database: fixture.database)
+        try uow.approveRequest(legacy, approval: approval, taskStatus: .running, audits: [])
+        try uow.finishRequest(legacy, status: .failed, taskStatus: .failed, audits: [])
+        try fixture.database.write { db in
+            try db.execute(sql: "DROP TABLE experimental_click_barriers")
+            try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier = 'persist experimental click barriers'")
+        }
+        try fixture.database.migrate()
+        let other = try fixture.makeService()
+        await other.installExperimentalClickForTesting(action: { _, _ in counter.increment(); return .success })
+        let nextTask = try await other.createTask(title: "new")
+        let next = try await other.submitExperimentalClick(taskID: nextTask.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        await XCTAssertThrowsErrorAsync(try await other.approveExperimentalClick(requestID: next.id, digest: next.payloadDigest))
+        XCTAssertEqual(counter.value, 0)
+    }
+    func testExperimentalClickBarrierIsSharedAcrossSeparateSQLiteConnections() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("jarvis-click-concurrency-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = directory.appendingPathComponent("test.sqlite").path
+        let firstFixture = try Fixture(path: path), secondFixture = try Fixture(path: path), counter = ExperimentalClickActionCounter()
+        let firstTask = try await firstFixture.service.createTask(title: "first")
+        let secondTask = try await secondFixture.service.createTask(title: "second")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "first click started"), block = ExperimentalClickBlockingAction(entered)
+        await firstFixture.service.installExperimentalClickForTesting(action: { _, _ in block.run(); return .success })
+        await secondFixture.service.installExperimentalClickForTesting(action: { _, _ in counter.increment(); return .success })
+        let first = try await firstFixture.service.submitExperimentalClick(taskID: firstTask.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let second = try await secondFixture.service.submitExperimentalClick(taskID: secondTask.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let execution = Task { try await firstFixture.service.approveExperimentalClick(requestID: first.id, digest: first.payloadDigest) }
+        await fulfillment(of: [entered], timeout: 2)
+        await XCTAssertThrowsErrorAsync(try await secondFixture.service.approveExperimentalClick(requestID: second.id, digest: second.payloadDigest))
+        XCTAssertEqual(counter.value, 0)
+        block.release.signal()
+        try await execution.value
+    }
+    func testExperimentalClickSimultaneousApprovalsCommitOnlyOneBarrier() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("jarvis-click-race-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = directory.appendingPathComponent("test.sqlite").path
+        let a = try Fixture(path: path), b = try Fixture(path: path)
+        let taskA = try await a.service.createTask(title: "a"), taskB = try await b.service.createTask(title: "b")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let block = ExperimentalClickRaceAction()
+        defer { block.release.signal() }
+        await a.service.installExperimentalClickForTesting(action: { _, _ in block.run(); return .success })
+        await b.service.installExperimentalClickForTesting(action: { _, _ in block.run(); return .success })
+        let requestA = try await a.service.submitExperimentalClick(taskID: taskA.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let requestB = try await b.service.submitExperimentalClick(taskID: taskB.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let outcomes = await withTaskGroup(of: ExperimentalClickRaceOutcome.self, returning: [ExperimentalClickRaceOutcome].self) { group in
+            group.addTask {
+                do { try await a.service.approveExperimentalClick(requestID: requestA.id, digest: requestA.payloadDigest); return .success }
+                catch { return .failure(String(reflecting: error)) }
+            }
+            group.addTask {
+                do { try await b.service.approveExperimentalClick(requestID: requestB.id, digest: requestB.payloadDigest); return .success }
+                catch { return .failure(String(reflecting: error)) }
+            }
+            // The winning action waits until the competing attempt finishes.
+            // If both fail closed (e.g. the global AX adapter is busy), both
+            // outcomes are still collected instead of overfulfilling XCTest.
+            let first = await group.next()!
+            block.release.signal()
+            let second = await group.next()!
+            return [first, second]
+        }
+        XCTAssertEqual(try a.approvals.list().filter { $0.decision == .approved }.count, 1, "outcomes: \(outcomes)")
+        XCTAssertLessThanOrEqual(block.count, 1, "outcomes: \(outcomes)")
+        let successes = outcomes.filter { $0 == .success }.count
+        XCTAssertLessThanOrEqual(successes, 1, "outcomes: \(outcomes)")
+        let barrier = try SQLitePersistenceUnitOfWork(database: a.database).hasExperimentalClickBarrier()
+        if successes == 0 { XCTAssertTrue(barrier, "uncertain/failed action must remain blocked: \(outcomes)") }
+        else { XCTAssertEqual(block.count, 1); XCTAssertFalse(barrier) }
+    }
+    func testConcurrentApprovalsFailClosedWhenPressAdapterIsBusy() async throws {
+        let blocker = try Fixture()
+        let blockerTask = try await blocker.service.createTask(title: "blocker")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "occupy global press adapter")
+        let blockingAction = ExperimentalClickBlockingAction(entered)
+        defer { blockingAction.release.signal() }
+        await blocker.service.installExperimentalClickForTesting { _, _ in blockingAction.run(); return .success }
+        let blockedRequest = try await blocker.service.submitExperimentalClick(taskID: blockerTask.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let blocked = Task { try await blocker.service.approveExperimentalClick(requestID: blockedRequest.id, digest: blockedRequest.payloadDigest) }
+        await fulfillment(of: [entered], timeout: 2)
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("jarvis-click-busy-repro-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = directory.appendingPathComponent("test.sqlite").path
+        let a = try Fixture(path: path), b = try Fixture(path: path)
+        let taskA = try await a.service.createTask(title: "a"), taskB = try await b.service.createTask(title: "b")
+        await a.service.installExperimentalClickForTesting { _, _ in XCTFail("busy action must not run"); return .success }
+        await b.service.installExperimentalClickForTesting { _, _ in XCTFail("busy action must not run"); return .success }
+        let requestA = try await a.service.submitExperimentalClick(taskID: taskA.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let requestB = try await b.service.submitExperimentalClick(taskID: taskB.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let first = Task { do { try await a.service.approveExperimentalClick(requestID: requestA.id, digest: requestA.payloadDigest); return "success" } catch { return String(reflecting: error) } }
+        let second = Task { do { try await b.service.approveExperimentalClick(requestID: requestB.id, digest: requestB.payloadDigest); return "success" } catch { return String(reflecting: error) } }
+        let firstResult = await first.value, secondResult = await second.value
+        XCTAssertNotEqual(firstResult, "success")
+        XCTAssertNotEqual(secondResult, "success")
+        XCTAssertEqual(try a.approvals.list().filter { $0.decision == .approved }.count, 1)
+        XCTAssertTrue(try SQLitePersistenceUnitOfWork(database: a.database).hasExperimentalClickBarrier())
+        blockingAction.release.signal()
+        _ = try? await blocked.value
+    }
+    func testExperimentalClickFocusPreflightTimeoutClearsBarrier() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "focus timeout")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let provider = ExperimentalPreflightFailureProvider(candidate, unknown: false)
+        await fixture.service.installExperimentalClickForTesting(focusTimeout: .zero, action: { _, _ in counter.increment(); return .success })
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { try await provider.next() })
+        do { try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest); XCTFail("expected focus timeout") }
+        catch SafariAXReadError.focusTimedOut { }
+        catch { XCTFail("unexpected: \(error)") }
+        XCTAssertFalse(try SQLitePersistenceUnitOfWork(database: fixture.database).hasExperimentalClickBarrier())
+        XCTAssertEqual(counter.value, 0)
+        let nextTask = try await fixture.service.createTask(title: "after focus timeout")
+        let next = try await fixture.service.submitExperimentalClick(taskID: nextTask.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        try await fixture.service.approveExperimentalClick(requestID: next.id, digest: next.payloadDigest)
+        XCTAssertEqual(counter.value, 1)
+    }
+    func testExperimentalClickFocusPreflightFailureWriteKeepsBarrier() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "focus failure")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let provider = ExperimentalPreflightFailureProvider(candidate, unknown: false)
+        await fixture.service.installExperimentalClickForTesting(focusTimeout: .zero, action: { _, _ in counter.increment(); return .success })
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { try await provider.next() })
+        try fixture.database.write { db in try db.execute(sql: "CREATE TRIGGER fail_preflight_finish BEFORE UPDATE ON tool_requests WHEN NEW.status = 'failed' BEGIN SELECT RAISE(ABORT, 'test'); END") }
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
+        XCTAssertTrue(try SQLitePersistenceUnitOfWork(database: fixture.database).hasExperimentalClickBarrier())
+        XCTAssertEqual(counter.value, 0)
+    }
+    func testExperimentalClickPreflightUnknownNeverClearsBarrier() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "unknown")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let provider = ExperimentalPreflightFailureProvider(candidate, unknown: true)
+        await fixture.service.installExperimentalClickForTesting(focusTimeout: .zero, action: { _, _ in counter.increment(); return .success })
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { try await provider.next() })
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
+        XCTAssertTrue(try SQLitePersistenceUnitOfWork(database: fixture.database).hasExperimentalClickBarrier())
+        XCTAssertEqual(counter.value, 0)
+    }
+    func testExperimentalClickPreflightTaskCancellationRevokesGateBeforeClearingBarrier() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "preflight cancellation")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "verification waiting"), gate = ExperimentalClickVerificationGate(entered: entered)
+        await fixture.service.installExperimentalClickForTesting(action: { _, _ in counter.increment(); return .success })
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { await gate.visit(); return [candidate] })
+        let approval = Task { try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest) }
+        await fulfillment(of: [entered], timeout: 2)
+        approval.cancel()
+        await gate.release()
+        do { try await approval.value; XCTFail("cancelled approval succeeded") } catch { }
+        XCTAssertFalse(try SQLitePersistenceUnitOfWork(database: fixture.database).hasExperimentalClickBarrier())
+        XCTAssertEqual(counter.value, 0)
+    }
+    func testExperimentalClickPreflightCancelledTaskKeepsBarrier() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "cancel task")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "verification waiting"), gate = ExperimentalClickVerificationGate(entered: entered)
+        await fixture.service.installExperimentalClickForTesting(action: { _, _ in counter.increment(); return .success })
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { await gate.visit(); return [candidate] })
+        let approval = Task { try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest) }
+        await fulfillment(of: [entered], timeout: 2)
+        try await fixture.service.cancel(taskID: task.id)
+        await gate.release()
+        do { try await approval.value; XCTFail("cancelled task succeeded") } catch { }
+        XCTAssertTrue(try SQLitePersistenceUnitOfWork(database: fixture.database).hasExperimentalClickBarrier())
+        XCTAssertEqual(counter.value, 0)
+    }
+    func testExperimentalClickWrongDigestRevokesTicket() async throws {
+        let (fixture, _, request, action) = try await experimentalFixture()
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: "wrong"))
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
+        XCTAssertTrue(try fixture.approvals.list().isEmpty)
+        XCTAssertEqual(action.value, 0)
+    }
+    func testExperimentalClickRejectCancelAndRestartFailClosed() async throws {
+        for scenario in 0..<3 {
+            let (fixture, task, request, action) = try await experimentalFixture()
+            if scenario == 0 { try await fixture.service.reject(requestID: request.id) }
+            if scenario == 1 { try await fixture.service.cancel(taskID: task.id) }
+            let service = scenario == 2 ? try fixture.makeService() : fixture.service
+            await XCTAssertThrowsErrorAsync(try await service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
+            XCTAssertEqual(action.value, 0)
+        }
+    }
+    func testExperimentalClickApprovalTransactionFailureRevokesTicket() async throws {
+        let (fixture, _, request, action) = try await experimentalFixture()
+        try fixture.database.write { db in try db.execute(sql: "CREATE TRIGGER reject_click_approval BEFORE INSERT ON approvals BEGIN SELECT RAISE(ABORT, 'test failure'); END") }
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
+        XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .pending)
+        XCTAssertTrue(try fixture.approvals.list().isEmpty)
+        try fixture.database.write { db in try db.execute(sql: "DROP TRIGGER reject_click_approval") }
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
+        XCTAssertEqual(action.value, 0)
+    }
+}
+private actor ExperimentalPreflightFailureProvider {
+    let candidate: SafariClickCandidate
+    let unknown: Bool
+    var calls = 0
+    init(_ candidate: SafariClickCandidate, unknown: Bool) { self.candidate = candidate; self.unknown = unknown }
+    func next() throws -> [SafariClickCandidate] {
+        calls += 1
+        if calls == 1 { return [candidate] }
+        if unknown { throw SafariPressFailure.actionOutcomeUnknown }
+        throw SafariAXReadError.notFocused
+    }
+}
+private actor ExperimentalClickVerificationGate {
+    let entered: XCTestExpectation
+    var count = 0
+    var continuation: CheckedContinuation<Void, Never>?
+    let blockAt: Int
+    init(entered: XCTestExpectation, blockAt: Int = 2) { self.entered = entered; self.blockAt = blockAt }
+    func visit() async {
+        count += 1
+        if count == blockAt { await withCheckedContinuation { continuation = $0; entered.fulfill() } }
+    }
+    func release() { continuation?.resume(); continuation = nil }
+}
+private final class ExperimentalClickBlockingAction: @unchecked Sendable {
+    let entered: XCTestExpectation
+    let release = DispatchSemaphore(value: 0)
+    init(_ entered: XCTestExpectation) { self.entered = entered }
+    func run() { entered.fulfill(); _ = release.wait(timeout: .now() + 5) }
+}
+private enum ExperimentalClickRaceOutcome: Equatable, Sendable {
+    case success
+    case failure(String)
+}
+private final class ExperimentalClickRaceAction: @unchecked Sendable {
+    private let lock = NSLock()
+    private var starts = 0
+    let release = DispatchSemaphore(value: 0)
+    var count: Int { lock.lock(); defer { lock.unlock() }; return starts }
+    func run() {
+        lock.lock(); starts += 1; lock.unlock()
+        _ = release.wait(timeout: .now() + 5)
+    }
+}
+private final class ExperimentalClickClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: TimeInterval = 0
+    func read() -> TimeInterval { lock.lock(); defer { lock.unlock() }; return value }
+    func advance() { lock.lock(); defer { lock.unlock() }; value = 6 }
+}
+private final class ExperimentalClickActionCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    func increment() { lock.lock(); defer { lock.unlock() }; count += 1 }
+    var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+}
+#endif
+
+#if os(macOS) && JARVIS_SAFARI_CLICK_EXPERIMENT && JARVIS_SAFARI_CLICK_TESTING
+extension TaskServiceTests {
+    func testExperimentalClickGateRejectsForgedOrMissingRequirements() {
+        let bundle = "local.jarvis.safari-click-experiment"
+        #if JARVIS_SAFARI_EXPERIMENT_BUILD
+        XCTAssertTrue(TaskService.experimentalSystemClickGateForTesting(bundleID: bundle, marker: NSNumber(value: true), optedIn: true, trusted: true))
+        #else
+        XCTAssertFalse(TaskService.experimentalSystemClickGateForTesting(bundleID: bundle, marker: NSNumber(value: true), optedIn: true, trusted: true))
+        #endif
+        XCTAssertFalse(TaskService.experimentalSystemClickGateForTesting(bundleID: "local.jarvis.dev", marker: NSNumber(value: true), optedIn: true, trusted: true))
+        XCTAssertFalse(TaskService.experimentalSystemClickGateForTesting(bundleID: bundle, marker: NSNumber(value: 1), optedIn: true, trusted: true))
+        XCTAssertFalse(TaskService.experimentalSystemClickGateForTesting(bundleID: bundle, marker: nil, optedIn: true, trusted: true))
+        XCTAssertFalse(TaskService.experimentalSystemClickGateForTesting(bundleID: bundle, marker: NSNumber(value: true), optedIn: false, trusted: true))
+        XCTAssertFalse(TaskService.experimentalSystemClickGateForTesting(bundleID: bundle, marker: NSNumber(value: true), optedIn: true, trusted: false))
+    }
+    func testExperimentalSystemPressRevocationBeforeFinalCheckNeverCallsSystem() async throws {
+        for revokePermission in [false, true] {
+            let fixture = try Fixture(), counter = ExperimentalClickActionCounter(), flags = ExperimentalSystemAuthorization()
+            let task = try await fixture.service.createTask(title: "revocation")
+            let ref = AXUIElementCreateSystemWide()
+            let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+            let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+            let entered = expectation(description: "final check")
+            let block = ExperimentalClickBlockingAction(entered)
+            await fixture.service.installExperimentalSystemClickForTesting(authorization: { flags.allowed }, beforeSystemCheck: { block.run() }) { _, _ in counter.increment(); return .success }
+            let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+            let attempt = Task { try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest) }
+            await fulfillment(of: [entered], timeout: 2)
+            flags.revoke(permission: revokePermission)
+            block.release.signal()
+            do { try await attempt.value; XCTFail("revoked action succeeded") } catch { }
+            XCTAssertEqual(counter.value, 0)
+            await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
+        }
+    }
+    func testExperimentalSystemPressRevocationBeforeApprovalInvalidatesTicket() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter(), flags = ExperimentalSystemAuthorization()
+        let task = try await fixture.service.createTask(title: "revocation")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        await fixture.service.installExperimentalSystemClickForTesting(authorization: { flags.allowed }) { _, _ in counter.increment(); return .success }
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        flags.revoke(permission: false)
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
+        flags.restore()
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
+        XCTAssertEqual(counter.value, 0)
+    }
+    func testExperimentalSystemPressRevocationEventCannotReviveTicket() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter(), flags = ExperimentalSystemAuthorization()
+        let task = try await fixture.service.createTask(title: "revocation event")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        await fixture.service.installExperimentalSystemClickForTesting(authorization: { flags.allowed }) { _, _ in counter.increment(); return .success }
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        flags.revoke(permission: false)
+        let alreadyStarted = try await fixture.service.experimentalSystemClickAuthorizationRevokedForTesting()
+        XCTAssertFalse(alreadyStarted)
+        flags.restore()
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
+        XCTAssertEqual(counter.value, 0)
+    }
+    func testExperimentalSystemPressRevocationAfterStartRecordsUnknown() async throws {
+        let fixture = try Fixture(), flags = ExperimentalSystemAuthorization()
+        let task = try await fixture.service.createTask(title: "started revocation")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "action started"), block = ExperimentalClickBlockingAction(entered)
+        await fixture.service.installExperimentalSystemClickForTesting(authorization: { flags.allowed }) { _, _ in block.run(); return .success }
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let approval = Task { try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest) }
+        await fulfillment(of: [entered], timeout: 2)
+        flags.revoke(permission: true)
+        let alreadyStarted = try await fixture.service.experimentalSystemClickAuthorizationRevokedForTesting()
+        XCTAssertTrue(alreadyStarted)
+        let events = try fixture.audit.events(for: task.id)
+        XCTAssertTrue(events.contains { $0.result == "action outcome unknown; do not retry automatically" })
+        block.release.signal()
+        _ = try? await approval.value
+    }
+    func testExperimentalSystemPressRevocationBeforeAtomicStartCannotBeRevived() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter(), flags = ExperimentalSystemAuthorization()
+        let task = try await fixture.service.createTask(title: "atomic start")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "before atomic start"), block = ExperimentalClickBlockingAction(entered)
+        await fixture.service.installExperimentalSystemClickForTesting(authorization: { flags.allowed }, beforeStart: { block.run() }) { _, _ in counter.increment(); return .success }
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let attempt = Task { try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest) }
+        await fulfillment(of: [entered], timeout: 2)
+        flags.revoke(permission: false)
+        let started = try await fixture.service.experimentalSystemClickAuthorizationRevokedForTesting()
+        XCTAssertFalse(started)
+        flags.restore()
+        block.release.signal()
+        do { try await attempt.value; XCTFail("revoked action succeeded") } catch { }
+        XCTAssertEqual(counter.value, 0)
+    }
+    func testExperimentalSystemPressRevocationBetweenCheckAndCASNeverStarts() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "check then start")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "authorization check waiting")
+        let gate = ExperimentalAuthorizationCheckPause(entered)
+        await fixture.service.installExperimentalSystemClickForTesting(authorization: { gate.check() }, beforeStart: { gate.arm() }) { _, _ in counter.increment(); return .success }
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let attempt = Task { try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest) }
+        await fulfillment(of: [entered], timeout: 2)
+        let started = try await fixture.service.experimentalSystemClickAuthorizationRevokedForTesting()
+        XCTAssertFalse(started)
+        gate.release.signal()
+        do { try await attempt.value; XCTFail("revoked action succeeded") } catch { }
+        XCTAssertEqual(counter.value, 0)
+    }
+    func testExperimentalClickModeDisableRevokesPendingAndReenableUsesNewGeneration() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "mode")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        try fixture.service.enableExperimentalClickModeForTesting(allowed: true) { _, _ in counter.increment(); return .success }
+        let first = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        XCTAssertTrue(fixture.service.isExperimentalClickModeEnabled)
+        let cleanup = fixture.service.disableExperimentalClickMode()
+        try await cleanup.value
+        XCTAssertFalse(fixture.service.isExperimentalClickModeEnabled)
+        XCTAssertEqual(try fixture.requests.fetch(id: first.id)?.1, .rejected)
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: first.id, digest: first.payloadDigest))
+        try fixture.service.enableExperimentalClickModeForTesting(allowed: true) { _, _ in counter.increment(); return .success }
+        let second = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        try await fixture.service.approveExperimentalClick(requestID: second.id, digest: second.payloadDigest)
+        XCTAssertEqual(counter.value, 1)
+    }
+    func testExperimentalClickModeCannotEnableWithoutAuthorization() throws {
+        let fixture = try Fixture()
+        XCTAssertThrowsError(try fixture.service.enableExperimentalClickModeForTesting(allowed: false) { _, _ in XCTFail("must not execute"); return .success })
+    }
+    func testExperimentalClickCapabilityFollowsModeAndDurableBarrier() async throws {
+        let fixture = try Fixture()
+        XCTAssertFalse(fixture.service.isExperimentalSafariClickEnabled())
+        try fixture.service.enableExperimentalClickModeForTesting(allowed: true) { _, _ in .success }
+        XCTAssertTrue(fixture.service.isExperimentalSafariClickEnabled())
+        try fixture.database.write { db in
+            try db.execute(sql: "INSERT INTO experimental_click_barriers (request_id) VALUES (?)", arguments: [UUID().uuidString])
+        }
+        XCTAssertFalse(fixture.service.isExperimentalSafariClickEnabled())
+        let cleanup = fixture.service.disableExperimentalClickMode()
+        _ = try await cleanup.value
+        XCTAssertFalse(fixture.service.isExperimentalSafariClickEnabled())
+    }
+    func testExperimentalClickModeCleanupFailureCanBeRetried() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "cleanup")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        try fixture.service.enableExperimentalClickModeForTesting(allowed: true) { _, _ in counter.increment(); return .success }
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        try fixture.database.write { db in try db.execute(sql: "CREATE TRIGGER reject_mode_cleanup BEFORE INSERT ON approvals BEGIN SELECT RAISE(ABORT, 'test'); END") }
+        let first = fixture.service.disableExperimentalClickMode()
+        do { _ = try await first.value; XCTFail("expected cleanup failure") } catch { }
+        XCTAssertTrue(fixture.service.isExperimentalClickCleanupRequired)
+        XCTAssertThrowsError(try fixture.service.enableExperimentalClickModeForTesting(allowed: true) { _, _ in .success })
+        try fixture.database.write { db in try db.execute(sql: "DROP TRIGGER reject_mode_cleanup") }
+        let retry = fixture.service.disableExperimentalClickMode()
+        _ = try await retry.value
+        XCTAssertFalse(fixture.service.isExperimentalClickCleanupRequired)
+        XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .rejected)
+        XCTAssertEqual(counter.value, 0)
+    }
+    func testExperimentalClickModeCanBeDisabledAfterPermissionLoss() async throws {
+        let fixture = try Fixture(), flags = ExperimentalSystemAuthorization()
+        await fixture.service.installExperimentalSystemClickForTesting(authorization: { flags.allowed }) { _, _ in .success }
+        flags.revoke(permission: true)
+        XCTAssertFalse(fixture.service.isExperimentalClickModeEnabled)
+        XCTAssertTrue(fixture.service.isExperimentalClickCleanupRequired)
+        let cleanup = fixture.service.disableExperimentalClickMode()
+        _ = try await cleanup.value
+        XCTAssertFalse(fixture.service.isExperimentalClickModeEnabled)
+    }
+    func testExperimentalClickModeOldPreparedRequestCannotCommitAfterReenable() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "mode race")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "prepared"), gate = ExperimentalClickVerificationGate(entered: entered, blockAt: 1)
+        try fixture.service.enableExperimentalClickModeForTesting(allowed: true, beforeCommit: { await gate.visit() }) { _, _ in counter.increment(); return .success }
+        let submit = Task { try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] }) }
+        await fulfillment(of: [entered], timeout: 2)
+        let cleanup = fixture.service.disableExperimentalClickMode()
+        _ = try await cleanup.value
+        try fixture.service.enableExperimentalClickModeForTesting(allowed: true) { _, _ in counter.increment(); return .success }
+        await gate.release()
+        do { _ = try await submit.value; XCTFail("old generation committed") } catch { }
+        XCTAssertTrue(try fixture.requests.list(status: .pending).filter { $0.0.taskID == task.id }.isEmpty)
+        XCTAssertEqual(counter.value, 0)
+    }
+    func testExperimentalClickModeDisableAfterStartReportsUnknown() async throws {
+        let fixture = try Fixture()
+        let actualTask = try await fixture.service.createTask(title: "mode started")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "action started"), block = ExperimentalClickBlockingAction(entered)
+        try fixture.service.enableExperimentalClickModeForTesting(allowed: true) { _, _ in block.run(); return .success }
+        let request = try await fixture.service.submitExperimentalClick(taskID: actualTask.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let approval = Task { try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest) }
+        await fulfillment(of: [entered], timeout: 2)
+        let cleanup = fixture.service.disableExperimentalClickMode()
+        let started = try await cleanup.value
+        XCTAssertTrue(started)
+        XCTAssertTrue(try fixture.audit.events(for: actualTask.id).contains { $0.result == "action outcome unknown; do not retry automatically" })
+        block.release.signal()
+        _ = try? await approval.value
+    }
+    func testExperimentalClickModePermissionLossCannotRevivePendingTicket() async throws {
+        let fixture = try Fixture(), flags = ExperimentalSystemAuthorization(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "permission revoked")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        await fixture.service.installExperimentalSystemClickForTesting(authorization: { flags.allowed }) { _, _ in counter.increment(); return .success }
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        flags.revoke(permission: true)
+        XCTAssertFalse(fixture.service.isExperimentalClickModeEnabled)
+        XCTAssertTrue(fixture.service.isExperimentalClickCleanupRequired)
+        flags.restore()
+        XCTAssertFalse(fixture.service.isExperimentalClickModeEnabled)
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
+        let cleanup = fixture.service.disableExperimentalClickMode()
+        _ = try await cleanup.value
+        XCTAssertEqual(try fixture.requests.fetch(id: request.id)?.1, .rejected)
+        XCTAssertEqual(counter.value, 0)
+    }
+    func testExperimentalClickModeObservedPermissionLossInvalidatesOtherPending() async throws {
+        let fixture = try Fixture(), flags = ExperimentalSystemAuthorization(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "permission revoked")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        await fixture.service.installExperimentalSystemClickForTesting(authorization: { flags.allowed }) { _, _ in counter.increment(); return .success }
+        let first = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let second = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        flags.revoke(permission: true)
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: first.id, digest: first.payloadDigest))
+        flags.restore()
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: second.id, digest: second.payloadDigest))
+        XCTAssertEqual(counter.value, 0)
+    }
+    func testExperimentalClickTargetSelectionNeedsApprovalAndUsesExactInputs() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "select")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a?token=private", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        try fixture.service.enableExperimentalClickModeForTesting(allowed: true) { _, _ in counter.increment(); return .success }
+        fixture.service.installExperimentalClickTargetSelectorForTesting { role, title in
+            guard role == identity.role, title == identity.title else { throw TaskServiceCapabilityError.unavailable }
+            return (identity, SafariClickCapture { [candidate] })
+        }
+        let request = try await fixture.service.submitExperimentalSafariClick(taskID: task.id, role: "AXButton", title: "Open")
+        XCTAssertEqual(counter.value, 0)
+        let previews = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        XCTAssertEqual(previews.first?.target, identity.url)
+        try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest)
+        XCTAssertEqual(counter.value, 1)
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
+        XCTAssertEqual(counter.value, 1)
+    }
+    func testExperimentalClickTargetSelectionRejectsMissingOrAmbiguous() async throws {
+        for candidateCount in [0, 2] {
+            let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+            let task = try await fixture.service.createTask(title: "select")
+            let ref = AXUIElementCreateSystemWide()
+            let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+            let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+            try fixture.service.enableExperimentalClickModeForTesting(allowed: true) { _, _ in counter.increment(); return .success }
+            fixture.service.installExperimentalClickTargetSelectorForTesting { _, _ in (identity, SafariClickCapture { Array(repeating: candidate, count: candidateCount) }) }
+            await XCTAssertThrowsErrorAsync(try await fixture.service.submitExperimentalSafariClick(taskID: task.id, role: "AXButton", title: "Open"))
+            XCTAssertTrue(try fixture.requests.list(status: .pending).isEmpty)
+            XCTAssertEqual(counter.value, 0)
+        }
+    }
+    func testExperimentalClickRoutesRequireModeAndPersistedApproval() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "route")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        fixture.service.installExperimentalClickTargetSelectorForTesting { _, _ in (identity, SafariClickCapture { [candidate] }) }
+        let server = LoopbackServer(service: fixture.service)
+        let body = try JSONEncoder().encode(["role": "AXButton", "title": "Open"])
+        let path = "/tasks/\(task.id.uuidString)/safari-click"
+        let disabled = await server.handle(method: "POST", path: path, body: body, peerHost: "127.0.0.1")
+        XCTAssertNotEqual(disabled.status, 201)
+        try fixture.service.enableExperimentalClickModeForTesting(allowed: true) { _, _ in counter.increment(); return .success }
+        let submitted = await server.handle(method: "POST", path: path, body: body, peerHost: "127.0.0.1")
+        XCTAssertEqual(submitted.status, 201)
+        let request = try JSONDecoder().decode(ToolRequest.self, from: submitted.body)
+        XCTAssertEqual(counter.value, 0)
+        let approvalBody = try JSONEncoder().encode(["digest": request.payloadDigest])
+        let approved = await server.handle(method: "POST", path: "/requests/\(request.id.uuidString)/safari-click-approve", body: approvalBody, peerHost: "127.0.0.1")
+        XCTAssertEqual(approved.status, 204)
+        XCTAssertEqual(counter.value, 1)
+        let replay = await server.handle(method: "POST", path: "/requests/\(request.id.uuidString)/safari-click-approve", body: approvalBody, peerHost: "127.0.0.1")
+        XCTAssertNotEqual(replay.status, 204)
+        XCTAssertEqual(counter.value, 1)
+        let secondResponse = await server.handle(method: "POST", path: path, body: body, peerHost: "127.0.0.1")
+        let second = try JSONDecoder().decode(ToolRequest.self, from: secondResponse.body)
+        let cleanup = fixture.service.disableExperimentalClickMode()
+        _ = try await cleanup.value
+        let secondBody = try JSONEncoder().encode(["digest": second.payloadDigest])
+        let blocked = await server.handle(method: "POST", path: "/requests/\(second.id.uuidString)/safari-click-approve", body: secondBody, peerHost: "127.0.0.1")
+        XCTAssertNotEqual(blocked.status, 204)
+        XCTAssertEqual(counter.value, 1)
+    }
+    func testExperimentalClickApprovalWaitsForSafariFocusBeforePress() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "focus")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let provider = ExperimentalClickFocusFixture(candidate)
+        try fixture.service.enableExperimentalClickModeForTesting(allowed: true) { _, _ in counter.increment(); return .success }
+        fixture.service.installExperimentalClickTargetSelectorForTesting { _, _ in (identity, SafariClickCapture { try await provider.next() }) }
+        let request = try await fixture.service.submitExperimentalSafariClick(taskID: task.id, role: "AXButton", title: "Open")
+        try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest)
+        XCTAssertEqual(counter.value, 1)
+    }
+    func testExperimentalClickRouteReportsUnknownWithoutTargetLeak() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "route failure")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a?token=secret", role: "AXButton", title: "private title", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        fixture.service.installExperimentalClickTargetSelectorForTesting { _, _ in (identity, SafariClickCapture { [candidate] }) }
+        try fixture.service.enableExperimentalClickModeForTesting(allowed: true) { _, _ in counter.increment(); return .failure }
+        let server = LoopbackServer(service: fixture.service)
+        let body = try JSONEncoder().encode(["role": "AXButton", "title": "private title"])
+        let submitted = await server.handle(method: "POST", path: "/tasks/\(task.id.uuidString)/safari-click", body: body, peerHost: "127.0.0.1")
+        let request = try JSONDecoder().decode(ToolRequest.self, from: submitted.body)
+        let approvalBody = try JSONEncoder().encode(["digest": request.payloadDigest])
+        let response = await server.handle(method: "POST", path: "/requests/\(request.id.uuidString)/safari-click-approve", body: approvalBody, peerHost: "127.0.0.1")
+        XCTAssertEqual(response.status, 409)
+        let text = String(decoding: response.body, as: UTF8.self)
+        XCTAssertTrue(text.contains("结果未知"))
+        XCTAssertFalse(text.contains("secret"))
+        XCTAssertFalse(text.contains("private title"))
+        XCTAssertEqual(counter.value, 1)
+    }
+    func testExperimentalClickDisabledModeDoesNotInvokeSelectorDuringCleanup() async throws {
+        let fixture = try Fixture(), selections = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "selector disabled")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "cleanup waiting"), gate = ExperimentalClickVerificationGate(entered: entered, blockAt: 1)
+        try fixture.service.enableExperimentalClickModeForTesting(allowed: true) { _, _ in .success }
+        fixture.service.installExperimentalClickTargetSelectorForTesting { _, _ in
+            selections.increment()
+            return (identity, SafariClickCapture(beforeClear: { await gate.visit() }) { [candidate] })
+        }
+        _ = try await fixture.service.submitExperimentalSafariClick(taskID: task.id, role: "AXButton", title: "Open")
+        let cleanup = fixture.service.disableExperimentalClickMode()
+        await fulfillment(of: [entered], timeout: 2)
+        await XCTAssertThrowsErrorAsync(try await fixture.service.submitExperimentalSafariClick(taskID: task.id, role: "AXButton", title: "Open"))
+        XCTAssertEqual(selections.value, 1)
+        await gate.release()
+        _ = try await cleanup.value
+    }
+    func testExperimentalClickBarrierRouteExplainsUnavailableRecovery() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let firstTask = try await fixture.service.createTask(title: "first")
+        let secondTask = try await fixture.service.createTask(title: "second")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        fixture.service.installExperimentalClickTargetSelectorForTesting { _, _ in (identity, SafariClickCapture { [candidate] }) }
+        try fixture.service.enableExperimentalClickModeForTesting(allowed: true) { _, _ in counter.increment(); return .failure }
+        let server = LoopbackServer(service: fixture.service)
+        let body = try JSONEncoder().encode(["role": "AXButton", "title": "Open"])
+        let firstResponse = await server.handle(method: "POST", path: "/tasks/\(firstTask.id.uuidString)/safari-click", body: body, peerHost: "127.0.0.1")
+        let first = try JSONDecoder().decode(ToolRequest.self, from: firstResponse.body)
+        let firstApproval = try JSONEncoder().encode(["digest": first.payloadDigest])
+        let firstResult = await server.handle(method: "POST", path: "/requests/\(first.id.uuidString)/safari-click-approve", body: firstApproval, peerHost: "127.0.0.1")
+        XCTAssertEqual(firstResult.status, 409)
+        let secondResponse = await server.handle(method: "POST", path: "/tasks/\(secondTask.id.uuidString)/safari-click", body: body, peerHost: "127.0.0.1")
+        let second = try JSONDecoder().decode(ToolRequest.self, from: secondResponse.body)
+        let secondApproval = try JSONEncoder().encode(["digest": second.payloadDigest])
+        let blocked = await server.handle(method: "POST", path: "/requests/\(second.id.uuidString)/safari-click-approve", body: secondApproval, peerHost: "127.0.0.1")
+        XCTAssertEqual(blocked.status, 409)
+        XCTAssertTrue(String(decoding: blocked.body, as: UTF8.self).contains("没有解除入口"))
+        XCTAssertEqual(counter.value, 1)
+    }
+    func testExperimentalClickConfirmedBeforeStartTimeoutClearsBarrier() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "before start")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "worker before start"), block = ExperimentalClickBlockingAction(entered)
+        await fixture.service.installExperimentalSystemClickForTesting(beforeStart: { block.run() }) { _, _ in counter.increment(); return .success }
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let approval = Task { try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest) }
+        await fulfillment(of: [entered], timeout: 2)
+        do { try await approval.value; XCTFail("timeout expected") }
+        catch SafariPressFailure.timeoutBeforeStart { }
+        catch { XCTFail("unexpected error: \(error)") }
+        XCTAssertFalse(try SQLitePersistenceUnitOfWork(database: fixture.database).hasExperimentalClickBarrier())
+        XCTAssertEqual(counter.value, 0)
+        block.release.signal()
+    }
+    func testExperimentalClickBeforeStartFailureWriteKeepsBarrier() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "before start rollback")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "worker before start"), block = ExperimentalClickBlockingAction(entered)
+        await fixture.service.installExperimentalSystemClickForTesting(beforeStart: { block.run() }) { _, _ in counter.increment(); return .success }
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        try fixture.database.write { db in try db.execute(sql: "CREATE TRIGGER reject_safe_finish BEFORE UPDATE ON tool_requests WHEN NEW.status = 'failed' BEGIN SELECT RAISE(ABORT, 'test'); END") }
+        let approval = Task { try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest) }
+        await fulfillment(of: [entered], timeout: 2)
+        do { try await approval.value; XCTFail("timeout expected") } catch { }
+        XCTAssertTrue(try SQLitePersistenceUnitOfWork(database: fixture.database).hasExperimentalClickBarrier())
+        XCTAssertEqual(counter.value, 0)
+        block.release.signal()
+    }
+    func testExperimentalSystemPressRunsOnlyAfterDurableApprovalAndOnce() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "system press test")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        await fixture.service.installExperimentalSystemClickForTesting { _, operation in
+            XCTAssertEqual(operation as String, kAXPressAction as String)
+            XCTAssertEqual(try? fixture.approvals.list().filter { $0.decision == .approved }.count, 1)
+            counter.increment()
+            return .success
+        }
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        XCTAssertEqual(counter.value, 0)
+        try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest)
+        XCTAssertEqual(counter.value, 1)
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
+        XCTAssertEqual(counter.value, 1)
+    }
+    func testExperimentalSystemPressDenialNeverCallsSystem() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "system press denied")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        await fixture.service.installExperimentalSystemClickForTesting { _, _ in counter.increment(); return .success }
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: "wrong"))
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
+        XCTAssertEqual(counter.value, 0)
+    }
+    func testExperimentalSystemPressTimeoutAfterStartIsUnknown() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "system press timeout")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let entered = expectation(description: "system action entered")
+        let block = ExperimentalClickBlockingAction(entered)
+        await fixture.service.installExperimentalSystemClickForTesting { _, _ in counter.increment(); block.run(); return .success }
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        let attempt = Task { try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest) }
+        await fulfillment(of: [entered], timeout: 2)
+        do { try await attempt.value; XCTFail("expected unknown") }
+        catch SafariPressFailure.actionOutcomeUnknown { }
+        catch { XCTFail("unexpected error: \(error)") }
+        block.release.signal()
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
+        XCTAssertEqual(counter.value, 1)
+    }
+    func testExperimentalSystemPressChangedTargetNeverCallsSystem() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "system target changed")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let provider = ExperimentalSystemChangingProvider(candidate)
+        await fixture.service.installExperimentalSystemClickForTesting { _, _ in counter.increment(); return .success }
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { await provider.next() })
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
+        XCTAssertEqual(counter.value, 0)
+    }
+    func testExperimentalSystemPressFailureIsUnknownAndNeverRetried() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let task = try await fixture.service.createTask(title: "system press failure")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        await fixture.service.installExperimentalSystemClickForTesting { _, operation in
+            XCTAssertEqual(operation as String, kAXPressAction as String)
+            counter.increment()
+            return .failure
+        }
+        let request = try await fixture.service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        do { try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest); XCTFail("expected unknown") }
+        catch SafariPressFailure.actionOutcomeUnknown { }
+        catch { XCTFail("unexpected error: \(error)") }
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest))
+        XCTAssertEqual(counter.value, 1)
+    }
+}
+private actor ExperimentalSystemChangingProvider {
+    let candidate: SafariClickCandidate
+    var calls = 0
+    init(_ candidate: SafariClickCandidate) { self.candidate = candidate }
+    func next() -> [SafariClickCandidate] { calls += 1; return calls == 1 ? [candidate] : [] }
+}
+private final class ExperimentalSystemAuthorization: @unchecked Sendable {
+    private let lock = NSLock()
+    private var optedIn = true, permission = true
+    var allowed: Bool { lock.lock(); defer { lock.unlock() }; return optedIn && permission }
+    func revoke(permission: Bool) { lock.lock(); defer { lock.unlock() }; if permission { self.permission = false } else { optedIn = false } }
+    func restore() { lock.lock(); defer { lock.unlock() }; optedIn = true; permission = true }
+}
+private final class ExperimentalAuthorizationCheckPause: @unchecked Sendable {
+    private let lock = NSLock()
+    private var armed = false
+    let entered: XCTestExpectation
+    let release = DispatchSemaphore(value: 0)
+    init(_ entered: XCTestExpectation) { self.entered = entered }
+    func arm() { lock.lock(); defer { lock.unlock() }; armed = true }
+    func check() -> Bool {
+        lock.lock(); let shouldWait = armed; armed = false; lock.unlock()
+        if shouldWait { entered.fulfill(); _ = release.wait(timeout: .now() + 5) }
+        return true
+    }
+}
+private actor ExperimentalClickFocusFixture {
+    let candidate: SafariClickCandidate
+    var calls = 0
+    init(_ candidate: SafariClickCandidate) { self.candidate = candidate }
+    func next() throws -> [SafariClickCandidate] {
+        calls += 1
+        if calls == 2 || calls == 3 { throw SafariAXReadError.notFocused }
+        return [candidate]
+    }
+}
+#endif
+
+#if !JARVIS_SAFARI_CLICK_EXPERIMENT || (!JARVIS_SAFARI_EXPERIMENT_BUILD && !JARVIS_COMBINED_EXPERIMENT)
+extension TaskServiceTests {
+    func testExperimentalClickRoutesAreAbsentInDefaultBuild() async throws {
+        let fixture = try Fixture(), task = try await fixture.service.createTask(title: "default")
+        let server = LoopbackServer(service: fixture.service)
+        let body = try JSONEncoder().encode(["role": "AXButton", "title": "Open"])
+        let response = await server.handle(method: "POST", path: "/tasks/\(task.id.uuidString)/safari-click", body: body, peerHost: "127.0.0.1")
+        XCTAssertEqual(response.status, 404)
+        let approval = await server.handle(method: "POST", path: "/requests/\(UUID().uuidString)/safari-click-approve", body: Data(), peerHost: "127.0.0.1")
+        XCTAssertEqual(approval.status, 404)
+    }
+}
+#endif
+
+#if os(macOS) && JARVIS_SAFARI_CLICK_EXPERIMENT && JARVIS_SAFARI_CLICK_TESTING && JARVIS_SAFARI_EXPERIMENT_BUILD
+extension TaskServiceTests {
+    func testReadGateAndClickModeAreIndependent() async throws {
+        let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
+        let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: Policy(allowSafariRead: true), enableSafariRead: true, requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
+        XCTAssertTrue(service.isSafariReadEnabled())
+        try service.enableExperimentalClickModeForTesting(allowed: true) { _, _ in counter.increment(); return .success }
+        try service.setSafariReadEnabled(false)
+        XCTAssertFalse(service.isSafariReadEnabled())
+        let task = try await service.createTask(title: "independent click")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        let request = try await service.submitExperimentalClick(taskID: task.id, identity: identity, capture: SafariClickCapture { [candidate] })
+        try service.setSafariReadEnabled(false)
+        XCTAssertEqual(counter.value, 0)
+        try await service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest)
+        XCTAssertEqual(counter.value, 1)
+        let cleanup = service.disableExperimentalClickMode()
+        _ = try await cleanup.value
+        XCTAssertFalse(service.isSafariReadEnabled())
+    }
+}
+#endif
+
+#if os(macOS) && JARVIS_SAFARI_CLICK_EXPERIMENT && JARVIS_SAFARI_CLICK_TESTING && JARVIS_SAFARI_EXPERIMENT_BUILD
+extension TaskServiceTests {
+    func testDisablingClickDoesNotDisableApprovedSafariRead() async throws {
+        let fixture = try Fixture(), capture = SafariCaptureFixture()
+        let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: Policy(allowSafariRead: true), enableSafariRead: true, requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
+        service.safariCaptureFactory = { capture }
+        try service.enableExperimentalClickModeForTesting(allowed: true) { _, _ in XCTFail("No click should run"); return .success }
+        _ = try await service.disableExperimentalClickMode().value
+        XCTAssertTrue(service.isSafariReadEnabled())
+        let task = try await service.createTask(title: "independent read")
+        let request = try await service.prepareSafariRead(taskID: task.id)
+        guard case .requireApproval = try await service.submit(request: request) else { return XCTFail("Read must require approval") }
+        let beforeApproval = try await service.takeEphemeralToolResult(taskID: task.id, requestID: request.id, digest: request.payloadDigest)
+        XCTAssertNil(beforeApproval)
+        try await service.approve(requestID: request.id, digest: request.payloadDigest)
+        try await fixture.waitForRequest(id: request.id, status: .completed)
+        let result = try await service.takeEphemeralToolResult(taskID: task.id, requestID: request.id, digest: request.payloadDigest)
+        XCTAssertEqual(result, "private page text")
+    }
+
+    func testDisablingReadDuringClickTargetSelectionDoesNotCancelClick() async throws {
+        let fixture = try Fixture(), selectorGate = DelayedPage(), counter = ExperimentalClickActionCounter()
+        let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: Policy(allowSafariRead: true), enableSafariRead: true, requestRepository: fixture.requests, approvalRepository: fixture.approvals, unitOfWork: SQLitePersistenceUnitOfWork(database: fixture.database))
+        try service.enableExperimentalClickModeForTesting(allowed: true) { _, _ in counter.increment(); return .success }
+        let task = try await service.createTask(title: "independent click selection")
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/a", role: "AXButton", title: "Open", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        service.installExperimentalClickTargetSelectorForTesting { _, _ in
+            await selectorGate.wait()
+            return (identity, SafariClickCapture { [candidate] })
+        }
+        let pending = Task { try await service.submitExperimentalSafariClick(taskID: task.id, role: "AXButton", title: "Open") }
+        for _ in 0..<100 { if await selectorGate.hasStarted() { break }; try await Task.sleep(for: .milliseconds(10)) }
+        let started = await selectorGate.hasStarted()
+        XCTAssertTrue(started)
+        try service.setSafariReadEnabled(false)
+        await selectorGate.release()
+        let request = try await pending.value
+        XCTAssertFalse(service.isSafariReadEnabled())
+        XCTAssertEqual(counter.value, 0)
+        try await service.approveExperimentalClick(requestID: request.id, digest: request.payloadDigest)
+        XCTAssertEqual(counter.value, 1)
+        _ = try await service.disableExperimentalClickMode().value
+    }
+}
+#endif
+
+#if os(macOS) && JARVIS_SAFARI_CLICK_EXPERIMENT && JARVIS_SAFARI_CLICK_TESTING && JARVIS_COMBINED_EXPERIMENT
+extension TaskServiceTests {
+    func testCombinedClickRequiresExactIdentityBothBooleanMarkersAndOptIn() {
+        func gate(_ bundle: String?, _ marker: Any?, _ combined: Any?, _ optedIn: Bool = true, _ trusted: Bool = true) -> Bool {
+            TaskService.experimentalSystemClickGateForTesting(bundleID: bundle, marker: marker, combinedMarker: combined, optedIn: optedIn, trusted: trusted)
+        }
+        let identity = "local.jarvis.combined-experiment"
+        XCTAssertTrue(gate(identity, NSNumber(value: true), NSNumber(value: true)))
+        XCTAssertFalse(gate("local.jarvis.safari-click-experiment", NSNumber(value: true), NSNumber(value: true)))
+        XCTAssertFalse(gate(identity, nil, NSNumber(value: true)))
+        XCTAssertFalse(gate(identity, NSNumber(value: true), nil))
+        XCTAssertFalse(gate(identity, NSNumber(value: 1), NSNumber(value: true)))
+        XCTAssertFalse(gate(identity, NSNumber(value: true), NSNumber(value: 1)))
+        XCTAssertFalse(gate(identity, NSNumber(value: true), NSNumber(value: true), false))
+        XCTAssertFalse(gate(identity, NSNumber(value: true), NSNumber(value: true), true, false))
+    }
+}
+#endif
+
+extension TaskServiceTests {
+    func testExactBrowserDisableReenableRevokesPendingTicket() async throws {
+        #if !JARVIS_EXACT_BROWSER_EXPERIMENT && !JARVIS_COMBINED_EXPERIMENT
+        throw XCTSkip("Exact browser feature is unavailable in ordinary builds")
+        #endif
+        let recorder = BrowserRecorder()
+        let service = try Fixture(browserOpen: BrowserOpenExecutor(opener: { _ in false }, exactOpener: { url in recorder.record(url); return true }), exactBrowserEnabled: true).service
+        let task = try await service.createTask(title: "open")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private?secret=1", payload: "Open in browser")
+        _ = try await service.submit(request: request)
+        let pending = try await service.listPendingApprovalRequests(taskID: task.id)
+        let item = try XCTUnwrap(pending.first)
+        XCTAssertEqual(item.target, request.target)
+        try service.setExactBrowserEnabled(false)
+        try service.setExactBrowserEnabled(true)
+        let after = try await service.listPendingApprovalRequests(taskID: task.id)
+        XCTAssertFalse(after[0].target.contains("secret"))
+        await XCTAssertThrowsErrorAsync(try await service.approve(requestID: item.id, digest: item.digest))
+        XCTAssertEqual(recorder.count, 0)
+    }
+    func testExactBrowserExecutorRejectsRevokedGenerationBeforeOpen() async throws {
+        let recorder = BrowserRecorder()
+        let executor = BrowserOpenExecutor(opener: { _ in false }, exactOpener: { url in recorder.record(url); return true })
+        let gate = ExactBrowserSessionGate()
+        gate.setEnabled(true)
+        let generation = try XCTUnwrap(gate.capture())
+        gate.setEnabled(false)
+        gate.setEnabled(true)
+        let request = ToolRequest(taskID: UUID(), name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private", payload: "Open in browser")
+        await XCTAssertThrowsErrorAsync(try await executor.executeApprovedExact(request, gate: gate, generation: generation))
+        XCTAssertEqual(recorder.count, 0)
+    }
+}
+
+extension TaskServiceTests {
+    #if !JARVIS_EXACT_BROWSER_EXPERIMENT && !JARVIS_COMBINED_EXPERIMENT
+    func testOrdinaryBuildCannotEnableExactBrowserEvenWithExplicitArguments() throws {
+        let fixture = try Fixture()
+        let service = try TaskService(taskRepository: fixture.tasks, auditRepository: fixture.audit, policy: Policy(), exactBrowserEnabled: true, allowExactBrowserToggle: true)
+        XCTAssertFalse(service.isExactBrowserEnabled())
+        XCTAssertThrowsError(try service.setExactBrowserEnabled(true))
+    }
+    #endif
+}
+
+extension TaskServiceTests {
+    func testExactBrowserCloseDoesNotWaitForStartedOpener() async throws {
+        let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0), closed = DispatchSemaphore(value: 0)
+        let gate = ExactBrowserSessionGate()
+        gate.setEnabled(true)
+        let generation = try XCTUnwrap(gate.capture())
+        let executor = BrowserOpenExecutor(opener: { _ in false }, exactOpener: { _ in
+            entered.signal()
+            return await withCheckedContinuation { continuation in
+                DispatchQueue.global().async {
+                    continuation.resume(returning: release.wait(timeout: .now() + 5) == .success)
+                }
+            }
+        })
+        let request = ToolRequest(taskID: UUID(), name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private", payload: "Open in browser")
+        let operation = Task.detached { try await executor.executeApprovedExact(request, gate: gate, generation: generation) }
+        let enteredWait = await withCheckedContinuation { continuation in
+            DispatchQueue.global().async { continuation.resume(returning: entered.wait(timeout: .now() + 2) == .success) }
+        }
+        XCTAssertTrue(enteredWait)
+        DispatchQueue.global().async { gate.setEnabled(false); closed.signal() }
+        let closeWait = await withCheckedContinuation { continuation in
+            DispatchQueue.global().async { continuation.resume(returning: closed.wait(timeout: .now() + 1) == .success) }
+        }
+        release.signal()
+        XCTAssertTrue(closeWait)
+        _ = try await operation.value
+        await XCTAssertThrowsErrorAsync(try await executor.executeApprovedExact(request, gate: gate, generation: generation))
+    }
+}
+
+extension TaskServiceTests {
+    func testExactBrowserFailureAfterStartReportsUnknownOutcome() async throws {
+        let gate = ExactBrowserSessionGate()
+        gate.setEnabled(true)
+        let generation = try XCTUnwrap(gate.capture())
+        let executor = BrowserOpenExecutor(opener: { _ in false }, exactOpener: { _ in false })
+        let request = ToolRequest(taskID: UUID(), name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private?secret=1", payload: "Open in browser")
+        do {
+            _ = try await executor.executeApprovedExact(request, gate: gate, generation: generation)
+            XCTFail("expected unknown outcome")
+        } catch BrowserOpenError.outcomeUnknown { }
+        catch { XCTFail("unexpected error: \(error)") }
+    }
+
+    func testExactBrowserCancellationAfterStartReportsUnknownOutcome() async throws {
+        let gate = ExactBrowserSessionGate()
+        gate.setEnabled(true)
+        let generation = try XCTUnwrap(gate.capture())
+        let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        let executor = BrowserOpenExecutor(opener: { _ in false }, exactOpener: { _ in
+            entered.signal()
+            return await withCheckedContinuation { continuation in
+                DispatchQueue.global().async { continuation.resume(returning: release.wait(timeout: .now() + 5) == .success) }
+            }
+        })
+        let request = ToolRequest(taskID: UUID(), name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private", payload: "Open in browser")
+        let operation = Task { try await executor.executeApprovedExact(request, gate: gate, generation: generation) }
+        let didStart = await withCheckedContinuation { continuation in
+            DispatchQueue.global().async { continuation.resume(returning: entered.wait(timeout: .now() + 2) == .success) }
+        }
+        XCTAssertTrue(didStart)
+        operation.cancel()
+        release.signal()
+        do { _ = try await operation.value; XCTFail("expected unknown outcome") }
+        catch BrowserOpenError.outcomeUnknown { }
+        catch { XCTFail("unexpected error: \(error)") }
+    }
+}
+
+#if JARVIS_EXACT_BROWSER_EXPERIMENT || JARVIS_COMBINED_EXPERIMENT
+extension TaskServiceTests {
+    func testStartedBrowserFailureReportsUnknownWithoutLeakingURL() async throws {
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { _ in false }, exactOpener: { _ in false }), exactBrowserEnabled: true)
+        let task = try await fixture.service.createTask(title: "open")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private?secret=private-token", payload: "Open in browser")
+        _ = try await fixture.service.submit(request: request)
+        let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        let item = try XCTUnwrap(pending.first)
+        try await fixture.service.approve(requestID: item.id, digest: item.digest)
+        try await fixture.waitForRequest(id: item.id, status: .failed)
+        let events = try fixture.audit.events(for: task.id)
+        let failure = try XCTUnwrap(events.first { $0.summary == "tool failure" })
+        XCTAssertTrue(failure.result.contains("outcome is unknown"))
+        XCTAssertTrue(failure.result.contains("do not retry automatically"))
+        XCTAssertTrue(events.allSatisfy { !$0.result.contains("private-token") && !$0.target.contains("private-token") })
+    }
+    func testCancelledStartedBrowserRecordsUnknownOutcomeWithoutLeakingURL() async throws {
+        let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        let executor = BrowserOpenExecutor(opener: { _ in false }, exactOpener: { _ in
+            entered.signal()
+            return await withCheckedContinuation { continuation in
+                DispatchQueue.global().async { continuation.resume(returning: release.wait(timeout: .now() + 5) == .success) }
+            }
+        })
+        let fixture = try Fixture(browserOpen: executor, exactBrowserEnabled: true)
+        let task = try await fixture.service.createTask(title: "open")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private?secret=private-token", payload: "Open in browser")
+        _ = try await fixture.service.submit(request: request)
+        let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        let item = try XCTUnwrap(pending.first)
+        try await fixture.service.approve(requestID: item.id, digest: item.digest)
+        let didStart = await withCheckedContinuation { continuation in
+            DispatchQueue.global().async { continuation.resume(returning: entered.wait(timeout: .now() + 2) == .success) }
+        }
+        XCTAssertTrue(didStart)
+        try await fixture.service.cancel(taskID: task.id)
+        release.signal()
+        await fixture.service.waitForTrackedExecution(item.id)
+        let events = try fixture.audit.events(for: task.id)
+        let warning = try XCTUnwrap(events.first { $0.summary == "browser open outcome unknown" })
+        XCTAssertTrue(warning.result.contains("do not retry automatically"))
+        XCTAssertTrue(events.allSatisfy { !$0.result.contains("private-token") && !$0.target.contains("private-token") })
+    }
+}
+#endif
+
+#if JARVIS_EXACT_BROWSER_EXPERIMENT || JARVIS_COMBINED_EXPERIMENT
+extension TaskServiceTests {
+    #if JARVIS_SAFARI_CLICK_TESTING
+    func testCancelAfterSuccessfulOpenBeforeCommitReportsUnknown() async throws {
+        let page = DelayedPage()
+        let executor = BrowserOpenExecutor(opener: { _ in false }, exactOpener: { _ in true })
+        let fixture = try Fixture(browserOpen: executor, exactBrowserEnabled: true)
+        fixture.service.testAfterExactBrowserOpen = { await page.wait() }
+        let task = try await fixture.service.createTask(title: "open")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private?secret=private-token", payload: "Open in browser")
+        _ = try await fixture.service.submit(request: request)
+        let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        let item = try XCTUnwrap(pending.first)
+        try await fixture.service.approve(requestID: item.id, digest: item.digest)
+        for _ in 0..<100 where !(await page.hasStarted()) { try await Task.sleep(for: .milliseconds(10)) }
+        let started = await page.hasStarted(); XCTAssertTrue(started)
+        try await fixture.service.cancel(taskID: task.id)
+        await page.release()
+        await fixture.service.waitForTrackedExecution(item.id)
+        let events = try await fixture.service.listTimelineEvents(taskID: task.id)
+        let warning = try XCTUnwrap(events.last { $0.summary == "browser open outcome unknown" })
+        XCTAssertEqual(warning.requestID, item.id)
+        XCTAssertTrue(warning.result.contains("do not retry automatically"))
+        XCTAssertTrue(try SQLitePersistenceUnitOfWork(database: fixture.database).hasExactBrowserBarrier())
+        XCTAssertTrue(events.allSatisfy { !$0.result.contains("private-token") && !$0.target.contains("private-token") })
+    }
+    #endif
+    func testDatabaseFailureAfterOpenReturnsVolatileUnknown() async throws {
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { _ in false }, exactOpener: { _ in true }), exactBrowserEnabled: true)
+        let task = try await fixture.service.createTask(title: "open")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private?secret=private-token", payload: "Open in browser")
+        _ = try await fixture.service.submit(request: request)
+        let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        let item = try XCTUnwrap(pending.first)
+        try fixture.database.write { db in try db.execute(sql: "CREATE TRIGGER reject_browser_finish BEFORE UPDATE ON tool_requests WHEN NEW.status IN ('completed', 'failed') BEGIN SELECT RAISE(ABORT, 'test'); END") }
+        try await fixture.service.approve(requestID: item.id, digest: item.digest)
+        await fixture.service.waitForTrackedExecution(item.id)
+        let events = try await fixture.service.listTimelineEvents(taskID: task.id)
+        let warning = try XCTUnwrap(events.last { $0.summary == "browser open outcome unknown" })
+        XCTAssertTrue(warning.result.contains("do not retry automatically"))
+        XCTAssertTrue(try SQLitePersistenceUnitOfWork(database: fixture.database).hasExactBrowserBarrier())
+        XCTAssertTrue(events.allSatisfy { !$0.result.contains("private-token") && !$0.target.contains("private-token") })
+    }
+}
+#endif
+
+#if JARVIS_EXACT_BROWSER_EXPERIMENT || JARVIS_COMBINED_EXPERIMENT
+extension TaskServiceTests {
+    func testUnknownBrowserOutcomeBlocksNextRequestWithoutDroppingOutcome() async throws {
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { _ in false }, exactOpener: { _ in false }), exactBrowserEnabled: true)
+        let first = try await fixture.service.createTask(title: "first")
+        let request = ToolRequest(taskID: first.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private/first", payload: "Open in browser")
+        _ = try await fixture.service.submit(request: request)
+        let pending = try await fixture.service.listPendingApprovalRequests(taskID: first.id)
+        let item = try XCTUnwrap(pending.first)
+        try await fixture.service.approve(requestID: item.id, digest: item.digest)
+        await fixture.service.waitForTrackedExecution(item.id)
+        let task = try await fixture.service.createTask(title: "later")
+        let later = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private/later", payload: "Open in browser")
+        do { _ = try await fixture.service.submit(request: later); XCTFail("expected unresolved barrier") }
+        catch ExactBrowserBarrierError.unresolved { }
+        XCTAssertNil(try fixture.requests.fetch(id: later.id))
+        let events = try await fixture.service.listTimelineEvents(taskID: first.id)
+        XCTAssertTrue(events.contains { $0.summary == "browser open outcome unknown" && $0.requestID == item.id })
+    }
+}
+#endif
+
+#if JARVIS_EXACT_BROWSER_EXPERIMENT || JARVIS_COMBINED_EXPERIMENT
+extension TaskServiceTests {
+    func testPendingExactBrowserRequestsCountTowardCapacity() async throws {
+        let fixture = try Fixture(exactBrowserEnabled: true)
+        for index in 0..<64 {
+            let task = try await fixture.service.createTask(title: "pending \(index)")
+            let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private/\(index)", payload: "Open in browser")
+            _ = try await fixture.service.submit(request: request)
+        }
+        let task = try await fixture.service.createTask(title: "overflow")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private/overflow", payload: "Open in browser")
+        do { _ = try await fixture.service.submit(request: request); XCTFail("Expected capacity limit") }
+        catch BrowserOpenError.exactCapacityReached {
+            let message = BrowserOpenError.exactCapacityReached.localizedDescription
+            XCTAssertTrue(message.contains("64"))
+            XCTAssertTrue(message.contains("pending"))
+            XCTAssertTrue(message.contains("unknown"))
+            XCTAssertFalse(message.contains("example.com"))
+        }
+        XCTAssertNil(try fixture.requests.fetch(id: request.id))
+    }
+}
+#endif
+
+#if JARVIS_EXACT_BROWSER_EXPERIMENT || JARVIS_COMBINED_EXPERIMENT
+extension TaskServiceTests {
+    func testExactBrowserUncertainOutcomeBlocksAfterRestart() async throws {
+        let path = NSTemporaryDirectory() + "jarvis-exact-barrier-\(UUID().uuidString).sqlite"
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let first = try Fixture(path: path, browserOpen: BrowserOpenExecutor(opener: { _ in false }, exactOpener: { _ in false }), exactBrowserEnabled: true)
+        let task = try await first.service.createTask(title: "open")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private", payload: "Open in browser")
+        _ = try await first.service.submit(request: request)
+        let pending = try await first.service.listPendingApprovalRequests(taskID: task.id)
+        let item = try XCTUnwrap(pending.first)
+        try await first.service.approve(requestID: item.id, digest: item.digest)
+        await first.service.waitForTrackedExecution(item.id)
+        let second = try Fixture(path: path, browserOpen: BrowserOpenExecutor(opener: { _ in false }, exactOpener: { _ in true }), exactBrowserEnabled: true)
+        let laterTask = try await second.service.createTask(title: "later")
+        let later = ToolRequest(taskID: laterTask.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/other", payload: "Open in browser")
+        do { _ = try await second.service.submit(request: later); XCTFail("expected durable barrier") }
+        catch ExactBrowserBarrierError.unresolved { }
+    }
+    func testExactBrowserBarrierWriteFailureNeverOpens() async throws {
+        let recorder = BrowserRecorder()
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { _ in false }, exactOpener: { url in recorder.record(url); return true }), exactBrowserEnabled: true)
+        let task = try await fixture.service.createTask(title: "open")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private", payload: "Open in browser")
+        _ = try await fixture.service.submit(request: request)
+        let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        let item = try XCTUnwrap(pending.first)
+        try fixture.database.write { db in try db.execute(sql: "CREATE TRIGGER reject_exact_barrier BEFORE INSERT ON exact_browser_barriers BEGIN SELECT RAISE(ABORT, 'test'); END") }
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approve(requestID: item.id, digest: item.digest))
+        XCTAssertEqual(recorder.count, 0)
+        XCTAssertEqual(try fixture.requests.fetch(id: item.id)?.1, .pending)
+    }
+}
+#endif
+
+#if JARVIS_EXACT_BROWSER_EXPERIMENT || JARVIS_COMBINED_EXPERIMENT
+extension TaskServiceTests {
+    func testExactBrowserApprovalBarrierIsSharedAcrossConnectionsAndSuccessClearsIt() async throws {
+        let path = NSTemporaryDirectory() + "jarvis-exact-multi-\(UUID().uuidString).sqlite"
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let page = DelayedPage()
+        let executor = BrowserOpenExecutor(opener: { _ in false }, exactOpener: { _ in await page.wait(); return true })
+        let first = try Fixture(path: path, browserOpen: executor, exactBrowserEnabled: true)
+        let second = try Fixture(path: path, browserOpen: executor, exactBrowserEnabled: true)
+        let a = try await first.service.createTask(title: "a")
+        let b = try await second.service.createTask(title: "b")
+        let reqA = ToolRequest(taskID: a.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/a", payload: "Open in browser")
+        let reqB = ToolRequest(taskID: b.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/b", payload: "Open in browser")
+        _ = try await first.service.submit(request: reqA)
+        _ = try await second.service.submit(request: reqB)
+        let pendingA = try await first.service.listPendingApprovalRequests(taskID: a.id)
+        let pendingB = try await second.service.listPendingApprovalRequests(taskID: b.id)
+        let itemA = try XCTUnwrap(pendingA.first), itemB = try XCTUnwrap(pendingB.first)
+        try await first.service.approve(requestID: itemA.id, digest: itemA.digest)
+        for _ in 0..<100 where !(await page.hasStarted()) { try await Task.sleep(for: .milliseconds(10)) }
+        let started = await page.hasStarted(); XCTAssertTrue(started)
+        do { try await second.service.approve(requestID: itemB.id, digest: itemB.digest); XCTFail("expected shared barrier") }
+        catch ExactBrowserBarrierError.unresolved { }
+        XCTAssertEqual(try second.requests.fetch(id: itemB.id)?.1, .pending)
+        await page.release()
+        try await first.waitForRequest(id: itemA.id, status: .completed)
+        XCTAssertEqual(try first.requests.fetch(id: itemA.id)?.1, .completed)
+        XCTAssertFalse(try SQLitePersistenceUnitOfWork(database: second.database).hasExactBrowserBarrier())
+    }
+}
+#endif
+
+#if JARVIS_EXACT_BROWSER_EXPERIMENT || JARVIS_COMBINED_EXPERIMENT
+extension TaskServiceTests {
+    func testConcurrentExactBrowserApprovalsAcrossConnectionsStartAtMostOne() async throws {
+        let path = NSTemporaryDirectory() + "jarvis-exact-race-\(UUID().uuidString).sqlite"
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let recorder = BrowserRecorder()
+        let executor = BrowserOpenExecutor(opener: { _ in false }, exactOpener: { url in
+            recorder.record(url)
+            try? await Task.sleep(for: .milliseconds(500))
+            return true
+        })
+        let first = try Fixture(path: path, browserOpen: executor, exactBrowserEnabled: true)
+        let second = try Fixture(path: path, browserOpen: executor, exactBrowserEnabled: true)
+        let a = try await first.service.createTask(title: "a")
+        let b = try await second.service.createTask(title: "b")
+        let reqA = ToolRequest(taskID: a.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/a", payload: "Open in browser")
+        let reqB = ToolRequest(taskID: b.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/b", payload: "Open in browser")
+        _ = try await first.service.submit(request: reqA)
+        _ = try await second.service.submit(request: reqB)
+        let pa = try await first.service.listPendingApprovalRequests(taskID: a.id)
+        let pb = try await second.service.listPendingApprovalRequests(taskID: b.id)
+        let itemA = try XCTUnwrap(pa.first), itemB = try XCTUnwrap(pb.first)
+        func attempt(_ service: TaskService, _ item: PendingApprovalRequest) async -> Bool {
+            do { try await service.approve(requestID: item.id, digest: item.digest); return true } catch { return false }
+        }
+        async let acceptedA = attempt(first.service, itemA)
+        async let acceptedB = attempt(second.service, itemB)
+        let outcomes = await [acceptedA, acceptedB]
+        XCTAssertEqual(outcomes.filter { $0 }.count, 1)
+        await first.service.waitForTrackedExecution(itemA.id)
+        await second.service.waitForTrackedExecution(itemB.id)
+        XCTAssertEqual(recorder.count, 1)
+    }
+    func testApprovalTransactionRollbackDoesNotLeaveExactBrowserBarrier() async throws {
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { _ in false }, exactOpener: { _ in true }), exactBrowserEnabled: true)
+        let task = try await fixture.service.createTask(title: "open")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private", payload: "Open in browser")
+        _ = try await fixture.service.submit(request: request)
+        let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        let item = try XCTUnwrap(pending.first)
+        try fixture.database.write { db in try db.execute(sql: "CREATE TRIGGER reject_exact_approval BEFORE INSERT ON approvals BEGIN SELECT RAISE(ABORT, 'test'); END") }
+        await XCTAssertThrowsErrorAsync(try await fixture.service.approve(requestID: item.id, digest: item.digest))
+        XCTAssertFalse(try SQLitePersistenceUnitOfWork(database: fixture.database).hasExactBrowserBarrier())
+        XCTAssertEqual(try fixture.requests.fetch(id: item.id)?.1, .pending)
+    }
+}
+#endif
+
+#if (JARVIS_EXACT_BROWSER_EXPERIMENT || JARVIS_COMBINED_EXPERIMENT) && JARVIS_SAFARI_CLICK_TESTING
+extension TaskServiceTests {
+    func testRevocationBeforeBrowserStartClearsDurableBarrier() async throws {
+        let page = DelayedPage(), recorder = BrowserRecorder()
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { _ in false }, exactOpener: { url in recorder.record(url); return true }), exactBrowserEnabled: true)
+        fixture.service.testBeforeExactBrowserOpen = { await page.wait() }
+        let task = try await fixture.service.createTask(title: "open")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private", payload: "Open in browser")
+        _ = try await fixture.service.submit(request: request)
+        let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        let item = try XCTUnwrap(pending.first)
+        try await fixture.service.approve(requestID: item.id, digest: item.digest)
+        for _ in 0..<100 where !(await page.hasStarted()) { try await Task.sleep(for: .milliseconds(10)) }
+        let started = await page.hasStarted(); XCTAssertTrue(started)
+        XCTAssertTrue(try SQLitePersistenceUnitOfWork(database: fixture.database).hasExactBrowserBarrier())
+        try fixture.service.setExactBrowserEnabled(false)
+        await page.release()
+        await fixture.service.waitForTrackedExecution(item.id)
+        XCTAssertEqual(recorder.count, 0)
+        XCTAssertFalse(try SQLitePersistenceUnitOfWork(database: fixture.database).hasExactBrowserBarrier())
+    }
+}
+#endif
+
+#if (JARVIS_EXACT_BROWSER_EXPERIMENT || JARVIS_COMBINED_EXPERIMENT) && JARVIS_SAFARI_CLICK_TESTING
+extension TaskServiceTests {
+    func testPreStartBarrierClearFailureLeavesBarrierAndWarning() async throws {
+        let page = DelayedPage(), recorder = BrowserRecorder()
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { _ in false }, exactOpener: { url in recorder.record(url); return true }), exactBrowserEnabled: true)
+        fixture.service.testBeforeExactBrowserOpen = { await page.wait() }
+        let task = try await fixture.service.createTask(title: "open")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private", payload: "Open in browser")
+        _ = try await fixture.service.submit(request: request)
+        let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        let item = try XCTUnwrap(pending.first)
+        try await fixture.service.approve(requestID: item.id, digest: item.digest)
+        for _ in 0..<100 where !(await page.hasStarted()) { try await Task.sleep(for: .milliseconds(10)) }
+        let started = await page.hasStarted(); XCTAssertTrue(started)
+        try fixture.database.write { db in try db.execute(sql: "CREATE TRIGGER reject_exact_clear BEFORE DELETE ON exact_browser_barriers BEGIN SELECT RAISE(ABORT, 'test'); END") }
+        try fixture.service.setExactBrowserEnabled(false)
+        await page.release()
+        await fixture.service.waitForTrackedExecution(item.id)
+        XCTAssertEqual(recorder.count, 0)
+        XCTAssertTrue(try SQLitePersistenceUnitOfWork(database: fixture.database).hasExactBrowserBarrier())
+        let events = try await fixture.service.listTimelineEvents(taskID: task.id)
+        XCTAssertTrue(events.contains { $0.summary == "browser open outcome unknown" && $0.requestID == item.id })
+    }
+}
+#endif
+
+#if JARVIS_EXACT_BROWSER_EXPERIMENT || JARVIS_COMBINED_EXPERIMENT
+extension TaskServiceTests {
+    func testExactBrowserInFlightBarrierSurvivesNewServiceInstance() async throws {
+        let path = NSTemporaryDirectory() + "jarvis-exact-inflight-\(UUID().uuidString).sqlite"
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let page = DelayedPage()
+        let first = try Fixture(path: path, browserOpen: BrowserOpenExecutor(opener: { _ in false }, exactOpener: { _ in await page.wait(); return false }), exactBrowserEnabled: true)
+        let task = try await first.service.createTask(title: "open")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private", payload: "Open in browser")
+        _ = try await first.service.submit(request: request)
+        let pending = try await first.service.listPendingApprovalRequests(taskID: task.id)
+        let item = try XCTUnwrap(pending.first)
+        try await first.service.approve(requestID: item.id, digest: item.digest)
+        for _ in 0..<100 where !(await page.hasStarted()) { try await Task.sleep(for: .milliseconds(10)) }
+        let started = await page.hasStarted(); XCTAssertTrue(started)
+        let restarted = try Fixture(path: path, browserOpen: BrowserOpenExecutor(opener: { _ in false }, exactOpener: { _ in true }), exactBrowserEnabled: true)
+        let laterTask = try await restarted.service.createTask(title: "later")
+        let later = ToolRequest(taskID: laterTask.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/later", payload: "Open in browser")
+        do { _ = try await restarted.service.submit(request: later); XCTFail("expected in-flight barrier") }
+        catch ExactBrowserBarrierError.unresolved { }
+        await page.release()
+        await first.service.waitForTrackedExecution(item.id)
+        XCTAssertTrue(try SQLitePersistenceUnitOfWork(database: restarted.database).hasExactBrowserBarrier())
+    }
+}
+#endif
+
+#if JARVIS_EXACT_BROWSER_EXPERIMENT || JARVIS_COMBINED_EXPERIMENT
+extension TaskServiceTests {
+    func testExactBrowserBarrierReadFailureBlocksNewAction() async throws {
+        let recorder = BrowserRecorder()
+        let fixture = try Fixture(browserOpen: BrowserOpenExecutor(opener: { _ in false }, exactOpener: { url in recorder.record(url); return true }), exactBrowserEnabled: true)
+        let task = try await fixture.service.createTask(title: "open")
+        try fixture.database.write { db in try db.execute(sql: "DROP TABLE exact_browser_barriers") }
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private", payload: "Open in browser")
+        await XCTAssertThrowsErrorAsync(try await fixture.service.submit(request: request))
+        XCTAssertNil(try fixture.requests.fetch(id: request.id))
+        XCTAssertEqual(recorder.count, 0)
+    }
+}
+#endif
+
+#if JARVIS_SAFARI_CLICK_TESTING && (JARVIS_EXACT_BROWSER_EXPERIMENT || JARVIS_COMBINED_EXPERIMENT)
+extension TaskServiceTests {
+    func testPendingSnapshotDoesNotHoldServiceLockWhileWaitingForBrowserGate() async throws {
+        let fixture = try Fixture(exactBrowserEnabled: true)
+        let task = try await fixture.service.createTask(title: "lock ordering")
+        let request = ToolRequest(taskID: task.id, name: "browser_open", sideEffect: .externalSend, target: "https://example.com/private", payload: "Open in browser")
+        _ = try await fixture.service.submit(request: request)
+        let snapshot = DispatchSemaphore(value: 0), gateHeld = DispatchSemaphore(value: 0)
+        let gateCompleted = expectation(description: "gate then service lock")
+        fixture.service.testPendingSnapshot = { snapshot.signal(); _ = gateHeld.wait(timeout: .now() + 2) }
+        DispatchQueue.global().async {
+            guard snapshot.wait(timeout: .now() + 2) == .success else { return }
+            let acquired = fixture.service.testGateThenServiceLock { gateHeld.signal() }
+            XCTAssertTrue(acquired, "service lock must be released before waiting on the gate")
+            gateCompleted.fulfill()
+        }
+        let pending = try await fixture.service.listPendingApprovalRequests(taskID: task.id)
+        await fulfillment(of: [gateCompleted], timeout: 3)
+        XCTAssertEqual(pending.first?.target, "https://example.com/private")
+    }
+}
+#endif
