@@ -10,6 +10,7 @@ enum SpeechTextFormatter {
                 inFence.toggle()
                 return nil
             }
+            if inFence { return raw }
             var line = raw
             if !inFence {
                 line = replacing(line, pattern: #"^\s{0,3}(?:#{1,6}\s+|>\s*|[-+*]\s+|\d+[.)]\s+)"#, with: "")
@@ -18,7 +19,6 @@ enum SpeechTextFormatter {
                 line = replacing(line, pattern: #"(?<!\S)[*_]([^*_\n]+)[*_](?!\S)"#, with: "$1")
             }
             line = line.replacingOccurrences(of: "`", with: "")
-            line = replacing(line, pattern: #"https?://[^\s]+"#, with: "")
             line = replacing(line, pattern: #"[\t ]{2,}"#, with: " ")
             let result = line.trimmingCharacters(in: .whitespaces)
             return result.isEmpty ? nil : result
