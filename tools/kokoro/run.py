@@ -18,7 +18,8 @@ def validate_text(value):
     return value
 
 def profile(directory):
-    if not directory.startswith('/private/tmp/') or any(c in directory for c in '"\\\n\r'):
+    if (not directory.startswith('/private/tmp/') or os.path.realpath(directory) != directory
+            or not os.path.isdir(directory) or any(c in directory for c in '"\\\n\r')):
         raise ValueError('Invalid sandbox path')
     return '(version 1)\n(allow default)\n(deny network*)\n(deny file-write*)\n(allow file-write* (subpath "' + directory + '"))\n'
 
@@ -26,6 +27,15 @@ def append_bounded(current, chunk, limit=MAX_BYTES):
     if len(current) + len(chunk) > limit:
         raise ValueError('PCM limit exceeded')
     return current + chunk
+
+def cleanup_process_group(proc):
+    # The leader may have exited while descendants still hold stdout open.
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    finally:
+        proc.wait()
 
 def run(runtime, model, text, timeout):
     if sys.platform != 'darwin' or not Path('/usr/bin/sandbox-exec').is_file():
@@ -56,9 +66,7 @@ def run(runtime, model, text, timeout):
                 raise RuntimeError('Synthesis failed')
             return result
         finally:
-            if proc.poll() is None:
-                os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
+            cleanup_process_group(proc)
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
