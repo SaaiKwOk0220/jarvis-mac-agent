@@ -10,6 +10,13 @@ private final class EnumerationCompletion: @unchecked Sendable {
     func finish(_ value: Int) { lock.lock(); let callback = completion; completion = nil; lock.unlock(); callback?(.success(value)) }
 }
 
+private final class CompletionCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    func increment() { lock.lock(); count += 1; lock.unlock() }
+    var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+}
+
 @MainActor
 private final class FakeSafariWindowProvider: SafariWindowProviding {
     var snapshots: [[SafariWindowIdentity]]
@@ -80,6 +87,15 @@ final class SafariWindowCaptureTests: XCTestCase {
         gate.end(); XCTAssertTrue(gate.begin()); gate.end()
     }
 
+    func testStalledCaptureReportsBusyWithoutStartingAnotherCapture() async {
+        XCTAssertTrue(SafariCaptureWorkGate.shared.begin())
+        defer { SafariCaptureWorkGate.shared.end() }
+        let provider = FakeSafariWindowProvider([[target], [target]])
+        do { _ = try await SafariWindowCapture.validatedFrame(target, provider: provider); XCTFail("must reject concurrent capture") }
+        catch SafariWindowCaptureError.busy {} catch { XCTFail("must report busy") }
+        XCTAssertEqual(provider.captures, 0)
+    }
+
     func testCancelledEnumerationKeepsGateUntilUnderlyingCallbackFinishes() async throws {
         let gate = SafariEnumerationGate(), worker = EnumerationCompletion()
         let started = expectation(description: "underlying worker started")
@@ -127,5 +143,34 @@ final class SafariWindowCaptureTests: XCTestCase {
         let data = try SafariCaptureEncoding.encode(image)
         XCTAssertEqual(Array(data.prefix(8)), [137, 80, 78, 71, 13, 10, 26, 10])
         XCTAssertLessThanOrEqual(data.count, 5 * 1024 * 1024)
+    }
+
+    func testOversizedSyntheticFrameIsRejectedBeforeEncoding() throws {
+        let context = try XCTUnwrap(CGContext(data: nil, width: 1281, height: 1, bitsPerComponent: 8,
+                                              bytesPerRow: 1281 * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        let image = try XCTUnwrap(context.makeImage())
+        XCTAssertThrowsError(try SafariCaptureEncoding.encode(image))
+    }
+
+    func testFrameCompletionOnlyResumesOnce() async throws {
+        let data: Data = try await withCheckedThrowingContinuation { continuation in
+            let completion = SafariFrameCompletion(continuation)
+            completion.finish { Data([1]) }
+            completion.finish { XCTFail("duplicate callback must not be processed"); return Data([2]) }
+        }
+        XCTAssertEqual(data, Data([1]))
+    }
+
+    func testConcurrentFrameCallbacksProcessOnlyOneResult() async throws {
+        let counter = CompletionCounter()
+        let data: Data = try await withCheckedThrowingContinuation { continuation in
+            let completion = SafariFrameCompletion(continuation)
+            DispatchQueue.concurrentPerform(iterations: 50) { index in
+                completion.finish { counter.increment(); return Data([UInt8(index)]) }
+            }
+        }
+        XCTAssertEqual(data.count, 1)
+        XCTAssertEqual(counter.value, 1)
     }
 }

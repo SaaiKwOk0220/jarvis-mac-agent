@@ -54,11 +54,25 @@ enum SafariWindowCaptureError: Error { case unavailable, invalidSelection, inval
 /// Encodes an already bounded immutable frame without retaining capture objects.
 enum SafariCaptureEncoding {
     static func encode(_ image: CGImage) throws -> Data {
+        guard image.width > 0, image.height > 0, image.width <= 1280, image.height <= 1280,
+              image.width * image.height <= 1280 * 1280 else { throw SafariWindowCaptureError.invalidFrame }
         let output = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(output, UTType.png.identifier as CFString, 1, nil) else { throw SafariWindowCaptureError.invalidFrame }
         CGImageDestinationAddImage(destination, image, nil)
         guard CGImageDestinationFinalize(destination), output.length > 0, output.length <= 5 * 1024 * 1024 else { throw SafariWindowCaptureError.invalidFrame }
         return output as Data
+    }
+}
+
+/// A system callback may resume a capture continuation at most once.
+final class SafariFrameCompletion: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Data, Error>?
+    init(_ continuation: CheckedContinuation<Data, Error>) { self.continuation = continuation }
+    func finish(_ produce: () throws -> Data) {
+        lock.lock(); let current = continuation; continuation = nil; lock.unlock()
+        guard let current else { return }
+        current.resume(with: Result { try produce() })
     }
 }
 
@@ -114,7 +128,7 @@ protocol SafariWindowProviding {
 enum SafariWindowCapture {
     /// Rejects a changed target before capture and discards a frame if it changes afterward.
     static func validatedFrame(_ identity: SafariWindowIdentity, provider: any SafariWindowProviding) async throws -> Data {
-        guard SafariCaptureWorkGate.shared.begin() else { throw SafariWindowCaptureError.unavailable }
+        guard SafariCaptureWorkGate.shared.begin() else { throw SafariWindowCaptureError.busy }
         defer { SafariCaptureWorkGate.shared.end() }
         try Task.checkCancellation()
         guard SafariCaptureSelection.matches(identity, in: try await provider.windows()) else { throw SafariWindowCaptureError.invalidSelection }
@@ -173,11 +187,13 @@ final class SystemSafariWindowProvider: SafariWindowProviding {
         // Construct and pass framework objects synchronously on this actor. The
         // callback handles only the immutable image and resumes with Sendable Data.
         let frame: Data = try await withCheckedThrowingContinuation { continuation in
+            let completion = SafariFrameCompletion(continuation)
             let filter = SCContentFilter(desktopIndependentWindow: window)
             SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration) { image, error in
-                guard error == nil, let image else { continuation.resume(throwing: SafariWindowCaptureError.invalidFrame); return }
-                do { continuation.resume(returning: try SafariCaptureEncoding.encode(image)) }
-                catch { continuation.resume(throwing: SafariWindowCaptureError.invalidFrame) }
+                completion.finish {
+                    guard error == nil, let image else { throw SafariWindowCaptureError.invalidFrame }
+                    return try SafariCaptureEncoding.encode(image)
+                }
             }
         }
         try Task.checkCancellation()
