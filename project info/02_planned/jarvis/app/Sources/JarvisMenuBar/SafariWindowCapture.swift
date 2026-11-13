@@ -51,6 +51,17 @@ struct SafariCaptureState {
 
 enum SafariWindowCaptureError: Error { case unavailable, invalidSelection, invalidFrame, busy }
 
+/// Encodes an already bounded immutable frame without retaining capture objects.
+enum SafariCaptureEncoding {
+    static func encode(_ image: CGImage) throws -> Data {
+        let output = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(output, UTType.png.identifier as CFString, 1, nil) else { throw SafariWindowCaptureError.invalidFrame }
+        CGImageDestinationAddImage(destination, image, nil)
+        guard CGImageDestinationFinalize(destination), output.length > 0, output.length <= 5 * 1024 * 1024 else { throw SafariWindowCaptureError.invalidFrame }
+        return output as Data
+    }
+}
+
 final class SafariCaptureWorkGate: @unchecked Sendable {
     static let shared = SafariCaptureWorkGate()
     private let lock = NSLock()
@@ -159,13 +170,18 @@ final class SystemSafariWindowProvider: SafariWindowProviding {
         configuration.showsCursor = false
         configuration.capturesAudio = false
         try Task.checkCancellation()
-        let image = try await SCScreenshotManager.captureImage(contentFilter: SCContentFilter(desktopIndependentWindow: window), configuration: configuration)
+        // Construct and pass framework objects synchronously on this actor. The
+        // callback handles only the immutable image and resumes with Sendable Data.
+        let frame: Data = try await withCheckedThrowingContinuation { continuation in
+            let filter = SCContentFilter(desktopIndependentWindow: window)
+            SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration) { image, error in
+                guard error == nil, let image else { continuation.resume(throwing: SafariWindowCaptureError.invalidFrame); return }
+                do { continuation.resume(returning: try SafariCaptureEncoding.encode(image)) }
+                catch { continuation.resume(throwing: SafariWindowCaptureError.invalidFrame) }
+            }
+        }
         try Task.checkCancellation()
-        let output = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(output, UTType.png.identifier as CFString, 1, nil) else { throw SafariWindowCaptureError.invalidFrame }
-        CGImageDestinationAddImage(destination, image, nil)
-        guard CGImageDestinationFinalize(destination), output.length > 0, output.length <= 5 * 1024 * 1024 else { throw SafariWindowCaptureError.invalidFrame }
-        return output as Data
+        return frame
     }
 }
 

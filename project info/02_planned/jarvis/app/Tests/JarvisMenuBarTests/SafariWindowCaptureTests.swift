@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 import XCTest
 @testable import JarvisMenuBar
 
@@ -116,5 +117,15 @@ final class SafariWindowCaptureTests: XCTestCase {
         }
         do { try await task.value; XCTFail("cancelled task must fail") } catch is CancellationError {} catch { XCTFail("unexpected failure") }
         await fulfillment(of: [invoked], timeout: 0.1)
+    }
+
+    func testSyntheticFrameEncodesToBoundedPNGWithoutScreenAccess() throws {
+        let context = try XCTUnwrap(CGContext(data: nil, width: 2, height: 2, bitsPerComponent: 8,
+                                              bytesPerRow: 8, space: CGColorSpaceCreateDeviceRGB(),
+                                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        let image = try XCTUnwrap(context.makeImage())
+        let data = try SafariCaptureEncoding.encode(image)
+        XCTAssertEqual(Array(data.prefix(8)), [137, 80, 78, 71, 13, 10, 26, 10])
+        XCTAssertLessThanOrEqual(data.count, 5 * 1024 * 1024)
     }
 }
