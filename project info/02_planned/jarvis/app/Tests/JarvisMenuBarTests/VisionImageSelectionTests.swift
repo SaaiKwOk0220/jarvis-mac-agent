@@ -10,7 +10,17 @@ final class VisionImageSelectionTests: XCTestCase {
         let bitmap = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height,
             bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
             colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
-        return try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+        let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+        var plain = Data(png.prefix(8))
+        var offset = 8
+        while offset + 12 <= png.count {
+            let size = png[offset..<(offset + 4)].reduce(0) { ($0 << 8) | Int($1) }
+            let end = offset + size + 12
+            let name = String(decoding: png[(offset + 4)..<(offset + 8)], as: UTF8.self)
+            if name != "eXIf" { plain.append(png[offset..<end]) }
+            offset = end
+        }
+        return plain
     }
     func testExplicitImageRejectsUnsupportedAndOversizedData() throws {
         XCTAssertThrowsError(try VisionImageSelection.validate(Data("not an image".utf8)))
@@ -19,7 +29,7 @@ final class VisionImageSelectionTests: XCTestCase {
         XCTAssertThrowsError(try VisionImageSelection.validate(png + Data(count: 5 * 1024 * 1024)))
         XCTAssertThrowsError(try VisionImageSelection.validate(Data(png.prefix(32))))
         XCTAssertThrowsError(try VisionImageSelection.validate(Data(png.prefix(64))))
-        XCTAssertThrowsError(try VisionImageSelection.validate(Data(png.prefix(100))))
+        XCTAssertThrowsError(try VisionImageSelection.validate(Data(png.prefix(min(100, png.count - 1)))))
         XCTAssertThrowsError(try VisionImageSelection.validate(Data(png.dropLast())))
         var invalidCRC = png
         invalidCRC[invalidCRC.count - 1] ^= 1
@@ -28,6 +38,19 @@ final class VisionImageSelectionTests: XCTestCase {
         var animatedPNG = png
         animatedPNG.insert(contentsOf: animation, at: 33)
         XCTAssertThrowsError(try VisionImageSelection.validate(animatedPNG))
+        let metadata = Data([0,0,0,13,0x74,0x45,0x58,0x74,0x43,0x6f,0x6d,0x6d,0x65,0x6e,0x74,0,0x68,0x65,0x6c,0x6c,0x6f,0xe6,0xff,0xae,0x24])
+        var pngWithMetadata = png
+        pngWithMetadata.insert(contentsOf: metadata, at: 33)
+        XCTAssertThrowsError(try VisionImageSelection.validate(pngWithMetadata))
+        let compressedMetadata = Data([0,0,0,15,0x69,0x43,0x43,0x50,0x78,0,0,0x78,0x9c,0x73,0x74,0xa4,0x3d,0,0,2,0xe9,0x19,0x65,0x3c,0xb7,0x89,0xe7])
+        var pngWithCompressedMetadata = png
+        pngWithCompressedMetadata.insert(contentsOf: compressedMetadata, at: 33)
+        XCTAssertThrowsError(try VisionImageSelection.validate(pngWithCompressedMetadata))
+        let palette = Data([0,0,0,3,0x50,0x4c,0x54,0x45,0xff,0,0,0x19,0xe2,0x09,0x37])
+        let dataChunk = try XCTUnwrap(png.range(of: Data([0x49,0x44,0x41,0x54])))
+        var duplicatedPalette = png
+        duplicatedPalette.insert(contentsOf: palette + palette, at: dataChunk.lowerBound - 4)
+        XCTAssertThrowsError(try VisionImageSelection.validate(duplicatedPalette))
         let badDeflate = Data([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,0,0,0,0x0d,0x49,0x48,0x44,0x52,0,0,0,1,0,0,0,1,8,6,0,0,0,0x1f,0x15,0xc4,0x89,0,0,0,4,0x49,0x44,0x41,0x54,0x6a,0x75,0x6e,0x6b,0xcd,0x9c,0xa4,0x22,0,0,0,0,0x49,0x45,0x4e,0x44,0xae,0x42,0x60,0x82])
         XCTAssertThrowsError(try VisionImageSelection.validate(badDeflate))
         let badFilter = Data([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,0,0,0,0x0d,0x49,0x48,0x44,0x52,0,0,0,1,0,0,0,1,8,6,0,0,0,0x1f,0x15,0xc4,0x89,0,0,0,0x0d,0x49,0x44,0x41,0x54,0x78,0x9c,0x63,0x65,0x60,0x60,0xf8,0x0f,0,0x01,0x1d,0x01,0x05,0xda,0x51,0x64,0x7f,0,0,0,0,0x49,0x45,0x4e,0x44,0xae,0x42,0x60,0x82])
