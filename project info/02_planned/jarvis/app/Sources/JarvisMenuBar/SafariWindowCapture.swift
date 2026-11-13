@@ -1,5 +1,5 @@
 import Foundation
-@preconcurrency import ScreenCaptureKit
+import ScreenCaptureKit
 import CoreGraphics
 import ImageIO
 import UniformTypeIdentifiers
@@ -7,23 +7,32 @@ import SwiftUI
 import AppKit
 import JarvisLLM
 
-/// Validates the system picker result without relying on window title or position.
+/// Window identity uses system identifiers, not its changeable title or geometry.
+struct SafariWindowIdentity: Identifiable, Sendable {
+    let bundleID: String
+    let windowID: UInt32
+    let pid: Int32
+    let launched: Date
+    let title: String
+    var id: UInt32 { windowID }
+}
+
 enum SafariCaptureSelection {
-    struct Window { let bundleID: String; let windowID: UInt32; let pid: Int32 }
-    static func isAllowed(styleIsWindow: Bool, windows: [Window]) -> Bool {
-        styleIsWindow && windows.count == 1 && windows[0].bundleID == "com.apple.Safari" && windows[0].windowID != 0 && windows[0].pid > 0
+    static func matches(_ selected: SafariWindowIdentity, in windows: [SafariWindowIdentity]) -> Bool {
+        guard selected.bundleID == "com.apple.Safari", selected.windowID != 0, selected.pid > 0 else { return false }
+        let candidates = windows.filter { $0.windowID == selected.windowID }
+        guard candidates.count == 1, let actual = candidates.first else { return false }
+        return actual.bundleID == selected.bundleID && actual.pid == selected.pid && actual.launched == selected.launched
     }
 }
 
-/// Keeps one bounded frame and invalidates late capture completions after cancellation.
 struct SafariCaptureState {
     private var generation = UUID()
     private var frame: Data?
     mutating func beginSelection() -> UUID { frame = nil; generation = UUID(); return generation }
     mutating func setPreview(_ data: Data, token: UUID) -> Bool {
         guard generation == token, !data.isEmpty, data.count <= 5 * 1024 * 1024 else { return false }
-        frame = data
-        return true
+        frame = data; return true
     }
     func snapshotForSubmission() -> Data? { frame }
     func isCurrent(_ token: UUID) -> Bool { token == generation }
@@ -40,16 +49,54 @@ final class SafariCaptureWorkGate: @unchecked Sendable {
     func end() { lock.lock(); active = false; lock.unlock() }
 }
 
-/// Captures only the exact system-selected window, without writing it to disk.
-@available(macOS 15.2, *)
+/// Injectable boundary: tests never enumerate or capture a real screen.
+@MainActor
+protocol SafariWindowProviding {
+    func windows() async throws -> [SafariWindowIdentity]
+    func capture(_ identity: SafariWindowIdentity) async throws -> Data
+}
+
+@MainActor
 enum SafariWindowCapture {
-    static func frame(filter: SCContentFilter) async throws -> Data {
+    /// Rejects a changed target before capture and discards a frame if it changes afterward.
+    static func validatedFrame(_ identity: SafariWindowIdentity, provider: any SafariWindowProviding) async throws -> Data {
         guard SafariCaptureWorkGate.shared.begin() else { throw SafariWindowCaptureError.unavailable }
         defer { SafariCaptureWorkGate.shared.end() }
         try Task.checkCancellation()
-        let windows = filter.includedWindows
-        let descriptors = windows.map { SafariCaptureSelection.Window(bundleID: $0.owningApplication?.bundleIdentifier ?? "", windowID: $0.windowID, pid: $0.owningApplication?.processID ?? 0) }
-        guard SafariCaptureSelection.isAllowed(styleIsWindow: filter.style == .window, windows: descriptors), let window = windows.first else {
+        guard SafariCaptureSelection.matches(identity, in: try await provider.windows()) else { throw SafariWindowCaptureError.invalidSelection }
+        try Task.checkCancellation()
+        let data = try await provider.capture(identity)
+        try Task.checkCancellation()
+        guard SafariCaptureSelection.matches(identity, in: try await provider.windows()) else { throw SafariWindowCaptureError.invalidSelection }
+        try Task.checkCancellation()
+        guard !data.isEmpty, data.count <= 5 * 1024 * 1024 else { throw SafariWindowCaptureError.invalidFrame }
+        return data
+    }
+}
+
+/// Uses only an explicit, currently visible Safari window and never falls back to the display.
+@MainActor
+final class SystemSafariWindowProvider: SafariWindowProviding {
+    private func availableWindows() async throws -> [(SCWindow, SafariWindowIdentity)] {
+        // Preflight never requests authorization. The user enables it in System Settings.
+        guard CGPreflightScreenCaptureAccess() else { throw SafariWindowCaptureError.unavailable }
+        let content = try await SCShareableContent.current
+        return content.windows.compactMap { window in
+            guard window.isOnScreen, let owner = window.owningApplication,
+                  owner.bundleIdentifier == "com.apple.Safari", owner.processID > 0, window.windowID != 0,
+                  let process = NSRunningApplication(processIdentifier: owner.processID), !process.isTerminated,
+                  process.bundleIdentifier == owner.bundleIdentifier, let launched = process.launchDate else { return nil }
+            return (window, SafariWindowIdentity(bundleID: owner.bundleIdentifier, windowID: window.windowID,
+                                                 pid: owner.processID, launched: launched, title: window.title ?? "Safari 窗口"))
+        }
+    }
+
+    func windows() async throws -> [SafariWindowIdentity] { try await availableWindows().map(\.1) }
+
+    func capture(_ identity: SafariWindowIdentity) async throws -> Data {
+        let choices = try await availableWindows()
+        guard SafariCaptureSelection.matches(identity, in: choices.map(\.1)),
+              let window = choices.first(where: { SafariCaptureSelection.matches(identity, in: [$0.1]) })?.0 else {
             throw SafariWindowCaptureError.invalidSelection
         }
         let bounds = window.frame
@@ -60,8 +107,8 @@ enum SafariWindowCapture {
         configuration.height = max(1, Int(bounds.height * scale))
         configuration.showsCursor = false
         configuration.capturesAudio = false
-        let exactWindowFilter = SCContentFilter(desktopIndependentWindow: window)
-        let image = try await SCScreenshotManager.captureImage(contentFilter: exactWindowFilter, configuration: configuration)
+        try Task.checkCancellation()
+        let image = try await SCScreenshotManager.captureImage(contentFilter: SCContentFilter(desktopIndependentWindow: window), configuration: configuration)
         try Task.checkCancellation()
         let output = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(output, UTType.png.identifier as CFString, 1, nil) else { throw SafariWindowCaptureError.invalidFrame }
@@ -71,111 +118,10 @@ enum SafariWindowCapture {
     }
 }
 
-/// A cancelled picker keeps its lease until the system reports its completion.
-struct SafariPickerSessionGate {
-    enum Completion { case deliver, discard }
-    private var active: UUID?
-    private var cancelled = false
-    mutating func begin(sharedPickerActive: Bool = false) -> UUID? {
-        guard active == nil, !sharedPickerActive else { return nil }
-        let token = UUID(); active = token; cancelled = false; return token
-    }
-    mutating func cancel() { if active != nil { cancelled = true } }
-    mutating func finish(_ token: UUID) -> Completion? {
-        guard active == token else { return nil }
-        let disposition: Completion = cancelled ? .discard : .deliver
-        active = nil; cancelled = false; return disposition
-    }
-}
-
-/// Each system observer carries its immutable picker-session identity.
-@available(macOS 15.2, *)
-private final class SafariPickerObserver: NSObject, SCContentSharingPickerObserver, @unchecked Sendable {
-    private struct FilterBox: @unchecked Sendable { let value: SCContentFilter }
-    private let token: UUID
-    init(token: UUID) { self.token = token }
-    nonisolated func contentSharingPicker(_ picker: SCContentSharingPicker, didCancelFor stream: SCStream?) {
-        guard stream == nil else { return }
-        let token = token
-        Task { @MainActor in SafariPickerCoordinator.shared.finish(token, filter: nil) }
-    }
-    nonisolated func contentSharingPicker(_ picker: SCContentSharingPicker, didUpdateWith filter: SCContentFilter, for stream: SCStream?) {
-        guard stream == nil else { return }
-        let box = FilterBox(value: filter), token = token
-        Task { @MainActor in SafariPickerCoordinator.shared.finish(token, filter: box.value) }
-    }
-    nonisolated func contentSharingPickerStartDidFailWithError(_ error: any Error) {
-        let token = token
-        Task { @MainActor in SafariPickerCoordinator.shared.finish(token, filter: nil) }
-    }
-}
-
-/// Serializes use of the application-wide picker and restores its previous settings.
-@available(macOS 15.2, *)
-@MainActor
-private final class SafariPickerCoordinator {
-    static let shared = SafariPickerCoordinator()
-    private let picker = SCContentSharingPicker.shared
-    private var gate = SafariPickerSessionGate()
-    private var owner: UUID?
-    private var observer: SafariPickerObserver?
-    private var oldConfiguration: SCContentSharingPickerConfiguration?
-    private var oldActive = false
-    private var completion: ((SCContentFilter?) -> Void)?
-
-    func present(owner: UUID, completion: @escaping (SCContentFilter?) -> Void) -> Bool {
-        guard let token = gate.begin(sharedPickerActive: picker.isActive) else { return false }
-        self.owner = owner
-        self.completion = completion
-        oldConfiguration = picker.defaultConfiguration
-        oldActive = picker.isActive
-        var configuration = SCContentSharingPickerConfiguration()
-        configuration.allowedPickerModes = .singleWindow
-        configuration.allowsChangingSelectedContent = false
-        picker.defaultConfiguration = configuration
-        let observer = SafariPickerObserver(token: token)
-        self.observer = observer
-        picker.add(observer)
-        picker.isActive = true
-        picker.present()
-        return true
-    }
-
-    func cancel(owner: UUID) {
-        guard self.owner == owner else { return }
-        // The picker has no documented dismiss API. Keep its observer and lease
-        // until its own callback so a new picker cannot overlap a cancelled one.
-        gate.cancel(); completion = nil
-    }
-
-    func finish(_ token: UUID, filter: SCContentFilter?) {
-        guard let disposition = gate.finish(token) else { return }
-        let callback = disposition == .deliver ? completion : nil
-        completion = nil; owner = nil
-        if let observer { picker.remove(observer) }
-        observer = nil
-        if let oldConfiguration { picker.defaultConfiguration = oldConfiguration }
-        picker.isActive = oldActive
-        oldConfiguration = nil
-        callback?(filter)
-    }
-}
-
-/// Presents the macOS single-window picker only after an explicit user action.
-@available(macOS 15.2, *)
-@MainActor
-final class SafariWindowPicker: ObservableObject {
-    private let owner = UUID()
-    func present(completion: @escaping (SCContentFilter?) -> Void) -> Bool {
-        SafariPickerCoordinator.shared.present(owner: owner, completion: completion)
-    }
-    func cancel() { SafariPickerCoordinator.shared.cancel(owner: owner) }
-}
-
-@available(macOS 15.2, *)
 struct SafariWindowVisionView: View {
-    @StateObject private var picker = SafariWindowPicker()
+    @State private var provider = SystemSafariWindowProvider()
     @State private var state = SafariCaptureState()
+    @State private var windows: [SafariWindowIdentity] = []
     @State private var preview: NSImage?
     @State private var endpoint = "http://127.0.0.1:11434"
     @State private var model = "qwen2.5vl:3b"
@@ -187,13 +133,20 @@ struct SafariWindowVisionView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Safari 窗口理解实验").font(.title2.bold())
-            Text("选择 Safari 窗口后会截取一帧供预览；只有点击分析才发送。请确认本机服务可信，服务可能将图片转发到其他地方。")
+            Text("先列出并选择 Safari 窗口，截取一帧供预览；只有点击分析才发送。请确认本机服务可信，服务可能将图片转发到其他地方。")
                 .font(.callout).foregroundStyle(.secondary)
-            Text("取消会停止后续处理并清除预览，但无法撤回已经发送的数据。")
+            Text("需要先在系统设置中允许屏幕录制；取消无法撤回已经发送的数据。")
                 .font(.caption).foregroundStyle(.secondary)
-            Button("选择 Safari 窗口…") { selectWindow() }.disabled(busy)
+            Button("列出 Safari 窗口") { listWindows() }.disabled(busy)
+            if !windows.isEmpty {
+                ScrollView { VStack(alignment: .leading) {
+                    ForEach(windows) { window in
+                        Button(window.title) { capture(window) }.disabled(busy).lineLimit(1)
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading) }.frame(maxHeight: 110)
+            }
             if let preview {
-                Image(nsImage: preview).resizable().scaledToFit().frame(maxWidth: 480, maxHeight: 240).accessibilityLabel("将要发送的 Safari 窗口预览")
+                Image(nsImage: preview).resizable().scaledToFit().frame(maxWidth: 480, maxHeight: 200).accessibilityLabel("将要发送的 Safari 窗口预览")
             }
             TextField("本机服务地址", text: $endpoint).disabled(busy)
             TextField("视觉模型名称", text: $model).disabled(busy)
@@ -209,29 +162,40 @@ struct SafariWindowVisionView: View {
         .onDisappear { cancel() }
     }
 
-    private func selectWindow() {
+    private func listWindows() {
         cancel()
         let token = state.beginSelection()
-        busy = true; result = "请选择一个 Safari 窗口。"
-        let opened = picker.present { filter in
-            guard state.isCurrent(token) else { return }
-            guard let filter else { busy = false; result = "未选择窗口。"; return }
-            result = "正在截取所选窗口…"
-            running = Task { @MainActor in
-                do {
-                    let data = try await SafariWindowCapture.frame(filter: filter)
-                    guard !Task.isCancelled else { return }
-                    guard let image = NSImage(data: data), image.isValid, !image.representations.isEmpty else { throw SafariWindowCaptureError.invalidFrame }
-                    guard state.setPreview(data, token: token) else { return }
-                    preview = image; result = "请检查预览，再决定是否分析。"
-                } catch {
-                    guard !Task.isCancelled else { return }
-                    result = "无法截取所选窗口。请选择 Safari 窗口并检查屏幕录制权限。"
-                }
-                if !Task.isCancelled { busy = false; running = nil }
+        busy = true; result = "正在列出 Safari 窗口…"
+        running = Task { @MainActor in
+            do {
+                let list = try await provider.windows()
+                guard !Task.isCancelled, state.isCurrent(token) else { return }
+                windows = list; result = list.isEmpty ? "没有找到可见的 Safari 窗口。" : "请选择要截取的窗口。"
+            } catch {
+                guard !Task.isCancelled, state.isCurrent(token) else { return }
+                result = "无法列出窗口，请检查屏幕录制权限。"
             }
+            if state.isCurrent(token) { busy = false; running = nil }
         }
-        if !opened { busy = false; result = "请先在系统窗口中结束上一次选择，再重试。" }
+    }
+
+    private func capture(_ window: SafariWindowIdentity) {
+        running?.cancel(); preview = nil
+        let token = state.beginSelection()
+        busy = true; result = "正在截取所选窗口…"
+        running = Task { @MainActor in
+            do {
+                let data = try await SafariWindowCapture.validatedFrame(window, provider: provider)
+                guard !Task.isCancelled, state.isCurrent(token) else { return }
+                guard let image = NSImage(data: data), image.isValid, !image.representations.isEmpty else { throw SafariWindowCaptureError.invalidFrame }
+                guard state.setPreview(data, token: token) else { throw SafariWindowCaptureError.invalidFrame }
+                preview = image; result = "请检查预览，再决定是否分析。"
+            } catch {
+                guard !Task.isCancelled, state.isCurrent(token) else { return }
+                result = "无法截取所选窗口。窗口可能已变化，请重新列出并选择。"
+            }
+            if state.isCurrent(token) { busy = false; running = nil }
+        }
     }
 
     private func submit() {
@@ -254,7 +218,7 @@ struct SafariWindowVisionView: View {
     }
 
     private func cancel() {
-        picker.cancel(); running?.cancel(); running = nil
-        state.cancel(); preview = nil; busy = false; result = ""
+        running?.cancel(); running = nil
+        state.cancel(); windows = []; preview = nil; busy = false; result = ""
     }
 }

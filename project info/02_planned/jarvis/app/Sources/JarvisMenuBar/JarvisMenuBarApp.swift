@@ -154,11 +154,7 @@ struct JarvisMenuBarApp: App {
         }
         .defaultSize(width: 600, height: 560)
         Window("Safari 窗口理解实验", id: "vision-safari-window") {
-            if #available(macOS 15.2, *) {
-                SafariWindowVisionView().frame(minWidth: 500, minHeight: 440)
-            } else {
-                Text("窗口选择验证需要 macOS 15.2 或更高版本。").padding(24)
-            }
+            SafariWindowVisionView().frame(minWidth: 500, minHeight: 440)
         }
         .defaultSize(width: 600, height: 560)
     }
