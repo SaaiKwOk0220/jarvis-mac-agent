@@ -102,7 +102,7 @@ enum VisionImageSelection {
                 sawHeader = true
             } else if name == "IHDR" { throw VisionError.invalidRequest }
             if name == "PLTE" {
-                guard !sawPalette, !sawData, colorType != 0, colorType != 4,
+                guard !sawPalette, !sawData, !sawTransparency, colorType != 0, colorType != 4,
                       length > 0, length <= 768, length % 3 == 0 else { throw VisionError.invalidRequest }
                 sawPalette = true
                 paletteEntries = length / 3
@@ -123,7 +123,8 @@ enum VisionImageSelection {
             if ["IHDR", "PLTE", "tRNS", "IDAT", "IEND"].contains(name) { safe.append(contentsOf: bytes[chunkStart..<offset]) }
             if name == "IEND" {
                 guard length == 0, sawData, offset == bytes.count else { throw VisionError.invalidRequest }
-                try validateInflate(compressed, rowLength: rowLength, expectedBytes: expectedBytes)
+                try validateInflate(compressed, rowLength: rowLength, expectedBytes: expectedBytes,
+                                    indexedPaletteEntries: colorType == 3 ? paletteEntries : nil)
                 return safe
             }
         }
@@ -131,7 +132,8 @@ enum VisionImageSelection {
     }
     /// Decode through zlib into a bounded scratch buffer; require the whole stream,
     /// checksum, exact scanline length, and valid per-row filter bytes.
-    private static func validateInflate(_ compressed: Data, rowLength: Int, expectedBytes: Int) throws {
+    private static func validateInflate(_ compressed: Data, rowLength: Int, expectedBytes: Int,
+                                        indexedPaletteEntries: Int?) throws {
         var stream = z_stream()
         guard inflateInit_(&stream, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK else { throw VisionError.invalidRequest }
         defer { inflateEnd(&stream) }
@@ -141,6 +143,9 @@ enum VisionImageSelection {
             stream.next_in = UnsafeMutablePointer(mutating: base)
             stream.avail_in = uInt(input.count)
             var total = 0
+            var previous = [UInt8](repeating: 0, count: indexedPaletteEntries == nil ? 0 : rowLength - 1)
+            var current = previous
+            var rowFilter: UInt8 = 0
             while true {
                 let beforeInput = stream.avail_in
                 let status: Int32 = output.withUnsafeMutableBufferPointer { buffer in
@@ -154,6 +159,32 @@ enum VisionImageSelection {
                 while filter < produced {
                     guard output[filter] <= 4 else { throw VisionError.invalidRequest }
                     filter += rowLength
+                }
+                if let paletteEntries = indexedPaletteEntries {
+                    for index in 0..<produced {
+                        let column = (total + index) % rowLength
+                        if column == 0 { rowFilter = output[index]; continue }
+                        let pixel = column - 1
+                        let left = pixel == 0 ? 0 : Int(current[pixel - 1])
+                        let up = Int(previous[pixel])
+                        let upperLeft = pixel == 0 ? 0 : Int(previous[pixel - 1])
+                        let predictor: Int
+                        switch rowFilter {
+                        case 0: predictor = 0
+                        case 1: predictor = left
+                        case 2: predictor = up
+                        case 3: predictor = (left + up) / 2
+                        case 4:
+                            let p = left + up - upperLeft
+                            let a = abs(p - left), b = abs(p - up), c = abs(p - upperLeft)
+                            predictor = a <= b && a <= c ? left : (b <= c ? up : upperLeft)
+                        default: throw VisionError.invalidRequest
+                        }
+                        let value = UInt8(truncatingIfNeeded: Int(output[index]) + predictor)
+                        guard Int(value) < paletteEntries else { throw VisionError.invalidRequest }
+                        current[pixel] = value
+                        if column == rowLength - 1 { swap(&previous, &current) }
+                    }
                 }
                 total += produced
                 if status == Z_STREAM_END {

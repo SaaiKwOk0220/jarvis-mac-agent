@@ -86,6 +86,14 @@ final class VisionImageSelectionTests: XCTestCase {
         let snapshot = try VisionImageSelection.snapshot(file)
         XCTAssertNotNil(snapshot.data.range(of: Data("tRNS".utf8)))
         XCTAssertThrowsError(try VisionImageSelection.validate(bad))
+        let badIndex = hex("89504e470d0a1a0a0000000d494844520000000100000001080300000028cb34bb00000006504c5445ff00000000ff6ca1fd8e0000000a49444154789c6360020000040003efe418e40000000049454e44ae426082")
+        let validFilteredIndex = hex("89504e470d0a1a0a0000000d4948445200000002000000010803000000c3fc8fb800000006504c5445ff00000000ff6ca1fd8e0000000b49444154789c6364640000000800032af39e470000000049454e44ae426082")
+        let badFilteredIndex = hex("89504e470d0a1a0a0000000d4948445200000002000000010803000000c3fc8fb800000006504c5445ff00000000ff6ca1fd8e0000000b49444154789c6364640400000900042ec423c50000000049454e44ae426082")
+        let invalidOrder = hex("89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de0000000674524e530000000000006ea6079100000006504c5445ff00000000ff6ca1fd8e0000000c49444154789c636064620600000e0007d76fe4780000000049454e44ae426082")
+        XCTAssertThrowsError(try VisionImageSelection.validate(badIndex))
+        XCTAssertNoThrow(try VisionImageSelection.validate(validFilteredIndex))
+        XCTAssertThrowsError(try VisionImageSelection.validate(badFilteredIndex))
+        XCTAssertThrowsError(try VisionImageSelection.validate(invalidOrder))
     }
 
     func testMacPNGMetadataIsRemovedBeforePreviewAndSubmission() throws {
@@ -101,6 +109,17 @@ final class VisionImageSelectionTests: XCTestCase {
         XCTAssertNil(snapshot.data.range(of: Data("eXIf".utf8)))
         XCTAssertNil(snapshot.data.range(of: Data("sRGB".utf8)))
         XCTAssertNotNil(CGImageSourceCreateWithData(snapshot.thumbnail as CFData, nil))
+    }
+
+    func testIndexedRowsAcceptEveryValidPNGFilter() throws {
+        let samples = [
+            "89504e470d0a1a0a0000000d49484452000000020000000208030000004568fd1600000006504c5445ff00000000ff6ca1fd8e0000000e49444154789c6360646060600400000c000303619f7c0000000049454e44ae426082",
+            "89504e470d0a1a0a0000000d49484452000000020000000208030000004568fd1600000006504c5445ff00000000ff6ca1fd8e0000000c49444154789c636064004200000f0004c744ca430000000049454e44ae426082",
+            "89504e470d0a1a0a0000000d49484452000000020000000208030000004568fd1600000006504c5445ff00000000ff6ca1fd8e0000000e49444154789c63606460facf080002100104434a62c40000000049454e44ae426082",
+            "89504e470d0a1a0a0000000d49484452000000020000000208030000004568fd1600000006504c5445ff00000000ff6ca1fd8e0000000e49444154789c636064606660040000150006a693fa8b0000000049454e44ae426082",
+            "89504e470d0a1a0a0000000d49484452000000020000000208030000004568fd1600000006504c5445ff00000000ff6ca1fd8e0000000e49444154789c63606460f9cf080002160106274678b90000000049454e44ae426082"
+        ]
+        for sample in samples { XCTAssertNoThrow(try VisionImageSelection.validate(hex(sample))) }
     }
 
     func testReadsRegularSelectedFileAndRejectsLinksAndPipes() throws {
