@@ -149,6 +149,10 @@ struct JarvisMenuBarApp: App {
             }
         }
         .defaultSize(width: 540, height: 500)
+        Window("图片理解实验", id: "vision-image") {
+            VisionImageView().frame(minWidth: 500, minHeight: 440)
+        }
+        .defaultSize(width: 600, height: 560)
     }
 }
 
