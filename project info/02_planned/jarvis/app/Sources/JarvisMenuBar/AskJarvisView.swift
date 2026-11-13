@@ -122,11 +122,12 @@ struct AskJarvisView: View {
     /// start of every run; when nil, the loop runs without that context.
     let memoryContextProvider: (@Sendable () async -> String)?
 
-    init(client: ServiceClient, service: (any TaskServiceAPI)?, voiceDraftStore: VoiceDraftStore?, memoryContextProvider: (@Sendable () async -> String)?) {
+    init(client: ServiceClient, service: (any TaskServiceAPI)?, voiceDraftStore: VoiceDraftStore?, memoryContextProvider: (@Sendable () async -> String)?, voiceFactory: @escaping @MainActor () -> VoiceCoordinator = { VoiceCoordinator(backend: OnDeviceSpeechBackend(), speaker: SystemVoiceSpeaker()) }) {
         self.client = client
         self.service = service
         self.voiceDraftStore = voiceDraftStore
         self.memoryContextProvider = memoryContextProvider
+        _voice = StateObject(wrappedValue: voiceFactory())
     }
 
     @State private var safariReadError: String?
@@ -136,7 +137,7 @@ struct AskJarvisView: View {
     @State private var safariReadState = false
     @State private var safariReadChanging = false
     @StateObject private var log = AgentRunLog()
-    @StateObject private var voice = VoiceCoordinator(backend: OnDeviceSpeechBackend(), speaker: SystemVoiceSpeaker())
+    @StateObject private var voice: VoiceCoordinator
     @StateObject private var autoSubmit = VoiceAutoSubmitGate()
     @StateObject private var conversation = VoiceConversationSession()
     @StateObject private var runLifecycle = VoiceRunLifecycle()
@@ -175,75 +176,48 @@ struct AskJarvisView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            #if JARVIS_COMBINED_EXPERIMENT
-            if CombinedExperimentAccess.current, let service {
-                Toggle("允许本次运行读取 Safari（每次仍需审批）", isOn: Binding(
-                    get: { safariReadState },
-                    set: { value in
-                        guard !safariReadChanging else { return }
-                        safariReadChanging = true
-                        Task { @MainActor in
-                            let result = await Task.detached { () -> (Bool, String?) in
-                                do {
-                                    try service.setSafariReadEnabled(value)
-                                    return (service.isSafariReadEnabled(), nil)
-                                } catch {
-                                    return (service.isSafariReadEnabled(), error.localizedDescription)
-                                }
-                            }.value
-                            safariReadState = result.0
-                            safariReadError = result.1
-                            safariReadChanging = false
-                        }
-                    }))
-                    .disabled(safariReadChanging)
-                    .padding(.horizontal)
-                    .onAppear { safariReadState = service.isSafariReadEnabled() }
-                if safariReadChanging { Text("正在更新 Safari 读取权限…") }
-                Text("关闭后不再开始新的读取；已经开始的读取和已交付给模型的内容无法撤回。")
-                    .font(.caption).foregroundStyle(.secondary)
-                #if JARVIS_SAFARI_CLICK_EXPERIMENT
-                if (CombinedExperimentAccess.current || (Bundle.main.bundleIdentifier == "local.jarvis.safari-click-experiment" && AppStorageNamespace.isTrueBoolean(Bundle.main.object(forInfoDictionaryKey: "JarvisSafariExperiment")))),
-                   AppStorageNamespace.isTrueBoolean(Bundle.main.object(forInfoDictionaryKey: "JarvisSafariClickExperiment")) {
-                    Text("点击实验与 Safari 页面读取开关相互独立：即使页面读取已关闭，点击实验仍会读取当前网页网址、元素类型和标题，用于定位和审批。")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                #endif
-                if let safariReadError { Text(safariReadError).foregroundStyle(.red) }
-            }
-            #endif
+            HStack(spacing: 10) {
+                Text("JARVIS").font(.system(size: 13, weight: .semibold, design: .rounded)).tracking(3)
+                Rectangle().fill(.cyan.opacity(0.5)).frame(width: 30, height: 1)
+                Text(statusText).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Spacer()
+                Text(voice.isRecording ? "麦克风开启" : "麦克风关闭").font(.caption).foregroundStyle(voice.isRecording ? .red : .secondary)
+            }.padding(.horizontal, 18).padding(.vertical, 9)
+            Divider().overlay(.cyan.opacity(0.25))
             GeometryReader { geometry in
                 ScrollView {
                     if VoiceWorkspaceLayout.usesWideLayout(width: geometry.size.width) {
-                        HStack(alignment: .top, spacing: 16) {
+                        HStack(alignment: .top, spacing: 8) {
                             conversationPanel
-                                .frame(maxWidth: .infinity, alignment: .topLeading)
-                                .padding(16)
-                                .background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 18))
+                                .overlay(alignment: .trailing) { Rectangle().fill(.cyan.opacity(0.18)).frame(width: 1) }
+                                .font(.caption)
+                                .frame(width: geometry.size.width * 0.22, alignment: .topLeading)
+                                .padding(8)
                             dashboardCore
-                                .frame(width: min(geometry.size.width * 0.30, 360))
+                                .frame(maxWidth: .infinity)
                             VStack(alignment: .leading, spacing: 20) {
-                                Text("控制与设置").font(.headline)
+                                capabilityPanel
+                                Divider().overlay(.cyan.opacity(0.22))
                                 composerDetails
-                                settingsPanel
                             }
-                            .frame(maxWidth: .infinity, alignment: .topLeading)
-                            .padding(16)
-                            .background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 18))
-                        }.padding(20)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .font(.caption)
+                            .frame(width: geometry.size.width * 0.22, alignment: .topLeading)
+                            .padding(8)
+                        }.padding(8)
                     } else {
                         VStack(alignment: .leading, spacing: 10) {
-                            voiceCore
+                            compactEnergyField
                             conversationPanel
+                            capabilityPanel
                             composerDetails
-                            settingsPanel
                         }.padding(16)
                     }
                 }
             }
             Divider()
             VStack(spacing: 8) { composer; controlsBar }.padding(.horizontal, 24).padding(.vertical, 12)
-                .background(Color.black.opacity(0.45))
+                .background(Color(red: 0.015, green: 0.045, blue: 0.085).opacity(0.78))
         }
         .background(LinearGradient(colors: [Color(red: 0.025, green: 0.055, blue: 0.09), Color(red: 0.015, green: 0.025, blue: 0.045)], startPoint: .topLeading, endPoint: .bottomTrailing))
         .preferredColorScheme(.dark)
@@ -276,40 +250,10 @@ struct AskJarvisView: View {
 
     private var dashboardCore: some View {
         VStack(spacing: 16) {
-            Text("JARVIS").font(.system(size: 26, weight: .ultraLight, design: .rounded)).tracking(7)
-            ZStack {
-                Canvas { context, size in
-                    let center = CGPoint(x: size.width / 2, y: size.height / 2)
-                    for index in 0..<64 {
-                        let angle = Double(index) * .pi * 2 / 64
-                        let radius = 104.0 + Double((index * 17) % 19)
-                        let point = CGPoint(x: center.x + cos(angle) * radius,
-                                            y: center.y + sin(angle) * radius)
-                        let diameter = index.isMultiple(of: 5) ? 3.0 : 1.5
-                        context.fill(Path(ellipseIn: CGRect(x: point.x, y: point.y, width: diameter, height: diameter)),
-                                     with: .color(.cyan.opacity(index.isMultiple(of: 3) ? 0.8 : 0.4)))
-                    }
-                }
-                .frame(width: 260, height: 260)
-                .rotationEffect(.degrees(haloExpanded ? 180 : 0))
-                Circle().stroke(.cyan.opacity(0.15), lineWidth: 1).frame(width: 230, height: 230)
-                Circle().trim(from: 0.03, to: 0.87)
-                    .stroke(.cyan.opacity(0.7), style: StrokeStyle(lineWidth: 2, lineCap: .round))
-                    .frame(width: 200, height: 200).rotationEffect(.degrees(haloExpanded ? 180 : 0))
-                Circle().trim(from: 0.12, to: 0.94)
-                    .stroke(.white.opacity(0.75), style: StrokeStyle(lineWidth: 1, lineCap: .round))
-                    .frame(width: 166, height: 166).rotationEffect(.degrees(haloExpanded ? -180 : 0))
-                Circle().fill(RadialGradient(colors: [.cyan.opacity(0.30), .cyan.opacity(0.02)], center: .center, startRadius: 5, endRadius: 80))
-                    .frame(width: 150, height: 150)
-                Image(systemName: voice.isRecording ? "waveform" : (voice.isSpeaking ? "speaker.wave.2.fill" : "sparkles"))
-                    .font(.system(size: 32, weight: .light)).foregroundStyle(.cyan)
-            }
-            .accessibilityHidden(true)
-            .onAppear {
-                if !reduceMotion {
-                    withAnimation(.linear(duration: 20).repeatForever(autoreverses: false)) { haloExpanded = true }
-                }
-            }
+            JarvisEnergyField(state: voice.isRecording ? .listening : (isRunning ? .thinking : (voice.isSpeaking ? .speaking : .idle)), reduceMotion: reduceMotion)
+                .frame(maxWidth: .infinity)
+                .frame(height: 440)
+                .accessibilityHidden(true)
             Label(VoiceInterfaceStatus.label(recording: voice.isRecording, running: isRunning, speaking: voice.isSpeaking),
                   systemImage: voice.isRecording ? "waveform" : "circle.fill")
                 .font(.headline).foregroundStyle(voice.isRecording ? .red : .cyan)
@@ -317,6 +261,18 @@ struct AskJarvisView: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 28)
+    }
+
+    private var compactEnergyField: some View {
+        VStack(spacing: 4) {
+            JarvisEnergyField(state: voice.isRecording ? .listening : (isRunning ? .thinking : (voice.isSpeaking ? .speaking : .idle)), reduceMotion: reduceMotion)
+                .frame(maxWidth: .infinity)
+                .frame(height: 180)
+                .accessibilityHidden(true)
+            Label(VoiceInterfaceStatus.label(recording: voice.isRecording, running: isRunning, speaking: voice.isSpeaking),
+                  systemImage: voice.isRecording ? "waveform" : "circle.fill")
+                .font(.caption.weight(.medium)).foregroundStyle(voice.isRecording ? .red : .cyan)
+        }
     }
 
     private var voiceCore: some View {
@@ -356,47 +312,6 @@ struct AskJarvisView: View {
 
     private var conversationPanel: some View {
         VStack(alignment: .leading, spacing: 10) {
-            #if JARVIS_EXACT_BROWSER_EXPERIMENT || JARVIS_COMBINED_EXPERIMENT
-            if ExactBrowserExperiment.toggleAllowed, let service {
-                Toggle("允许本次运行请求打开完整网址（每次仍需审批）", isOn: Binding(get: { exactBrowserState }, set: { value in
-                    guard !exactBrowserChanging else { return }
-                    exactBrowserChanging = true
-                    Task { @MainActor in
-                        let result = await Task.detached { () -> (Bool, String?) in
-                            do { try service.setExactBrowserEnabled(value); return (service.isExactBrowserEnabled(), nil) }
-                            catch { return (service.isExactBrowserEnabled(), error.localizedDescription) }
-                        }.value
-                        exactBrowserState = result.0; exactBrowserError = result.1; exactBrowserChanging = false
-                    }
-                })).disabled(exactBrowserChanging).onAppear { exactBrowserState = service.isExactBrowserEnabled() }
-                if exactBrowserChanging { Text("正在更新完整网址权限…") }
-                Text("浏览器打开后可能重定向或发送网络请求；已经打开的网页及其后续操作无法撤回。")
-                    .font(.caption).foregroundStyle(.secondary)
-                Text("若打开结果不明，请检查浏览器并停止重复尝试。已记录的不明结果会保留屏障，目前没有解除入口；既往未记录的状态或数据库不可用时无法保证记录。系统接受打开请求不代表网页已完成加载或操作。若待处理及结果未知请求合计达到容量上限，请停止使用并逐项核查。")
-                    .font(.caption).foregroundStyle(.secondary)
-                if let exactBrowserError { Text(exactBrowserError).foregroundStyle(.red) }
-            }
-            #endif
-            #if JARVIS_SAFARI_EXPERIMENT_BUILD || JARVIS_COMBINED_EXPERIMENT
-            HStack {
-                Button("请求辅助功能权限") {
-                    accessibilityRequestResult = AccessibilityPermissionRequest.request()
-                    accessibilityTrusted = AccessibilityPermissionRequest.isTrusted()
-                }
-                    .accessibilityIdentifier("safari-accessibility-permission-request")
-                Text("授权后返回并重新提交请求。")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            VStack(alignment: .leading, spacing: 2) {
-                Text("应用标识：\(Bundle.main.bundleIdentifier ?? "无")")
-                Text("应用路径：\(Bundle.main.bundleURL.path)").textSelection(.enabled)
-                Text("请求返回：\(accessibilityRequestResult.map { $0 ? "已信任" : "未信任" } ?? "未请求")；当前信任：\(accessibilityTrusted ? "是" : "否")")
-                Button("刷新信任状态") { accessibilityTrusted = AccessibilityPermissionRequest.isTrusted() }
-            }.font(.caption).accessibilityIdentifier("safari-accessibility-diagnostics")
-            #endif
-            Text("开启语音对话后，回答朗读结束会自动重新开启麦克风。可随时点击“结束语音对话”停止。")
-                .font(.caption).foregroundStyle(.secondary)
-
             DisclosureGroup("能做什么与权限") {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("语音对话需要麦克风和语音识别权限。开启连续对话后，朗读结束会重新聆听；可随时结束对话。")
@@ -415,7 +330,7 @@ struct AskJarvisView: View {
 
     private var composer: some View {
             VStack(alignment: .leading, spacing: 4) {
-                Text("你的消息").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                HStack(alignment: .center, spacing: 8) {
                 TextEditor(text: Binding(get: { goal }, set: { value in
                     if value != goal { autoSubmit.cancel() }
                     var origin = VoiceInputOrigin(containsVoice: containsVoiceInput, restoredID: restoredVoiceDraftID)
@@ -429,22 +344,34 @@ struct AskJarvisView: View {
                     .padding(8)
                     .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
                     .accessibilityLabel("消息输入")
-                    .frame(height: 56)
+                    .frame(height: 42)
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)))
                     .disabled(isRunning || voice.isRecording || voice.isStarting || voice.isFinishing)
-                Text("语音任务以明文保存在本机；成功后清除本次记录。失败或恢复的原记录可能保留，需手动删除。")
-                    .font(.caption).foregroundStyle(.secondary)
-                HStack {
-                    Button(voice.isRecording ? "停止录音" : (voice.isFinishing ? "取消转写" : "开始说话 ⌘⇧V")) {
+                    Button {
                         if voice.isRecording { voice.finishRecording() }
                         else if voice.isFinishing { voice.stop(); voice.discardTranscript(); goal = voiceDraftPrefix.originalDraft }
                         else { beginVoice() }
-                    }.keyboardShortcut("v", modifiers: [.command, .shift])
+                    } label: {
+                        Image(systemName: voice.isRecording || voice.isFinishing ? "stop.fill" : "mic.fill")
+                            .font(.system(size: 18, weight: .semibold))
+                            .frame(width: 48, height: 48)
+                            .background(voice.isRecording ? Color.red.opacity(0.7) : Color.cyan.opacity(0.25), in: Circle())
+                            .overlay(Circle().stroke(.cyan.opacity(0.65), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(voice.isRecording ? "停止录音" : (voice.isFinishing ? "取消转写" : "开始说话"))
+                    .keyboardShortcut("v", modifiers: [.command, .shift])
                      .disabled(isRunning || voice.isStarting || voice.needsConfirmation)
-                    if voice.isRecording { Text("● 正在聆听；停顿后结束") .foregroundStyle(.red) }
-                    if voice.isStarting { Text("正在准备离线识别…") }
-                    if voice.isFinishing { Text("正在完成转写…") }
+                    Button(isRunning ? "运行中…" : "发送") { start(fromVoice: conversation.manualRunToken != nil) }
+                        .keyboardShortcut(.defaultAction).disabled(!canRun)
                 }
+                Text("语音任务明文保存在本机，失败后可能保留；关闭窗口会丢失未提交转写。")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                DisclosureGroup("语音与数据说明") {
+                    Text("语音任务以明文保存在本机；成功后清除本次记录。失败或恢复的原记录可能保留，需手动删除。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }.font(.caption)
                 if let error = voice.errorMessage { Text(error).foregroundStyle(.red).font(.caption) }
                 if let notice = voice.stalePartialNotice { Text(notice).foregroundStyle(.secondary).font(.caption) }
                 if let pending = autoSubmit.pendingText {
@@ -479,8 +406,10 @@ struct AskJarvisView: View {
                      ? "说话停顿并识别完成后会自动运行；也可手动停止。"
                      : "已有草稿将保留，转写后请手动运行。")
                     .font(.caption).foregroundStyle(.secondary)
-                Text("提交的语音任务以明文保存在本机，成功后清除其记录，恢复的原记录需手动删除；未提交转写关闭窗口会丢失。删除不保证安全擦除。")
-                    .font(.caption)
+                DisclosureGroup("语音草稿与隐私") {
+                    Text("提交的语音任务以明文保存在本机，成功后清除其记录，恢复的原记录需手动删除；未提交转写关闭窗口会丢失。删除不保证安全擦除。")
+                        .font(.caption)
+                }
                 ForEach(savedVoiceDrafts, id: \.id) { draft in
                     HStack {
                         Text(draft.text).lineLimit(2).textSelection(.enabled)
@@ -489,6 +418,97 @@ struct AskJarvisView: View {
                     }
                 }
                 if let draftStoreError { Text(draftStoreError).foregroundStyle(.red) }
+        }
+    }
+
+    private var capabilityPanel: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("能力与状态").font(.headline)
+            HStack { Text("本地服务"); Spacer(); Text(service == nil ? "不可用" : "已初始化").foregroundStyle(service == nil ? Color.secondary : Color.cyan) }
+            HStack { Text("本地模型"); Spacer(); Text(modelDiagnostic == nil ? "未检查" : "已检查").foregroundStyle(.secondary) }
+            HStack { Text("麦克风"); Spacer(); Text(voice.isRecording ? "录音中" : "未录音").foregroundStyle(voice.isRecording ? Color.red : Color.secondary) }
+            #if JARVIS_SAFARI_EXPERIMENT_BUILD || JARVIS_COMBINED_EXPERIMENT
+            HStack { Text("辅助功能"); Spacer(); Text(accessibilityTrusted ? "已授权" : "未授权").foregroundStyle(accessibilityTrusted ? Color.cyan : Color.secondary) }
+            #endif
+            Divider().overlay(.cyan.opacity(0.22))
+            #if JARVIS_COMBINED_EXPERIMENT
+            if CombinedExperimentAccess.current, let service {
+                Toggle("允许本次运行读取 Safari（每次仍需审批）", isOn: Binding(
+                    get: { safariReadState },
+                    set: { value in
+                        guard !safariReadChanging else { return }
+                        safariReadChanging = true
+                        Task { @MainActor in
+                            let result = await Task.detached { () -> (Bool, String?) in
+                                do {
+                                    try service.setSafariReadEnabled(value)
+                                    return (service.isSafariReadEnabled(), nil)
+                                } catch {
+                                    return (service.isSafariReadEnabled(), error.localizedDescription)
+                                }
+                            }.value
+                            safariReadState = result.0
+                            safariReadError = result.1
+                            safariReadChanging = false
+                        }
+                    }))
+                    .disabled(safariReadChanging)
+                    .padding(.horizontal)
+                    .onAppear { safariReadState = service.isSafariReadEnabled() }
+                if safariReadChanging { Text("正在更新 Safari 读取权限…") }
+                Text("关闭后不再开始新的读取；已经开始的读取和已交付给模型的内容无法撤回。")
+                    .font(.caption).foregroundStyle(.secondary)
+                #if JARVIS_SAFARI_CLICK_EXPERIMENT
+                if (CombinedExperimentAccess.current || (Bundle.main.bundleIdentifier == "local.jarvis.safari-click-experiment" && AppStorageNamespace.isTrueBoolean(Bundle.main.object(forInfoDictionaryKey: "JarvisSafariExperiment")))),
+                   AppStorageNamespace.isTrueBoolean(Bundle.main.object(forInfoDictionaryKey: "JarvisSafariClickExperiment")) {
+                    Text("点击实验与 Safari 页面读取开关相互独立：即使页面读取已关闭，点击实验仍会读取当前网页网址、元素类型和标题，用于定位和审批。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                #endif
+                if let safariReadError { Text(safariReadError).foregroundStyle(.red) }
+            }
+            #endif
+            #if JARVIS_EXACT_BROWSER_EXPERIMENT || JARVIS_COMBINED_EXPERIMENT
+            if ExactBrowserExperiment.toggleAllowed, let service {
+                Toggle("允许本次运行请求打开完整网址（每次仍需审批）", isOn: Binding(get: { exactBrowserState }, set: { value in
+                    guard !exactBrowserChanging else { return }
+                    exactBrowserChanging = true
+                    Task { @MainActor in
+                        let result = await Task.detached { () -> (Bool, String?) in
+                            do { try service.setExactBrowserEnabled(value); return (service.isExactBrowserEnabled(), nil) }
+                            catch { return (service.isExactBrowserEnabled(), error.localizedDescription) }
+                        }.value
+                        exactBrowserState = result.0; exactBrowserError = result.1; exactBrowserChanging = false
+                    }
+                })).disabled(exactBrowserChanging).onAppear { exactBrowserState = service.isExactBrowserEnabled() }
+                if exactBrowserChanging { Text("正在更新完整网址权限…") }
+                Text("浏览器打开后可能重定向或发送网络请求；已经打开的网页及其后续操作无法撤回。")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("若打开结果不明，请检查浏览器并停止重复尝试。已记录的不明结果会保留屏障，目前没有解除入口；既往未记录的状态或数据库不可用时无法保证记录。系统接受打开请求不代表网页已完成加载或操作。若待处理及结果未知请求合计达到容量上限，请停止使用并逐项核查。")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let exactBrowserError { Text(exactBrowserError).foregroundStyle(.red) }
+            }
+            #endif
+            #if JARVIS_SAFARI_EXPERIMENT_BUILD || JARVIS_COMBINED_EXPERIMENT
+            DisclosureGroup("辅助功能权限与应用信息") {
+            HStack {
+                Button("请求辅助功能权限") {
+                    accessibilityRequestResult = AccessibilityPermissionRequest.request()
+                    accessibilityTrusted = AccessibilityPermissionRequest.isTrusted()
+                }
+                    .accessibilityIdentifier("safari-accessibility-permission-request")
+                Text("授权后返回并重新提交请求。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text("应用标识：\(Bundle.main.bundleIdentifier ?? "无")")
+                Text("应用路径：\(Bundle.main.bundleURL.path)").textSelection(.enabled)
+                Text("请求返回：\(accessibilityRequestResult.map { $0 ? "已信任" : "未信任" } ?? "未请求")；当前信任：\(accessibilityTrusted ? "是" : "否")")
+                Button("刷新信任状态") { accessibilityTrusted = AccessibilityPermissionRequest.isTrusted() }
+            }.font(.caption).accessibilityIdentifier("safari-accessibility-diagnostics")
+            }
+            #endif
+            settingsPanel
         }
     }
 
@@ -578,25 +598,16 @@ struct AskJarvisView: View {
                         .accessibilityHint("停止连续对话和麦克风")
                 }
             }
-            ViewThatFits(in: .horizontal) {
-                HStack {
-                    Button("朗读回答") { voice.speak(lastAnswer) }
-                        .disabled(lastAnswer.isEmpty || voice.isRecording || voice.isStarting || voice.isFinishing)
-                    Button("停止朗读") { stopConversation() }.disabled(!voice.isSpeaking)
-                    Button(isRunning ? "运行中…" : "发送") { start(fromVoice: conversation.manualRunToken != nil) }
-                        .keyboardShortcut(.defaultAction).disabled(!canRun)
-                }
-                HStack {
-                    Menu("更多操作") {
-                        Button("朗读回答") { voice.speak(lastAnswer) }
-                            .disabled(lastAnswer.isEmpty || voice.isRecording || voice.isStarting || voice.isFinishing)
-                        Button("停止朗读") { stopConversation() }.disabled(!voice.isSpeaking)
-                        }
-                    Spacer()
-                    Button(isRunning ? "运行中…" : "发送") { start(fromVoice: conversation.manualRunToken != nil) }
-                        .keyboardShortcut(.defaultAction).disabled(!canRun)
-                }
+            if voice.isSpeaking {
+                Button("停止朗读") { stopConversation() }
+                    .accessibilityHint("停止当前语音播放")
             }
+            Menu("更多操作") {
+                Button("朗读回答") { voice.speak(lastAnswer) }
+                    .disabled(lastAnswer.isEmpty || voice.isRecording || voice.isStarting || voice.isFinishing)
+                Button("停止朗读") { stopConversation() }.disabled(!voice.isSpeaking)
+            }
+
         }
     }
 
@@ -637,8 +648,7 @@ struct AskJarvisView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(8)
         }
-        .frame(minHeight: 120, idealHeight: 160)
-        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)))
+        .frame(minHeight: log.entries.isEmpty ? 48 : 120, idealHeight: log.entries.isEmpty ? 48 : 160)
         .onChange(of: log.entries.count) { _, _ in
             if followLatest, let last = log.entries.last(where: { $0.kind == .assistant || $0.kind == .approval || $0.kind == .error || ($0.kind == .info && ($0.text.hasPrefix("你：") || $0.text.hasPrefix("Switch to the intended Safari"))) }) { proxy.scrollTo(last.id, anchor: .bottom) }
         }
