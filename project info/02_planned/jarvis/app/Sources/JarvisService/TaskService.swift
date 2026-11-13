@@ -135,14 +135,35 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     public func getTask(id: UUID) async throws -> JarvisTask? { try lock.withLock { try tasks.fetch(id: id) } }
     public func listTasks() async throws -> [JarvisTask] { try lock.withLock { try tasks.list() } }
 
+    #if JARVIS_SAFARI_CLICK_TESTING
+    var testPendingSnapshot: @Sendable () -> Void = {}
+    func testGateThenServiceLock(_ gateHeld: () -> Void) -> Bool {
+        guard let generation = exactBrowserGate.capture() else { return false }
+        return (try? exactBrowserGate.withCurrentGeneration(generation) {
+            gateHeld()
+            let deadline = Date().addingTimeInterval(1)
+            while Date() < deadline {
+                if lock.try() { lock.unlock(); return true }
+                Thread.sleep(forTimeInterval: 0.001)
+            }
+            return false
+        }) ?? false
+    }
+
+    #endif
+
     public func listPendingApprovalRequests(taskID: UUID) async throws -> [PendingApprovalRequest] {
         let pending: [(ToolRequest, String)] = try lock.withLock {
             guard try tasks.fetch(id: taskID) != nil else { throw TaskServiceError.taskNotFound }
             let events = try audits.events(for: taskID)
-            return try requests.list(status: .pending).filter { $0.0.taskID == taskID }.map { request, _ in
+            let result = try requests.list(status: .pending).filter { $0.0.taskID == taskID }.map { request, _ in
                 let reason = events.reversed().first { $0.actionDigest == request.payloadDigest && $0.requestID == request.id && $0.summary == "policy requires approval" }?.result ?? "Approval requested by policy"
                 return (request, reason)
             }
+            #if JARVIS_SAFARI_CLICK_TESTING
+            testPendingSnapshot()
+            #endif
+            return result
         }
         var output: [PendingApprovalRequest] = []
         for (request, reason) in pending {
