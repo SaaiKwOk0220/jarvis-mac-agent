@@ -58,9 +58,11 @@ public final class TaskServiceApprovalWaiter: ApprovalWaiter, @unchecked Sendabl
                     return .approved(observation: result)
                 case Self.toolResultSummary:
                     return .approved(observation: event.result)
-                case Self.toolFailureSummary, "browser open outcome unknown":
+                case "experimental click completed":
+                    return .approved(observation: "completed")
+                case Self.toolFailureSummary, "browser open outcome unknown", "experimental click failed":
                     return .failed(reason: event.result)
-                case Self.approvalRejectedSummary:
+                case Self.approvalRejectedSummary, "experimental click mode disabled":
                     guard event.approvalID != nil else { continue }
                     return .rejected(reason: event.result)
                 default:

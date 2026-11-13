@@ -71,6 +71,25 @@ private func terminalEvent(
 
 final class TaskServiceApprovalWaiterTests: XCTestCase {
 
+    func testExperimentalClickTerminalEventsResolveOnlyMatchingRequest() async throws {
+        let id = UUID(), otherID = UUID(), digest = "click-digest"
+        for (summary, result, expected) in [
+            ("experimental click completed", "completed", ToolResolution.approved(observation: "completed")),
+            ("experimental click failed", "action outcome unknown; do not retry automatically", ToolResolution.failed(reason: "action outcome unknown; do not retry automatically")),
+            ("experimental click mode disabled", "cancelled", ToolResolution.rejected(reason: "cancelled"))
+        ] {
+            let service = StaticTimelineService(timeline: [
+                terminalEvent(actionDigest: digest, summary: summary, result: result, requestID: otherID),
+                terminalEvent(actionDigest: digest, summary: summary, result: result, requestID: id)
+            ])
+            let waiter = TaskServiceApprovalWaiter(service: service, pollInterval: 0.001, timeout: 0.05)
+            let actual = try await waiter.waitForResolution(requestID: id, payloadDigest: digest, taskID: UUID())
+            XCTAssertEqual(actual, expected)
+            let other = try await waiter.waitForResolution(requestID: UUID(), payloadDigest: digest, taskID: UUID())
+            XCTAssertEqual(other, .timedOut)
+        }
+    }
+
     func testWaiterConsumesOnlyMatchingEphemeralResult() async throws {
         let requestID = UUID(), otherID = UUID(), digest = "digest"
         let service = StaticTimelineService(timeline: [
