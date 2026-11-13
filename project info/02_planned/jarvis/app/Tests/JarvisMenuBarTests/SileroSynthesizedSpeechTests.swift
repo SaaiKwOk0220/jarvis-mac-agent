@@ -6,6 +6,9 @@ import XCTest
 // say -v 'Eddy (Chinese (China mainland))' -o /tmp/jarvis-vad-short.aiff '你好，这是中文语音测试。'
 // say -v 'Eddy (Chinese (China mainland))' -o /tmp/jarvis-vad-long.aiff '你好，请帮我整理今天的工作计划。先检查项目进度，然后打开浏览器查找资料，最后把结果总结成一份清晰的报告。'
 // JARVIS_SYNTH_SHORT=/tmp/jarvis-vad-short.aiff JARVIS_SYNTH_LONG=/tmp/jarvis-vad-long.aiff swift test --filter SileroSynthesizedSpeechTests
+// Check `afinfo /tmp/jarvis-vad-short.aiff` and the long file: audio bytes and
+// duration must be nonzero. `say` may exit successfully with zero frames when
+// the Mac is locked or speech synthesis is sandboxed; unlock it and regenerate.
 // This measures one synthetic voice, not real-world speech recognition accuracy.
 final class SileroSynthesizedSpeechTests: XCTestCase {
     private func validInput(bytes: Int64, frames: Int64, sampleRate: Double, channels: UInt32) -> Bool {
@@ -16,6 +19,7 @@ final class SileroSynthesizedSpeechTests: XCTestCase {
 
     func testAudioInputBounds() {
         XCTAssertTrue(validInput(bytes: 100, frames: 22_050, sampleRate: 22_050, channels: 1))
+        XCTAssertFalse(validInput(bytes: 4096, frames: 0, sampleRate: 22_050, channels: 1))
         XCTAssertFalse(validInput(bytes: 8_000_001, frames: 22_050, sampleRate: 22_050, channels: 1))
         XCTAssertFalse(validInput(bytes: 100, frames: 1_000_001, sampleRate: 48_000, channels: 1))
         XCTAssertFalse(validInput(bytes: 100, frames: 480_001, sampleRate: 16_000, channels: 1))
@@ -36,6 +40,10 @@ final class SileroSynthesizedSpeechTests: XCTestCase {
                 throw NSError(domain: "SileroSynthesizedSpeechTests.invalidFile", code: 1)
             }
             let file = try AVAudioFile(forReading: url)
+            guard file.length > 0 else {
+                throw NSError(domain: "SileroSynthesizedSpeechTests.emptyAudio", code: 3,
+                              userInfo: [NSLocalizedDescriptionKey: "Synthesized audio has zero frames; say can succeed while locked or sandboxed. Unlock the Mac, regenerate, and check audio bytes with afinfo."])
+            }
             guard validInput(bytes: Int64(bytes), frames: file.length, sampleRate: file.processingFormat.sampleRate,
                              channels: file.processingFormat.channelCount) else {
                 throw NSError(domain: "SileroSynthesizedSpeechTests.invalidFormat", code: 2)
