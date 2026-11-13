@@ -32,6 +32,16 @@ final class SpeechTextFormatterTests: XCTestCase {
         XCTAssertEqual(SpeechTextFormatter.prepare("https://example.com"), "https://example.com")
     }
 
+    func testInlineCodeAndIdentifiersKeepOperatorsAndUnderscores() {
+        XCTAssertEqual(SpeechTextFormatter.prepare("计算 `2 ** 3`，变量 foo__bar"), "计算 2 ** 3，变量 foo__bar")
+    }
+    func testUnpairedAndArithmeticMarkersRemainIntact() {
+        XCTAssertEqual(SpeechTextFormatter.prepare("未闭合 ** 标记；2 ** 3"), "未闭合 ** 标记；2 ** 3")
+    }
+    func testPairedStrongMarkupStillCleans() {
+        XCTAssertEqual(SpeechTextFormatter.prepare("**重要** 与 __重点__"), "重要 与 重点")
+    }
+
     func testEmptyInputIsEmpty() {
         XCTAssertEqual(SpeechTextFormatter.prepare(" \n \t"), "")
     }
