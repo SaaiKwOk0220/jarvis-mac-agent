@@ -44,8 +44,12 @@ final class AskVisualPreviewTests: XCTestCase {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [BlockAllPreviewNetwork.self]
         let client = ServiceClient(baseURL: URL(string: "http://127.0.0.1:1")!, session: URLSession(configuration: configuration))
+        let suite = "jarvis-preview-" + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
         let view = AskJarvisView(client: client, service: PreviewTaskService(), voiceDraftStore: nil, memoryContextProvider: nil,
                                  voiceFactory: { VoiceCoordinator(backend: PreviewVoiceBackend()) })
+            .defaultAppStorage(defaults)
             .disabled(true)
         for (name, width, height) in [("wide", 1440.0, 900.0), ("compact", 700.0, 800.0)] {
             let file = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("jarvis-ask-preview-\(name)-\(UUID().uuidString).png")
