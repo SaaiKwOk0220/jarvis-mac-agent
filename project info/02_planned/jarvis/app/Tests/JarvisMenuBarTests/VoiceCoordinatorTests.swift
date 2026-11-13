@@ -996,6 +996,80 @@ private final class PCMTestCollector: @unchecked Sendable {
         XCTAssertEqual(sent, ["测试"])
     }
 
+    func testSyntheticBackgroundNoiseAndWeakSpeechMayNotEndpoint() async throws {
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1))
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 16_000))
+        buffer.frameLength = 16_000
+        let samples = try XCTUnwrap(buffer.floatChannelData?[0])
+        let unexpected = expectation(description: "fixed threshold should not detect these pauses")
+        unexpected.isInverted = true
+        func feed(_ monitor: AudioPauseMonitor, level: Float, seconds: Int) {
+            for index in 0..<16_000 { samples[index] = level }
+            for _ in 0..<seconds { monitor.observe(buffer) }
+        }
+        let noisy = AudioPauseMonitor(pauseDuration: 3.5, onSilence: { unexpected.fulfill() })
+        feed(noisy, level: 0.02, seconds: 1)
+        feed(noisy, level: 0.08, seconds: 1)
+        feed(noisy, level: 0.02, seconds: 5)
+        let quiet = AudioPauseMonitor(pauseDuration: 3.5, onSilence: { unexpected.fulfill() })
+        feed(quiet, level: 0.01, seconds: 1)
+        feed(quiet, level: 0, seconds: 5)
+        await fulfillment(of: [unexpected], timeout: 0.1)
+    }
+
+    func testSyntheticShortPauseDoesNotCutLongSentence() async throws {
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1))
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 16_000))
+        buffer.frameLength = 16_000
+        let samples = try XCTUnwrap(buffer.floatChannelData?[0])
+        let ended = expectation(description: "ends after final pause only")
+        var didEnd = false
+        let monitor = AudioPauseMonitor(pauseDuration: 3.5, onSilence: { didEnd = true; ended.fulfill() })
+        func feed(_ level: Float, _ seconds: Int) {
+            for index in 0..<16_000 { samples[index] = level }
+            for _ in 0..<seconds { monitor.observe(buffer) }
+        }
+        feed(0.08, 1); feed(0, 2)
+        await Task.yield()
+        XCTAssertFalse(didEnd)
+        feed(0.08, 1); feed(0, 4)
+        await fulfillment(of: [ended], timeout: 1)
+    }
+
+    func testTwoAudioTapSessionsEachDetectSpeechThenPause() async throws {
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1))
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 16_000))
+        buffer.frameLength = 16_000
+        let samples = try XCTUnwrap(buffer.floatChannelData?[0])
+        for turn in 1...2 {
+            let detected = expectation(description: "audio tap pause turn \(turn)")
+            let gate = AudioRequestGate(append: { _ in }, end: {})
+            let monitor = AudioPauseMonitor(pauseDuration: 2, onSilence: { detected.fulfill() })
+            let tap = SpeechCallbackBridge.tap(gate: gate, monitor: monitor)
+            for index in 0..<16_000 { samples[index] = 0.1 }
+            tap(buffer, AVAudioTime(hostTime: 0))
+            for index in 0..<16_000 { samples[index] = 0 }
+            tap(buffer, AVAudioTime(hostTime: 0))
+            tap(buffer, AVAudioTime(hostTime: 0))
+            await fulfillment(of: [detected], timeout: 1)
+            gate.finish()
+        }
+    }
+
+    func testLongPartialSurvivesEmptyFinalAndRequiresConfirmation() async {
+        let backend = FakeVoiceBackend(); let voice = VoiceCoordinator(backend: backend)
+        let longText = String(repeating: "这是一段较长的语音，", count: 30)
+        var submitted: [String] = []
+        await voice.start(autoSubmit: { submitted.append($0) })
+        backend.handler?(longText)
+        backend.silenceHandler?()
+        backend.handler?("")
+        backend.finishHandler?(false)
+        XCTAssertEqual(voice.transcript, longText)
+        XCTAssertTrue(voice.needsConfirmation)
+        XCTAssertTrue(submitted.isEmpty)
+    }
+
     func testTwoSuccessiveVoiceTurnsEachFinishOnSilence() async {
         let backend = FakeVoiceBackend(); let voice = VoiceCoordinator(backend: backend)
         var sent: [String] = []
