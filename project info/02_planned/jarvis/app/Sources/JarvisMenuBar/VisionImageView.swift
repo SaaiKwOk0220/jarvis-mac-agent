@@ -4,26 +4,42 @@ import Darwin
 import JarvisLLM
 import ImageIO
 import UniformTypeIdentifiers
+import zlib
 
-/// Reads only a user-selected regular PNG or JPEG; it never captures a screen.
+private final class VisionSnapshotGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var busy = false
+    func begin() -> Bool { lock.lock(); defer { lock.unlock() }; guard !busy else { return false }; busy = true; return true }
+    func end() { lock.lock(); defer { lock.unlock() }; busy = false }
+}
+
+/// Reads only a user-selected regular PNG; it never captures a screen.
 enum VisionImageSelection {
+    private static let gate = VisionSnapshotGate()
     struct Snapshot: Sendable {
         let name: String
         let data: Data
         let thumbnail: Data
     }
+    static func withExclusiveSnapshot<T>(_ work: () throws -> T) throws -> T {
+        guard gate.begin() else { throw VisionError.busy }
+        defer { gate.end() }
+        return try work()
+    }
     static func snapshot(_ url: URL) throws -> Snapshot {
-        let data = try readFile(url)
-        return Snapshot(name: url.lastPathComponent, data: data, thumbnail: try thumbnail(data))
+        try withExclusiveSnapshot {
+            let data = try readFile(url)
+            return Snapshot(name: url.lastPathComponent, data: data, thumbnail: try thumbnail(data))
+        }
     }
     static func validate(_ data: Data) throws {
         _ = try thumbnail(data)
     }
     private static func thumbnail(_ data: Data) throws -> Data {
         let png = Data([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
-        let jpeg = Data([0xff, 0xd8, 0xff])
         guard data.count <= VisionRequest.maximumImageBytes,
-              data.starts(with: png) || data.starts(with: jpeg) else { throw VisionError.invalidRequest }
+              data.starts(with: png) else { throw VisionError.invalidRequest }
+        try validatePNGChunks(data)
         guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
               CGImageSourceGetCount(source) == 1,
               CGImageSourceGetStatus(source) == .statusComplete,
@@ -42,6 +58,94 @@ enum VisionImageSelection {
         CGImageDestinationAddImage(destination, image, nil)
         guard CGImageDestinationFinalize(destination) else { throw VisionError.invalidRequest }
         return result as Data
+    }
+    /// ImageIO may render truncated PNGs, so require a complete, CRC-checked PNG stream.
+    private static func validatePNGChunks(_ data: Data) throws {
+        let bytes = [UInt8](data)
+        var offset = 8
+        var sawHeader = false, sawData = false, endedData = false
+        var compressed = Data()
+        var rowLength = 0, expectedBytes = 0
+        func integer(_ position: Int) -> UInt32 {
+            (UInt32(bytes[position]) << 24) | (UInt32(bytes[position + 1]) << 16) |
+                (UInt32(bytes[position + 2]) << 8) | UInt32(bytes[position + 3])
+        }
+        while offset <= bytes.count - 12 {
+            let length = Int(integer(offset))
+            guard length <= bytes.count - offset - 12 else { throw VisionError.invalidRequest }
+            let typeStart = offset + 4, bodyStart = offset + 8, crcOffset = bodyStart + length
+            let type = Array(bytes[typeStart..<bodyStart])
+            guard type.allSatisfy({ (65...90).contains($0) || (97...122).contains($0) }) else { throw VisionError.invalidRequest }
+            var crc: UInt32 = 0xffffffff
+            for byte in bytes[typeStart..<crcOffset] {
+                crc ^= UInt32(byte)
+                for _ in 0..<8 { crc = (crc & 1) == 1 ? (crc >> 1) ^ 0xedb88320 : crc >> 1 }
+            }
+            guard crc ^ 0xffffffff == integer(crcOffset) else { throw VisionError.invalidRequest }
+            let name = String(decoding: type, as: UTF8.self)
+            if !sawHeader {
+                guard name == "IHDR", length == 13 else { throw VisionError.invalidRequest }
+                let width = Int(integer(bodyStart)), height = Int(integer(bodyStart + 4))
+                let bitDepth = bytes[bodyStart + 8], color = bytes[bodyStart + 9]
+                let channels: Int
+                switch color { case 0, 3: channels = 1; case 2: channels = 3; case 4: channels = 2; case 6: channels = 4; default: throw VisionError.invalidRequest }
+                guard width > 0, height > 0, width <= 8192, height <= 8192, width * height <= 24_000_000,
+                      bitDepth == 8, bytes[bodyStart + 10] == 0, bytes[bodyStart + 11] == 0,
+                      bytes[bodyStart + 12] == 0 else { throw VisionError.invalidRequest }
+                rowLength = width * channels + 1
+                expectedBytes = height * rowLength
+                sawHeader = true
+            } else if name == "IHDR" { throw VisionError.invalidRequest }
+            if ["acTL", "fcTL", "fdAT"].contains(name) { throw VisionError.invalidRequest }
+            if type[0] & 0x20 == 0 && !["IHDR", "PLTE", "IDAT", "IEND"].contains(name) { throw VisionError.invalidRequest }
+            if name == "IDAT" {
+                guard !endedData else { throw VisionError.invalidRequest }
+                sawData = true
+                compressed.append(contentsOf: bytes[bodyStart..<crcOffset])
+            } else if sawData { endedData = true }
+            offset = crcOffset + 4
+            if name == "IEND" {
+                guard length == 0, sawData, offset == bytes.count else { throw VisionError.invalidRequest }
+                try validateInflate(compressed, rowLength: rowLength, expectedBytes: expectedBytes)
+                return
+            }
+        }
+        throw VisionError.invalidRequest
+    }
+    /// Decode through zlib into a bounded scratch buffer; require the whole stream,
+    /// checksum, exact scanline length, and valid per-row filter bytes.
+    private static func validateInflate(_ compressed: Data, rowLength: Int, expectedBytes: Int) throws {
+        var stream = z_stream()
+        guard inflateInit_(&stream, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK else { throw VisionError.invalidRequest }
+        defer { inflateEnd(&stream) }
+        var output = [UInt8](repeating: 0, count: 65_536)
+        try compressed.withUnsafeBytes { input in
+            guard let base = input.bindMemory(to: UInt8.self).baseAddress else { throw VisionError.invalidRequest }
+            stream.next_in = UnsafeMutablePointer(mutating: base)
+            stream.avail_in = uInt(input.count)
+            var total = 0
+            while true {
+                let beforeInput = stream.avail_in
+                let status: Int32 = output.withUnsafeMutableBufferPointer { buffer in
+                    stream.next_out = buffer.baseAddress
+                    stream.avail_out = uInt(buffer.count)
+                    return inflate(&stream, Z_NO_FLUSH)
+                }
+                let produced = output.count - Int(stream.avail_out)
+                guard produced <= expectedBytes - total else { throw VisionError.invalidRequest }
+                var filter = (rowLength - total % rowLength) % rowLength
+                while filter < produced {
+                    guard output[filter] <= 4 else { throw VisionError.invalidRequest }
+                    filter += rowLength
+                }
+                total += produced
+                if status == Z_STREAM_END {
+                    guard total == expectedBytes, stream.avail_in == 0 else { throw VisionError.invalidRequest }
+                    return
+                }
+                guard status == Z_OK, produced > 0 || stream.avail_in < beforeInput else { throw VisionError.invalidRequest }
+            }
+        }
     }
     static func read(_ url: URL) throws -> Data {
         let data = try readFile(url)
@@ -85,7 +189,7 @@ struct VisionImageView: View {
                 Image(nsImage: preview).resizable().scaledToFit().frame(maxWidth: 240, maxHeight: 140)
                     .accessibilityLabel("已选择图片的预览")
             }
-            Text("支持单帧 PNG 或 JPEG，最大 5 MiB、边长不超过 8192 像素且总计不超过 2400 万像素。不会自动读取屏幕或浏览器。")
+            Text("支持非交错的 8 位单帧 PNG，最大 5 MiB、边长不超过 8192 像素且总计不超过 2400 万像素。不会自动读取屏幕或浏览器。")
                 .font(.caption).foregroundStyle(.secondary)
             TextField("本机服务地址", text: $endpoint).disabled(running)
             TextField("视觉模型名称", text: $model).disabled(running)
@@ -103,7 +207,7 @@ struct VisionImageView: View {
 
     private func chooseImage() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.png, .jpeg]
+        panel.allowedContentTypes = [.png]
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
@@ -117,7 +221,11 @@ struct VisionImageView: View {
                 selected = snapshot; preview = image; result = ""
             } catch {
                 guard generation == current, !Task.isCancelled else { return }
-                result = "无法读取或预览图片，请检查文件格式、大小和像素尺寸。"
+                if let error = error as? VisionError, case .busy = error {
+                    result = "上一张图片仍在处理，请稍后重试。"
+                } else {
+                    result = "无法读取或预览图片，请检查文件格式、大小和像素尺寸。"
+                }
             }
             if generation == current { running = false; requestTask = nil }
         }

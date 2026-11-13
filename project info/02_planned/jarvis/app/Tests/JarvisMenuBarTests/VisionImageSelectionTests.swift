@@ -2,6 +2,7 @@ import XCTest
 import Darwin
 import AppKit
 import ImageIO
+import JarvisLLM
 @testable import JarvisMenuBar
 
 final class VisionImageSelectionTests: XCTestCase {
@@ -17,6 +18,20 @@ final class VisionImageSelectionTests: XCTestCase {
         XCTAssertNoThrow(try VisionImageSelection.validate(png))
         XCTAssertThrowsError(try VisionImageSelection.validate(png + Data(count: 5 * 1024 * 1024)))
         XCTAssertThrowsError(try VisionImageSelection.validate(Data(png.prefix(32))))
+        XCTAssertThrowsError(try VisionImageSelection.validate(Data(png.prefix(64))))
+        XCTAssertThrowsError(try VisionImageSelection.validate(Data(png.prefix(100))))
+        XCTAssertThrowsError(try VisionImageSelection.validate(Data(png.dropLast())))
+        var invalidCRC = png
+        invalidCRC[invalidCRC.count - 1] ^= 1
+        XCTAssertThrowsError(try VisionImageSelection.validate(invalidCRC))
+        let animation = Data([0, 0, 0, 8, 0x61, 0x63, 0x54, 0x4c, 0, 0, 0, 2, 0, 0, 0, 0, 0xf3, 0x8d, 0x93, 0x70])
+        var animatedPNG = png
+        animatedPNG.insert(contentsOf: animation, at: 33)
+        XCTAssertThrowsError(try VisionImageSelection.validate(animatedPNG))
+        let badDeflate = Data([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,0,0,0,0x0d,0x49,0x48,0x44,0x52,0,0,0,1,0,0,0,1,8,6,0,0,0,0x1f,0x15,0xc4,0x89,0,0,0,4,0x49,0x44,0x41,0x54,0x6a,0x75,0x6e,0x6b,0xcd,0x9c,0xa4,0x22,0,0,0,0,0x49,0x45,0x4e,0x44,0xae,0x42,0x60,0x82])
+        XCTAssertThrowsError(try VisionImageSelection.validate(badDeflate))
+        let badFilter = Data([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,0,0,0,0x0d,0x49,0x48,0x44,0x52,0,0,0,1,0,0,0,1,8,6,0,0,0,0x1f,0x15,0xc4,0x89,0,0,0,0x0d,0x49,0x44,0x41,0x54,0x78,0x9c,0x63,0x65,0x60,0x60,0xf8,0x0f,0,0x01,0x1d,0x01,0x05,0xda,0x51,0x64,0x7f,0,0,0,0,0x49,0x45,0x4e,0x44,0xae,0x42,0x60,0x82])
+        XCTAssertThrowsError(try VisionImageSelection.validate(badFilter))
         XCTAssertThrowsError(try VisionImageSelection.validate(try image(width: 9000)))
     }
 
@@ -50,5 +65,32 @@ final class VisionImageSelectionTests: XCTestCase {
         let preview = try XCTUnwrap(CGImageSourceCreateWithData(snapshot.thumbnail as CFData, nil))
         XCTAssertEqual(CGImageSourceGetCount(preview), 1)
         XCTAssertNotNil(CGImageSourceCreateImageAtIndex(preview, 0, nil))
+    }
+
+    func testSnapshotGateRemainsHeldUntilWorkerActuallyReturns() throws {
+        try VisionImageSelection.withExclusiveSnapshot {
+            XCTAssertThrowsError(try VisionImageSelection.withExclusiveSnapshot { 1 })
+        }
+        XCTAssertEqual(try VisionImageSelection.withExclusiveSnapshot { 2 }, 2)
+        XCTAssertThrowsError(try VisionImageSelection.withExclusiveSnapshot { throw VisionError.invalidRequest })
+        XCTAssertEqual(try VisionImageSelection.withExclusiveSnapshot { 3 }, 3)
+    }
+
+    func testSnapshotGateRejectsAnotherWorkerUntilFirstExits() throws {
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let finished = expectation(description: "worker exits")
+        DispatchQueue.global().async {
+            defer { finished.fulfill() }
+            _ = try? VisionImageSelection.withExclusiveSnapshot {
+                entered.signal()
+                _ = release.wait(timeout: .now() + 5)
+            }
+        }
+        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success)
+        XCTAssertThrowsError(try VisionImageSelection.withExclusiveSnapshot { 1 })
+        release.signal()
+        wait(for: [finished], timeout: 2)
+        XCTAssertEqual(try VisionImageSelection.withExclusiveSnapshot { 2 }, 2)
     }
 }
