@@ -5,6 +5,13 @@ import JarvisLLM
 
 /// Reads only a user-selected regular PNG or JPEG; it never captures a screen.
 enum VisionImageSelection {
+    struct Snapshot: Sendable {
+        let name: String
+        let data: Data
+    }
+    static func snapshot(_ url: URL) throws -> Snapshot {
+        Snapshot(name: url.lastPathComponent, data: try read(url))
+    }
     static func validate(_ data: Data) throws {
         let png = Data([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
         let jpeg = Data([0xff, 0xd8, 0xff])
@@ -26,7 +33,7 @@ enum VisionImageSelection {
 
 /// Explicit single-image request. No network action occurs until the user submits.
 struct VisionImageView: View {
-    @State private var selected: URL?
+    @State private var selected: VisionImageSelection.Snapshot?
     @State private var endpoint = "http://127.0.0.1:11434"
     @State private var model = "qwen2.5vl:3b"
     @State private var question = "请描述这张图片。"
@@ -42,7 +49,11 @@ struct VisionImageView: View {
                 .font(.callout).foregroundStyle(.secondary)
             HStack {
                 Button("选择图片…") { chooseImage() }.disabled(running)
-                Text(selected?.lastPathComponent ?? "尚未选择图片").lineLimit(1)
+                Text(selected?.name ?? "尚未选择图片").lineLimit(1)
+            }
+            if let selected, let preview = NSImage(data: selected.data) {
+                Image(nsImage: preview).resizable().scaledToFit().frame(maxWidth: 240, maxHeight: 140)
+                    .accessibilityLabel("已选择图片的预览")
             }
             Text("支持 PNG 或 JPEG，最大 5 MiB。不会自动读取屏幕或浏览器。")
                 .font(.caption).foregroundStyle(.secondary)
@@ -65,7 +76,20 @@ struct VisionImageView: View {
         panel.allowedContentTypes = [.png, .jpeg]
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
-        if panel.runModal() == .OK { selected = panel.url; result = "" }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        selected = nil
+        let current = UUID(); generation = current; running = true; result = "正在读取所选图片…"
+        requestTask = Task {
+            do {
+                let snapshot = try await Task.detached { try VisionImageSelection.snapshot(url) }.value
+                guard generation == current, !Task.isCancelled else { return }
+                selected = snapshot; result = ""
+            } catch {
+                guard generation == current, !Task.isCancelled else { return }
+                result = "无法读取图片，请选择不超过 5 MiB 的 PNG 或 JPEG 文件。"
+            }
+            if generation == current { running = false; requestTask = nil }
+        }
     }
     private func submit() {
         guard let selected, let url = URL(string: endpoint) else { result = "请检查本机服务地址。"; return }
@@ -75,9 +99,8 @@ struct VisionImageView: View {
         requestTask = Task {
             do {
                 let service = try OllamaVisionService(baseURL: url, model: selectedModel)
-                let data = try await Task.detached { try VisionImageSelection.read(selected) }.value
                 try Task.checkCancellation()
-                let answer = try await service.describe(VisionRequest(prompt: prompt, image: data))
+                let answer = try await service.describe(VisionRequest(prompt: prompt, image: selected.data))
                 guard generation == current, !Task.isCancelled else { return }
                 result = answer
             } catch {
