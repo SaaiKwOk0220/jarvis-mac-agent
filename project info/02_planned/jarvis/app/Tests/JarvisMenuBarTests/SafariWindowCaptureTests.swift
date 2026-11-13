@@ -99,6 +99,13 @@ final class SafariWindowCaptureTests: XCTestCase {
         XCTAssertEqual(SafariWindowLabel.text(at: 1, window: choices[1]), "窗口 2：a")
     }
 
+    func testStalledEnumerationMessageOffersWaitOrRestartWithoutPromisingRecovery() {
+        let message = SafariWindowMessages.enumerationBusy
+        XCTAssertTrue(message.contains("等待系统恢复"))
+        XCTAssertTrue(message.contains("重启 Jarvis"))
+        XCTAssertFalse(message.contains("立即恢复"))
+    }
+
     func testAlreadyCancelledEnumerationNeverStartsUnderlyingWork() async {
         let gate = SafariEnumerationGate()
         let invoked = expectation(description: "underlying worker must not start")

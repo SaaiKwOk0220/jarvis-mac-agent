@@ -32,6 +32,10 @@ enum SafariWindowLabel {
     }
 }
 
+enum SafariWindowMessages {
+    static let enumerationBusy = "上一次窗口读取尚未结束。请等待系统恢复，或重启 Jarvis 后重试。"
+}
+
 struct SafariCaptureState {
     private var generation = UUID()
     private var frame: Data?
@@ -223,7 +227,7 @@ struct SafariWindowVisionView: View {
             } catch {
                 guard !Task.isCancelled, state.isCurrent(token) else { return }
                 if case SafariWindowCaptureError.busy = error {
-                    result = "上一次窗口读取仍在进行，请稍后再试。"
+                    result = SafariWindowMessages.enumerationBusy
                 } else {
                     result = "无法列出窗口，请检查屏幕录制权限。"
                 }
@@ -245,7 +249,11 @@ struct SafariWindowVisionView: View {
                 preview = image; result = "请检查预览，再决定是否分析。"
             } catch {
                 guard !Task.isCancelled, state.isCurrent(token) else { return }
-                result = "无法截取所选窗口。窗口可能已变化，请重新列出并选择。"
+                if case SafariWindowCaptureError.busy = error {
+                    result = SafariWindowMessages.enumerationBusy
+                } else {
+                    result = "无法截取所选窗口。窗口可能已变化，请重新列出并选择。"
+                }
             }
             if state.isCurrent(token) { busy = false; running = nil }
         }
