@@ -26,6 +26,12 @@ enum SafariCaptureSelection {
     }
 }
 
+enum SafariWindowLabel {
+    static func text(at index: Int, window: SafariWindowIdentity) -> String {
+        "窗口 \(index + 1)：\(window.title)"
+    }
+}
+
 struct SafariCaptureState {
     private var generation = UUID()
     private var frame: Data?
@@ -39,7 +45,7 @@ struct SafariCaptureState {
     mutating func cancel() { generation = UUID(); frame = nil }
 }
 
-enum SafariWindowCaptureError: Error { case unavailable, invalidSelection, invalidFrame }
+enum SafariWindowCaptureError: Error { case unavailable, invalidSelection, invalidFrame, busy }
 
 final class SafariCaptureWorkGate: @unchecked Sendable {
     static let shared = SafariCaptureWorkGate()
@@ -47,6 +53,39 @@ final class SafariCaptureWorkGate: @unchecked Sendable {
     private var active = false
     func begin() -> Bool { lock.lock(); defer { lock.unlock() }; guard !active else { return false }; active = true; return true }
     func end() { lock.lock(); active = false; lock.unlock() }
+}
+
+/// Keeps enumeration single-flight until the underlying OS completion callback.
+final class SafariEnumerationGate: @unchecked Sendable {
+    static let shared = SafariEnumerationGate()
+    private let gate = SafariCaptureWorkGate()
+
+    func run<T: Sendable>(_ start: @Sendable (@escaping @Sendable (Result<T, Error>) -> Void) -> Void) async throws -> T {
+        try Task.checkCancellation()
+        guard gate.begin() else { throw SafariWindowCaptureError.busy }
+        do { try Task.checkCancellation() } catch { gate.end(); throw error }
+        let value: T = try await withCheckedThrowingContinuation { continuation in
+            let completion = SafariEnumerationCompletion(gate: gate, continuation: continuation)
+            start { result in completion.finish(result) }
+        }
+        try Task.checkCancellation()
+        return value
+    }
+}
+
+private final class SafariEnumerationCompletion<T: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<T, Error>?
+    private let gate: SafariCaptureWorkGate
+    init(gate: SafariCaptureWorkGate, continuation: CheckedContinuation<T, Error>) {
+        self.gate = gate; self.continuation = continuation
+    }
+    func finish(_ result: Result<T, Error>) {
+        lock.lock(); let current = continuation; continuation = nil; lock.unlock()
+        guard let current else { return }
+        gate.end()
+        current.resume(with: result)
+    }
 }
 
 /// Injectable boundary: tests never enumerate or capture a real screen.
@@ -77,10 +116,18 @@ enum SafariWindowCapture {
 /// Uses only an explicit, currently visible Safari window and never falls back to the display.
 @MainActor
 final class SystemSafariWindowProvider: SafariWindowProviding {
+    private struct ShareableContent: @unchecked Sendable { let value: SCShareableContent }
+
     private func availableWindows() async throws -> [(SCWindow, SafariWindowIdentity)] {
         // Preflight never requests authorization. The user enables it in System Settings.
         guard CGPreflightScreenCaptureAccess() else { throw SafariWindowCaptureError.unavailable }
-        let content = try await SCShareableContent.current
+        let boxed: ShareableContent = try await SafariEnumerationGate.shared.run { completion in
+            SCShareableContent.getWithCompletionHandler { content, error in
+                if let content { completion(.success(ShareableContent(value: content))) }
+                else { completion(.failure(error ?? SafariWindowCaptureError.unavailable)) }
+            }
+        }
+        let content = boxed.value
         return content.windows.compactMap { window in
             guard window.isOnScreen, let owner = window.owningApplication,
                   owner.bundleIdentifier == "com.apple.Safari", owner.processID > 0, window.windowID != 0,
@@ -137,11 +184,13 @@ struct SafariWindowVisionView: View {
                 .font(.callout).foregroundStyle(.secondary)
             Text("需要先在系统设置中允许屏幕录制；取消无法撤回已经发送的数据。")
                 .font(.caption).foregroundStyle(.secondary)
+            Text("列出窗口会在此处显示 Safari 页面标题，可能包含敏感信息。页面或窗口可能变化；请确认预览，发送时使用的就是这张快照。")
+                .font(.caption).foregroundStyle(.secondary)
             Button("列出 Safari 窗口") { listWindows() }.disabled(busy)
             if !windows.isEmpty {
                 ScrollView { VStack(alignment: .leading) {
-                    ForEach(windows) { window in
-                        Button(window.title) { capture(window) }.disabled(busy).lineLimit(1)
+                    ForEach(Array(windows.enumerated()), id: \.element.id) { index, window in
+                        Button(SafariWindowLabel.text(at: index, window: window)) { capture(window) }.disabled(busy).lineLimit(1)
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading) }.frame(maxHeight: 110)
             }
@@ -173,7 +222,11 @@ struct SafariWindowVisionView: View {
                 windows = list; result = list.isEmpty ? "没有找到可见的 Safari 窗口。" : "请选择要截取的窗口。"
             } catch {
                 guard !Task.isCancelled, state.isCurrent(token) else { return }
-                result = "无法列出窗口，请检查屏幕录制权限。"
+                if case SafariWindowCaptureError.busy = error {
+                    result = "上一次窗口读取仍在进行，请稍后再试。"
+                } else {
+                    result = "无法列出窗口，请检查屏幕录制权限。"
+                }
             }
             if state.isCurrent(token) { busy = false; running = nil }
         }

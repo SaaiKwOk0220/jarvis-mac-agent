@@ -2,6 +2,13 @@ import Foundation
 import XCTest
 @testable import JarvisMenuBar
 
+private final class EnumerationCompletion: @unchecked Sendable {
+    private let lock = NSLock()
+    private var completion: (@Sendable (Result<Int, Error>) -> Void)?
+    func install(_ value: @escaping @Sendable (Result<Int, Error>) -> Void) { lock.lock(); completion = value; lock.unlock() }
+    func finish(_ value: Int) { lock.lock(); let callback = completion; completion = nil; lock.unlock(); callback?(.success(value)) }
+}
+
 @MainActor
 private final class FakeSafariWindowProvider: SafariWindowProviding {
     var snapshots: [[SafariWindowIdentity]]
@@ -70,5 +77,37 @@ final class SafariWindowCaptureTests: XCTestCase {
         let gate = SafariCaptureWorkGate()
         XCTAssertTrue(gate.begin()); XCTAssertFalse(gate.begin())
         gate.end(); XCTAssertTrue(gate.begin()); gate.end()
+    }
+
+    func testCancelledEnumerationKeepsGateUntilUnderlyingCallbackFinishes() async throws {
+        let gate = SafariEnumerationGate(), worker = EnumerationCompletion()
+        let started = expectation(description: "underlying worker started")
+        let first = Task { try await gate.run { callback in worker.install(callback); started.fulfill() } }
+        await fulfillment(of: [started], timeout: 2)
+        first.cancel()
+        do { let _: Int = try await gate.run { $0(.success(2)) }; XCTFail("overlapping enumeration must fail") }
+        catch SafariWindowCaptureError.busy {} catch { XCTFail("unexpected error") }
+        worker.finish(1)
+        do { _ = try await first.value; XCTFail("cancelled result must be discarded") } catch is CancellationError {} catch { XCTFail("unexpected error") }
+        let second: Int = try await gate.run { $0(.success(3)) }
+        XCTAssertEqual(second, 3)
+    }
+
+    func testWindowLabelsDisambiguateSameTitle() {
+        let choices = [target, SafariWindowIdentity(bundleID: target.bundleID, windowID: 43, pid: target.pid, launched: target.launched, title: target.title)]
+        XCTAssertEqual(SafariWindowLabel.text(at: 0, window: choices[0]), "窗口 1：a")
+        XCTAssertEqual(SafariWindowLabel.text(at: 1, window: choices[1]), "窗口 2：a")
+    }
+
+    func testAlreadyCancelledEnumerationNeverStartsUnderlyingWork() async {
+        let gate = SafariEnumerationGate()
+        let invoked = expectation(description: "underlying worker must not start")
+        invoked.isInverted = true
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            let _: Int = try await gate.run { callback in invoked.fulfill(); callback(.success(1)) }
+        }
+        do { try await task.value; XCTFail("cancelled task must fail") } catch is CancellationError {} catch { XCTFail("unexpected failure") }
+        await fulfillment(of: [invoked], timeout: 0.1)
     }
 }
