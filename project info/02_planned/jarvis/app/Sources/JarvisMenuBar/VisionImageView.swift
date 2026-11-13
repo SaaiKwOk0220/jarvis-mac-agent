@@ -28,19 +28,19 @@ enum VisionImageSelection {
     }
     static func snapshot(_ url: URL) throws -> Snapshot {
         try withExclusiveSnapshot {
-            let data = try readFile(url)
-            return Snapshot(name: url.lastPathComponent, data: data, thumbnail: try thumbnail(data))
+            let image = try prepare(readFile(url))
+            return Snapshot(name: url.lastPathComponent, data: image.safe, thumbnail: image.thumbnail)
         }
     }
     static func validate(_ data: Data) throws {
-        _ = try thumbnail(data)
+        _ = try prepare(data)
     }
-    private static func thumbnail(_ data: Data) throws -> Data {
+    private static func prepare(_ data: Data) throws -> (safe: Data, thumbnail: Data) {
         let png = Data([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
         guard data.count <= VisionRequest.maximumImageBytes,
               data.starts(with: png) else { throw VisionError.invalidRequest }
-        try validatePNGChunks(data)
-        guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+        let safe = try sanitizePNGChunks(data)
+        guard let source = CGImageSourceCreateWithData(safe as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
               CGImageSourceGetCount(source) == 1,
               CGImageSourceGetStatus(source) == .statusComplete,
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
@@ -57,16 +57,17 @@ enum VisionImageSelection {
         guard let destination = CGImageDestinationCreateWithData(result, UTType.png.identifier as CFString, 1, nil) else { throw VisionError.invalidRequest }
         CGImageDestinationAddImage(destination, image, nil)
         guard CGImageDestinationFinalize(destination) else { throw VisionError.invalidRequest }
-        return result as Data
+        return (safe, result as Data)
     }
-    /// ImageIO may render truncated PNGs, so require a complete, CRC-checked PNG stream.
-    private static func validatePNGChunks(_ data: Data) throws {
+    /// Preserve only chunks needed for pixels/transparency; never decompress metadata.
+    private static func sanitizePNGChunks(_ data: Data) throws -> Data {
         let bytes = [UInt8](data)
+        var safe = Data(bytes.prefix(8))
         var offset = 8
         var sawHeader = false, sawData = false, endedData = false, sawPalette = false
         var compressed = Data()
-        var rowLength = 0, expectedBytes = 0, colorType: UInt8 = 0
-        var ancillary = Set<String>()
+        var rowLength = 0, expectedBytes = 0, colorType: UInt8 = 0, paletteEntries = 0
+        var sawTransparency = false
         func integer(_ position: Int) -> UInt32 {
             (UInt32(bytes[position]) << 24) | (UInt32(bytes[position + 1]) << 16) |
                 (UInt32(bytes[position + 2]) << 8) | UInt32(bytes[position + 3])
@@ -84,7 +85,8 @@ enum VisionImageSelection {
             }
             guard crc ^ 0xffffffff == integer(crcOffset) else { throw VisionError.invalidRequest }
             let name = String(decoding: type, as: UTF8.self)
-            guard ["IHDR", "PLTE", "IDAT", "IEND", "tRNS", "sRGB", "gAMA", "cHRM", "pHYs"].contains(name) else { throw VisionError.invalidRequest }
+            guard !["acTL", "fcTL", "fdAT"].contains(name) else { throw VisionError.invalidRequest }
+            guard type[0] & 0x20 != 0 || ["IHDR", "PLTE", "IDAT", "IEND"].contains(name) else { throw VisionError.invalidRequest }
             if !sawHeader {
                 guard name == "IHDR", length == 13 else { throw VisionError.invalidRequest }
                 let width = Int(integer(bodyStart)), height = Int(integer(bodyStart + 4))
@@ -103,30 +105,26 @@ enum VisionImageSelection {
                 guard !sawPalette, !sawData, colorType != 0, colorType != 4,
                       length > 0, length <= 768, length % 3 == 0 else { throw VisionError.invalidRequest }
                 sawPalette = true
+                paletteEntries = length / 3
             }
-            if ["tRNS", "sRGB", "gAMA", "cHRM", "pHYs"].contains(name) {
-                guard !sawData, ancillary.insert(name).inserted else { throw VisionError.invalidRequest }
-                switch name {
-                case "sRGB": guard length == 1 else { throw VisionError.invalidRequest }
-                case "gAMA": guard length == 4 else { throw VisionError.invalidRequest }
-                case "cHRM": guard length == 32 else { throw VisionError.invalidRequest }
-                case "pHYs": guard length == 9 else { throw VisionError.invalidRequest }
-                case "tRNS":
-                    guard (colorType == 0 && length == 2) || (colorType == 2 && length == 6) ||
-                          (colorType == 3 && sawPalette && length > 0 && length <= 256) else { throw VisionError.invalidRequest }
-                default: throw VisionError.invalidRequest
-                }
+            if name == "tRNS" {
+                guard !sawData, !sawTransparency,
+                      (colorType == 0 && length == 2) || (colorType == 2 && length == 6) ||
+                      (colorType == 3 && sawPalette && length > 0 && length <= paletteEntries) else { throw VisionError.invalidRequest }
+                sawTransparency = true
             }
             if name == "IDAT" {
                 guard !endedData, colorType != 3 || sawPalette else { throw VisionError.invalidRequest }
                 sawData = true
                 compressed.append(contentsOf: bytes[bodyStart..<crcOffset])
             } else if sawData { endedData = true }
+            let chunkStart = offset
             offset = crcOffset + 4
+            if ["IHDR", "PLTE", "tRNS", "IDAT", "IEND"].contains(name) { safe.append(contentsOf: bytes[chunkStart..<offset]) }
             if name == "IEND" {
                 guard length == 0, sawData, offset == bytes.count else { throw VisionError.invalidRequest }
                 try validateInflate(compressed, rowLength: rowLength, expectedBytes: expectedBytes)
-                return
+                return safe
             }
         }
         throw VisionError.invalidRequest
@@ -167,9 +165,7 @@ enum VisionImageSelection {
         }
     }
     static func read(_ url: URL) throws -> Data {
-        let data = try readFile(url)
-        try validate(data)
-        return data
+        try prepare(readFile(url)).safe
     }
     private static func readFile(_ url: URL) throws -> Data {
         let descriptor = open(url.path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW)
@@ -208,7 +204,7 @@ struct VisionImageView: View {
                 Image(nsImage: preview).resizable().scaledToFit().frame(maxWidth: 240, maxHeight: 140)
                     .accessibilityLabel("已选择图片的预览")
             }
-            Text("实验版仅支持不含扩展元数据的非交错 8 位单帧 PNG；最大 5 MiB、边长不超过 8192 像素且总计不超过 2400 万像素。不会自动读取屏幕或浏览器。")
+            Text("支持非交错 8 位单帧 PNG，最大 5 MiB、边长不超过 8192 像素且总计不超过 2400 万像素。会移除元数据与色彩配置，颜色可能改变；预览与发送使用同一图片。不会自动读取屏幕或浏览器。")
                 .font(.caption).foregroundStyle(.secondary)
             TextField("本机服务地址", text: $endpoint).disabled(running)
             TextField("视觉模型名称", text: $model).disabled(running)
