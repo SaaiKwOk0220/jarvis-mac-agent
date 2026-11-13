@@ -108,6 +108,15 @@ class ProbeTests(unittest.TestCase):
             with self.assertRaises(vision_probe.ProbeError):
                 vision_probe.describe(path, 'm' * 257, 'q', 11434)
 
+    def test_control_only_response_is_rejected(self):
+        class Controls(Connection):
+            def getresponse(self):
+                return Response(json.dumps({'message': {'content': '\u001b[31m\u0000'}, 'done': True}).encode())
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'a'; path.write_bytes(PNG)
+            with patch.object(vision_probe.http.client, 'HTTPConnection', Controls), self.assertRaises(vision_probe.ProbeError):
+                vision_probe.describe(path, 'm', 'q', 11434)
+
     def test_rejects_bad_model_question_and_port(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / 'a'; path.write_bytes(PNG)

@@ -70,7 +70,10 @@ def describe(path: Path, model: str, question: str, port: int) -> str:
                 raise ValueError('invalid result')
         except (ValueError, TypeError, KeyError, AttributeError) as exc:
             raise ProbeError('Local Ollama returned an invalid response.') from exc
-        return safe_terminal_text(content)
+        clean = safe_terminal_text(content)
+        if not clean.strip():
+            raise ProbeError('Local Ollama returned an invalid response.')
+        return clean
     except (OSError, http.client.HTTPException) as exc:
         raise ProbeError('Cannot reach local Ollama at 127.0.0.1; check that it is running.') from exc
     finally:
