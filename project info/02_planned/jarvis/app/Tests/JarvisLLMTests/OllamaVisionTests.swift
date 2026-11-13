@@ -76,6 +76,13 @@ final class OllamaVisionTests: XCTestCase {
             catch VisionError.invalidResponse { }
         }
     }
+    func testRealLoopbackChunkedResponseOverLimit() async throws {
+        guard let port = ProcessInfo.processInfo.environment["JARVIS_VISION_TEST_PORT"],
+              let url = URL(string: "http://127.0.0.1:\(port)") else { throw XCTSkip("Set JARVIS_VISION_TEST_PORT to a controlled local oversized chunked HTTP server") }
+        let svc = try OllamaVisionService(baseURL: url, model: "test")
+        do { _ = try await svc.describe(VisionRequest(prompt: "x", image: Data([1]))); XCTFail("expected size rejection") }
+        catch VisionError.invalidResponse { }
+    }
     func testUnboundedResponseWithoutLengthIsRejected() async throws {
         MockURLProtocol.handler = { request in
             (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,

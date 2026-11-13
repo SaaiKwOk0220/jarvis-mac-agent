@@ -28,10 +28,68 @@ public enum VisionError: Error, LocalizedError {
     }
 }
 
-private final class VisionRedirectBlocker: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+/// Keeps only bounded application-owned response data. URLSession and the OS
+/// may maintain their own transient network buffers outside this limit.
+private final class VisionTransfer: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Data, Error>?
+    private var session: URLSession?
+    private var task: URLSessionDataTask?
+    private var data = Data()
+    private var finished = false
+    private var cancelled = false
+
+    func start(request: URLRequest, configuration: URLSessionConfiguration,
+               continuation: CheckedContinuation<Data, Error>) {
+        lock.lock()
+        if cancelled { lock.unlock(); continuation.resume(throwing: CancellationError()); return }
+        self.continuation = continuation
+        let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+        let task = session.dataTask(with: request)
+        self.session = session; self.task = task
+        lock.unlock()
+        task.resume()
+    }
+    func cancel() {
+        lock.lock(); cancelled = true; lock.unlock()
+        finish(.failure(CancellationError()))
+    }
+    private func finish(_ result: Result<Data, Error>) {
+        lock.lock()
+        guard !finished, let continuation else { lock.unlock(); return }
+        finished = true; self.continuation = nil
+        let task = self.task, session = self.session
+        self.task = nil; self.session = nil; data.removeAll()
+        lock.unlock()
+        task?.cancel(); session?.invalidateAndCancel()
+        continuation.resume(with: result)
+    }
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
         completionHandler(nil)
+    }
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+                    completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void) {
+        guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode) else {
+            completionHandler(.cancel); finish(.failure(VisionError.unavailable)); return
+        }
+        if response.expectedContentLength > Int64(OllamaVisionService.maximumResponseBytes) {
+            completionHandler(.cancel); finish(.failure(VisionError.invalidResponse)); return
+        }
+        completionHandler(.allow)
+    }
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive chunk: Data) {
+        lock.lock()
+        guard !finished else { lock.unlock(); return }
+        guard chunk.count <= OllamaVisionService.maximumResponseBytes - data.count else {
+            lock.unlock(); finish(.failure(VisionError.invalidResponse)); return
+        }
+        data.append(chunk); lock.unlock()
+    }
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if error != nil { finish(.failure(VisionError.unavailable)); return }
+        lock.lock(); let result = data; lock.unlock()
+        finish(.success(result))
     }
 }
 
@@ -48,7 +106,7 @@ private final class VisionRequestGate: @unchecked Sendable {
 public final class OllamaVisionService: @unchecked Sendable {
     private let endpoint: URL
     private let model: String
-    private let session: URLSession
+    private let configuration: URLSessionConfiguration
     static let maximumResponseBytes = 1024 * 1024
     public convenience init(baseURL: URL = URL(string: "http://127.0.0.1:11434")!, model: String) throws {
         try self.init(baseURL: baseURL, model: model, configuration: .ephemeral)
@@ -63,11 +121,11 @@ public final class OllamaVisionService: @unchecked Sendable {
               model.utf8.count <= 256 else { throw VisionError.invalidEndpoint }
         endpoint = baseURL.appendingPathComponent("api/chat")
         self.model = model
-        configuration.connectionProxyDictionary = [:]
+        configuration.connectionProxyDictionary = ["HTTPEnable": 0, "HTTPSEnable": 0, "SOCKSEnable": 0]
         configuration.urlCache = nil
         configuration.httpCookieStorage = nil
         configuration.urlCredentialStorage = nil
-        session = URLSession(configuration: configuration, delegate: VisionRedirectBlocker(), delegateQueue: nil)
+        self.configuration = configuration
     }
     public func describe(_ input: VisionRequest) async throws -> String {
         guard VisionRequestGate.shared.begin() else { throw VisionError.busy }
@@ -80,20 +138,12 @@ public final class OllamaVisionService: @unchecked Sendable {
         request.timeoutInterval = 120
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(Request(model: model, messages: [Message(role: "user", content: input.prompt, images: [input.image.base64EncodedString()])]))
-        let bytes: URLSession.AsyncBytes, response: URLResponse
-        do { (bytes, response) = try await session.bytes(for: request) }
-        catch { if Task.isCancelled || (error as? URLError)?.code == .cancelled { throw CancellationError() }; throw VisionError.unavailable }
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            bytes.task.cancel(); throw VisionError.unavailable
-        }
-        var data = Data()
-        do {
-            for try await byte in bytes {
-                guard data.count < Self.maximumResponseBytes else { bytes.task.cancel(); throw VisionError.invalidResponse }
-                data.append(byte)
+        let transfer = VisionTransfer()
+        let data = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                transfer.start(request: request, configuration: configuration, continuation: continuation)
             }
-        } catch let error as VisionError { throw error }
-        catch { bytes.task.cancel(); if Task.isCancelled || (error as? URLError)?.code == .cancelled { throw CancellationError() }; throw VisionError.unavailable }
+        } onCancel: { transfer.cancel() }
         guard let result = try? JSONDecoder().decode(Response.self, from: data), result.done,
               !result.message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw VisionError.invalidResponse }
         try Task.checkCancellation()
