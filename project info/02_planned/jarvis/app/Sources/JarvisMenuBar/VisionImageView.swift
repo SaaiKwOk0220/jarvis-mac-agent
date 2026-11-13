@@ -2,23 +2,53 @@ import SwiftUI
 import AppKit
 import Darwin
 import JarvisLLM
+import ImageIO
+import UniformTypeIdentifiers
 
 /// Reads only a user-selected regular PNG or JPEG; it never captures a screen.
 enum VisionImageSelection {
     struct Snapshot: Sendable {
         let name: String
         let data: Data
+        let thumbnail: Data
     }
     static func snapshot(_ url: URL) throws -> Snapshot {
-        Snapshot(name: url.lastPathComponent, data: try read(url))
+        let data = try readFile(url)
+        return Snapshot(name: url.lastPathComponent, data: data, thumbnail: try thumbnail(data))
     }
     static func validate(_ data: Data) throws {
+        _ = try thumbnail(data)
+    }
+    private static func thumbnail(_ data: Data) throws -> Data {
         let png = Data([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
         let jpeg = Data([0xff, 0xd8, 0xff])
         guard data.count <= VisionRequest.maximumImageBytes,
               data.starts(with: png) || data.starts(with: jpeg) else { throw VisionError.invalidRequest }
+        guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+              CGImageSourceGetCount(source) == 1,
+              CGImageSourceGetStatus(source) == .statusComplete,
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? Int,
+              let height = properties[kCGImagePropertyPixelHeight] as? Int,
+              width > 0, height > 0, width <= 8192, height <= 8192,
+              width * height <= 24_000_000 else { throw VisionError.invalidRequest }
+        let options: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true, kCGImageSourceThumbnailMaxPixelSize: 480,
+            kCGImageSourceShouldCacheImmediately: true]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
+              CGImageSourceGetStatusAtIndex(source, 0) == .statusComplete else { throw VisionError.invalidRequest }
+        let result = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(result, UTType.png.identifier as CFString, 1, nil) else { throw VisionError.invalidRequest }
+        CGImageDestinationAddImage(destination, image, nil)
+        guard CGImageDestinationFinalize(destination) else { throw VisionError.invalidRequest }
+        return result as Data
     }
     static func read(_ url: URL) throws -> Data {
+        let data = try readFile(url)
+        try validate(data)
+        return data
+    }
+    private static func readFile(_ url: URL) throws -> Data {
         let descriptor = open(url.path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW)
         guard descriptor >= 0 else { throw VisionError.invalidRequest }
         let file = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
@@ -26,7 +56,6 @@ enum VisionImageSelection {
         var info = stat()
         guard fstat(descriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { throw VisionError.invalidRequest }
         let data = try file.read(upToCount: VisionRequest.maximumImageBytes + 1) ?? Data()
-        try validate(data)
         return data
     }
 }
@@ -34,6 +63,7 @@ enum VisionImageSelection {
 /// Explicit single-image request. No network action occurs until the user submits.
 struct VisionImageView: View {
     @State private var selected: VisionImageSelection.Snapshot?
+    @State private var preview: NSImage?
     @State private var endpoint = "http://127.0.0.1:11434"
     @State private var model = "qwen2.5vl:3b"
     @State private var question = "请描述这张图片。"
@@ -51,11 +81,11 @@ struct VisionImageView: View {
                 Button("选择图片…") { chooseImage() }.disabled(running)
                 Text(selected?.name ?? "尚未选择图片").lineLimit(1)
             }
-            if let selected, let preview = NSImage(data: selected.data) {
+            if let preview {
                 Image(nsImage: preview).resizable().scaledToFit().frame(maxWidth: 240, maxHeight: 140)
                     .accessibilityLabel("已选择图片的预览")
             }
-            Text("支持 PNG 或 JPEG，最大 5 MiB。不会自动读取屏幕或浏览器。")
+            Text("支持单帧 PNG 或 JPEG，最大 5 MiB、边长不超过 8192 像素且总计不超过 2400 万像素。不会自动读取屏幕或浏览器。")
                 .font(.caption).foregroundStyle(.secondary)
             TextField("本机服务地址", text: $endpoint).disabled(running)
             TextField("视觉模型名称", text: $model).disabled(running)
@@ -77,17 +107,17 @@ struct VisionImageView: View {
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        selected = nil
+        selected = nil; preview = nil
         let current = UUID(); generation = current; running = true; result = "正在读取所选图片…"
         requestTask = Task {
             do {
                 let snapshot = try await Task.detached { try VisionImageSelection.snapshot(url) }.value
                 guard generation == current, !Task.isCancelled else { return }
-                guard NSImage(data: snapshot.data) != nil else { throw VisionError.invalidRequest }
-                selected = snapshot; result = ""
+                guard let image = NSImage(data: snapshot.thumbnail), image.isValid, !image.representations.isEmpty else { throw VisionError.invalidRequest }
+                selected = snapshot; preview = image; result = ""
             } catch {
                 guard generation == current, !Task.isCancelled else { return }
-                result = "无法读取图片，请选择不超过 5 MiB 的 PNG 或 JPEG 文件。"
+                result = "无法读取或预览图片，请检查文件格式、大小和像素尺寸。"
             }
             if generation == current { running = false; requestTask = nil }
         }
