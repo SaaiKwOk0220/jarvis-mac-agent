@@ -4,6 +4,22 @@ import JarvisLLM
 @testable import JarvisMenuBar
 
 final class VisionManagedRuntimeTests: XCTestCase {
+    func testStartupLogBoundsNoiseAndOnlySignalsOnce() {
+        final class Counter: @unchecked Sendable {
+            let lock = NSLock(); var count = 0
+            func add() { lock.lock(); count += 1; lock.unlock() }
+            func read() -> Int { lock.lock(); defer { lock.unlock() }; return count }
+        }
+        let count = Counter()
+        let log = VisionRuntimeStartupLog(port: 23456) { count.add() }
+        for _ in 0..<1000 { log.consume(Data(repeating: 65, count: 128)) }
+        XCTAssertLessThanOrEqual(log.retainedBytes, 16_384)
+        log.consume(Data("Listening on 127.0.0.1:".utf8))
+        log.consume(Data("23456 (fixture)".utf8))
+        for _ in 0..<1000 { log.consume(Data("Listening on 127.0.0.1:23456 (fixture)".utf8)) }
+        XCTAssertEqual(count.read(), 1)
+        XCTAssertEqual(log.retainedBytes, 0)
+    }
     func testConfigurationDisablesCloudAndUsesExplicitPrivateDirectories() throws {
         let config = try VisionManagedRuntime.Configuration(executable: URL(fileURLWithPath: "/usr/bin/true"),
             modelDirectory: FileManager.default.temporaryDirectory, scratchDirectory: FileManager.default.temporaryDirectory,

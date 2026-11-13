@@ -1,6 +1,31 @@
 import Foundation
 import Darwin
 
+/// Bounded readiness scanner. It schedules at most one callback per process.
+final class VisionRuntimeStartupLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private let marker: Data
+    private let onReady: @Sendable () -> Void
+    private var buffer = Data()
+    private var signalled = false
+
+    init(port: Int, onReady: @escaping @Sendable () -> Void) {
+        marker = Data("Listening on 127.0.0.1:\(port) ".utf8)
+        self.onReady = onReady
+    }
+    var retainedBytes: Int { lock.lock(); defer { lock.unlock() }; return buffer.count }
+    func consume(_ data: Data) {
+        lock.lock()
+        guard !signalled else { lock.unlock(); return }
+        buffer.append(contentsOf: data.suffix(16_384))
+        if buffer.count > 16_384 { buffer.removeFirst(buffer.count - 16_384) }
+        let found = buffer.range(of: marker) != nil
+        if found { signalled = true; buffer.removeAll() }
+        lock.unlock()
+        if found { onReady() }
+    }
+}
+
 /// Opt-in helper for a trusted local executable; it does not authenticate local peers.
 @MainActor
 final class VisionManagedRuntime {
@@ -42,7 +67,6 @@ final class VisionManagedRuntime {
     private var process: Process?
     private var pipe: Pipe?
     private var generation = UUID()
-    private var buffer = ""
     private var ready = false
     private let models: URL
 
@@ -77,11 +101,14 @@ final class VisionManagedRuntime {
             child.arguments = ["-p", config.sandboxProfile, config.executable.path, "serve"]
             child.environment = config.environment
             child.standardOutput = output; child.standardError = output
-            generation = current; buffer = ""; ready = false
-            output.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            generation = current; ready = false
+            let log = VisionRuntimeStartupLog(port: port) { [weak self] in
+                Task { @MainActor in self?.markReady(token: current) }
+            }
+            output.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
                 guard !data.isEmpty else { return }
-                Task { @MainActor in self?.consume(data, token: current, port: port) }
+                log.consume(data)
             }
             child.terminationHandler = { [weak self] exited in
                 try? FileManager.default.removeItem(at: scratch)
@@ -112,7 +139,7 @@ final class VisionManagedRuntime {
     }
 
     func stop() {
-        generation = UUID(); ready = false; buffer = ""
+        generation = UUID(); ready = false
         pipe?.fileHandleForReading.readabilityHandler = nil; pipe = nil
         if let child = process {
             if child.isRunning { child.terminate() }
@@ -120,11 +147,9 @@ final class VisionManagedRuntime {
         }
     }
 
-    private func consume(_ data: Data, token: UUID, port: Int) {
-        guard generation == token, !ready else { return }
-        buffer += String(decoding: data, as: UTF8.self)
-        if buffer.count > 16_384 { buffer = String(buffer.suffix(16_384)) }
-        if buffer.contains("Listening on 127.0.0.1:\(port) ") { ready = true; buffer = "" }
+    private func markReady(token: UUID) {
+        guard generation == token else { return }
+        ready = true
     }
 
     private func processExited(_ child: Process) {
