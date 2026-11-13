@@ -70,6 +70,7 @@ struct TaskListView: View {
                     #endif
                     Button("记忆…") { openWindow(id: "memory") }
                     Button("图片理解实验…") { openWindow(id: "vision-image") }
+                    Button("Safari 窗口理解实验…") { openWindow(id: "vision-safari-window") }
                     Button("新建任务…") { openWindow(id: "new-task") }
                     Button("运行命令…") { openWindow(id: "shell-task") }
                     Button("获取网页…") { openWindow(id: "fetch-url") }
