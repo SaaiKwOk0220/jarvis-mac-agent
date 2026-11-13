@@ -1,4 +1,5 @@
 import XCTest
+import Combine
 @preconcurrency import AVFoundation
 @preconcurrency import Speech
 import JarvisLLM
@@ -626,17 +627,36 @@ private final class PCMTestCollector: @unchecked Sendable {
     func testNoInitialTranscriptShowsNoticeAndTextResetsTimer() async throws {
         let backend = FakeVoiceBackend()
         let voice = VoiceCoordinator(backend: backend, stalePartialNoticeDelay: .milliseconds(40))
+        let firstNotice = expectation(description: "initial stale notice published")
+        let firstObserver = voice.$stalePartialNotice.compactMap { $0 }.first().sink { _ in firstNotice.fulfill() }
         await voice.start()
-        try await Task.sleep(for: .milliseconds(70))
+        await fulfillment(of: [firstNotice], timeout: 3)
+        firstObserver.cancel()
         XCTAssertTrue(voice.isRecording)
         XCTAssertNotNil(voice.stalePartialNotice)
         backend.handler?("收到文字")
         XCTAssertNil(voice.stalePartialNotice)
-        try await Task.sleep(for: .milliseconds(70))
+        let secondNotice = expectation(description: "stale notice republished after text")
+        let secondObserver = voice.$stalePartialNotice.compactMap { $0 }.first().sink { _ in secondNotice.fulfill() }
+        await fulfillment(of: [secondNotice], timeout: 3)
+        secondObserver.cancel()
         XCTAssertTrue(voice.isRecording)
         XCTAssertNotNil(voice.stalePartialNotice)
         voice.stop()
         XCTAssertNil(voice.stalePartialNotice)
+    }
+
+    func testNoticePublishedWhenMainActorDelaysTimerRegistration() async throws {
+        let backend = FakeVoiceBackend()
+        backend.duringStart = { Task { @MainActor in usleep(200_000) } }
+        let voice = VoiceCoordinator(backend: backend, stalePartialNoticeDelay: .milliseconds(40))
+        let notice = expectation(description: "notice published despite delayed task scheduling")
+        let observer = voice.$stalePartialNotice.compactMap { $0 }.first().sink { _ in notice.fulfill() }
+        await voice.start()
+        await fulfillment(of: [notice], timeout: 3)
+        observer.cancel()
+        XCTAssertNotNil(voice.stalePartialNotice)
+        voice.stop()
     }
 
     func testUnchangedPartialDoesNotEndRecording() async throws {
@@ -645,11 +665,12 @@ private final class PCMTestCollector: @unchecked Sendable {
         var sent: [String] = []
         await voice.start(autoSubmit: { sent.append($0) })
         backend.handler?("第一句")
-        try await Task.sleep(for: .milliseconds(25))
         backend.handler?("更新的第一句")
-        try await Task.sleep(for: .milliseconds(25))
         XCTAssertTrue(voice.isRecording)
-        try await Task.sleep(for: .milliseconds(60))
+        let notice = expectation(description: "unchanged transcript notice published")
+        let observer = voice.$stalePartialNotice.compactMap { $0 }.first().sink { _ in notice.fulfill() }
+        await fulfillment(of: [notice], timeout: 3)
+        observer.cancel()
         XCTAssertTrue(voice.isRecording)
         XCTAssertFalse(voice.isFinishing)
         XCTAssertNotNil(voice.stalePartialNotice)
