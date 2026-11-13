@@ -43,4 +43,17 @@ final class SafariWindowCaptureTests: XCTestCase {
         XCTAssertTrue(gate.begin())
         gate.end()
     }
+
+    func testCancelledPickerBlocksOverlapAndLateOldCallbackCannotFinishNewSession() {
+        var gate = SafariPickerSessionGate()
+        XCTAssertNil(gate.begin(sharedPickerActive: true), "do not override another client using the shared picker")
+        let first = try! XCTUnwrap(gate.begin())
+        gate.cancel()
+        XCTAssertNil(gate.begin(), "cancelled or pending picker must retain the global lease until callback")
+        XCTAssertEqual(gate.finish(first), .discard)
+        let second = try! XCTUnwrap(gate.begin())
+        XCTAssertNil(gate.finish(first), "a previously queued callback must not finish a later picker")
+        XCTAssertNil(gate.begin())
+        XCTAssertEqual(gate.finish(second), .deliver)
+    }
 }

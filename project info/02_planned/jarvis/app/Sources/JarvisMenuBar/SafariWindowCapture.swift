@@ -71,52 +71,105 @@ enum SafariWindowCapture {
     }
 }
 
-/// Presents the macOS single-window picker only after an explicit user action.
+/// A cancelled picker keeps its lease until the system reports its completion.
+struct SafariPickerSessionGate {
+    enum Completion { case deliver, discard }
+    private var active: UUID?
+    private var cancelled = false
+    mutating func begin(sharedPickerActive: Bool = false) -> UUID? {
+        guard active == nil, !sharedPickerActive else { return nil }
+        let token = UUID(); active = token; cancelled = false; return token
+    }
+    mutating func cancel() { if active != nil { cancelled = true } }
+    mutating func finish(_ token: UUID) -> Completion? {
+        guard active == token else { return nil }
+        let disposition: Completion = cancelled ? .discard : .deliver
+        active = nil; cancelled = false; return disposition
+    }
+}
+
+/// Each system observer carries its immutable picker-session identity.
+@available(macOS 15.2, *)
+private final class SafariPickerObserver: NSObject, SCContentSharingPickerObserver, @unchecked Sendable {
+    private struct FilterBox: @unchecked Sendable { let value: SCContentFilter }
+    private let token: UUID
+    init(token: UUID) { self.token = token }
+    nonisolated func contentSharingPicker(_ picker: SCContentSharingPicker, didCancelFor stream: SCStream?) {
+        guard stream == nil else { return }
+        let token = token
+        Task { @MainActor in SafariPickerCoordinator.shared.finish(token, filter: nil) }
+    }
+    nonisolated func contentSharingPicker(_ picker: SCContentSharingPicker, didUpdateWith filter: SCContentFilter, for stream: SCStream?) {
+        guard stream == nil else { return }
+        let box = FilterBox(value: filter), token = token
+        Task { @MainActor in SafariPickerCoordinator.shared.finish(token, filter: box.value) }
+    }
+    nonisolated func contentSharingPickerStartDidFailWithError(_ error: any Error) {
+        let token = token
+        Task { @MainActor in SafariPickerCoordinator.shared.finish(token, filter: nil) }
+    }
+}
+
+/// Serializes use of the application-wide picker and restores its previous settings.
 @available(macOS 15.2, *)
 @MainActor
-final class SafariWindowPicker: NSObject, ObservableObject, SCContentSharingPickerObserver {
-    private struct FilterBox: @unchecked Sendable { let value: SCContentFilter }
-    private var completion: ((SCContentFilter?) -> Void)?
+private final class SafariPickerCoordinator {
+    static let shared = SafariPickerCoordinator()
     private let picker = SCContentSharingPicker.shared
+    private var gate = SafariPickerSessionGate()
+    private var owner: UUID?
+    private var observer: SafariPickerObserver?
+    private var oldConfiguration: SCContentSharingPickerConfiguration?
+    private var oldActive = false
+    private var completion: ((SCContentFilter?) -> Void)?
 
-    func present(completion: @escaping (SCContentFilter?) -> Void) {
-        cancel()
+    func present(owner: UUID, completion: @escaping (SCContentFilter?) -> Void) -> Bool {
+        guard let token = gate.begin(sharedPickerActive: picker.isActive) else { return false }
+        self.owner = owner
         self.completion = completion
+        oldConfiguration = picker.defaultConfiguration
+        oldActive = picker.isActive
         var configuration = SCContentSharingPickerConfiguration()
         configuration.allowedPickerModes = .singleWindow
         configuration.allowsChangingSelectedContent = false
         picker.defaultConfiguration = configuration
-        picker.add(self)
+        let observer = SafariPickerObserver(token: token)
+        self.observer = observer
+        picker.add(observer)
         picker.isActive = true
         picker.present()
+        return true
     }
 
-    func cancel() {
-        completion = nil
-        picker.remove(self)
-        picker.isActive = false
+    func cancel(owner: UUID) {
+        guard self.owner == owner else { return }
+        // The picker has no documented dismiss API. Keep its observer and lease
+        // until its own callback so a new picker cannot overlap a cancelled one.
+        gate.cancel(); completion = nil
     }
 
-    nonisolated func contentSharingPicker(_ picker: SCContentSharingPicker, didCancelFor stream: SCStream?) {
-        guard stream == nil else { return }
-        Task { @MainActor [weak self] in self?.finish(nil) }
+    func finish(_ token: UUID, filter: SCContentFilter?) {
+        guard let disposition = gate.finish(token) else { return }
+        let callback = disposition == .deliver ? completion : nil
+        completion = nil; owner = nil
+        if let observer { picker.remove(observer) }
+        observer = nil
+        if let oldConfiguration { picker.defaultConfiguration = oldConfiguration }
+        picker.isActive = oldActive
+        oldConfiguration = nil
+        callback?(filter)
     }
+}
 
-    nonisolated func contentSharingPicker(_ picker: SCContentSharingPicker, didUpdateWith filter: SCContentFilter, for stream: SCStream?) {
-        guard stream == nil else { return }
-        let box = FilterBox(value: filter)
-        Task { @MainActor [weak self] in self?.finish(box.value) }
+/// Presents the macOS single-window picker only after an explicit user action.
+@available(macOS 15.2, *)
+@MainActor
+final class SafariWindowPicker: ObservableObject {
+    private let owner = UUID()
+    func present(completion: @escaping (SCContentFilter?) -> Void) -> Bool {
+        SafariPickerCoordinator.shared.present(owner: owner, completion: completion)
     }
-
-    nonisolated func contentSharingPickerStartDidFailWithError(_ error: any Error) {
-        Task { @MainActor [weak self] in self?.finish(nil) }
-    }
-
-    private func finish(_ filter: SCContentFilter?) {
-        guard let callback = completion else { return }
-        cancel()
-        callback(filter)
-    }
+    func cancel() { SafariPickerCoordinator.shared.cancel(owner: owner) }
 }
 
 @available(macOS 15.2, *)
@@ -136,6 +189,8 @@ struct SafariWindowVisionView: View {
             Text("Safari 窗口理解实验").font(.title2.bold())
             Text("选择 Safari 窗口后会截取一帧供预览；只有点击分析才发送。请确认本机服务可信，服务可能将图片转发到其他地方。")
                 .font(.callout).foregroundStyle(.secondary)
+            Text("取消会停止后续处理并清除预览，但无法撤回已经发送的数据。")
+                .font(.caption).foregroundStyle(.secondary)
             Button("选择 Safari 窗口…") { selectWindow() }.disabled(busy)
             if let preview {
                 Image(nsImage: preview).resizable().scaledToFit().frame(maxWidth: 480, maxHeight: 240).accessibilityLabel("将要发送的 Safari 窗口预览")
@@ -158,7 +213,7 @@ struct SafariWindowVisionView: View {
         cancel()
         let token = state.beginSelection()
         busy = true; result = "请选择一个 Safari 窗口。"
-        picker.present { filter in
+        let opened = picker.present { filter in
             guard state.isCurrent(token) else { return }
             guard let filter else { busy = false; result = "未选择窗口。"; return }
             result = "正在截取所选窗口…"
@@ -176,6 +231,7 @@ struct SafariWindowVisionView: View {
                 if !Task.isCancelled { busy = false; running = nil }
             }
         }
+        if !opened { busy = false; result = "请先在系统窗口中结束上一次选择，再重试。" }
     }
 
     private func submit() {
