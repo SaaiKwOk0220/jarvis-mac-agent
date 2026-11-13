@@ -507,6 +507,9 @@ public final class TaskService: DemoTaskServiceAPI, @unchecked Sendable {
     public var isExperimentalClickModeEnabled: Bool {
         lock.withLock { !clickModeTransition && !(refreshClickAuthorizationLocked()?.isRevoked ?? true) }
     }
+    public func isExperimentalSafariClickEnabled() -> Bool {
+        isExperimentalClickModeEnabled && !isExperimentalClickBarrierBlocking
+    }
     public var isExperimentalClickCleanupRequired: Bool {
         lock.withLock { !clickModeTransition && (refreshClickAuthorizationLocked()?.isRevoked ?? false) }
     }

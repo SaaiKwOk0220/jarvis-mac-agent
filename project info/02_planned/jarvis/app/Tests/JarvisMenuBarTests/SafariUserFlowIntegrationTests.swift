@@ -4,6 +4,7 @@ import JarvisDomain
 import JarvisLLM
 import JarvisPersistence
 import JarvisPolicy
+import ApplicationServices
 @testable import JarvisService
 @testable import JarvisMenuBar
 
@@ -79,5 +80,71 @@ final class SafariUserFlowIntegrationTests: XCTestCase {
     func testApprovedReadFlowsExactlyOnceToModelWithoutAuditLeak() async throws { try await performFlow(approve: true) }
     func testRejectedReadNeverReachesModel() async throws { try await performFlow(approve: false) }
     func testDisabledBeforeApprovalNeverReads() async throws { try await performFlow(approve: false, disable: true) }
+}
+#endif
+
+#if JARVIS_SAFARI_CLICK_EXPERIMENT && JARVIS_SAFARI_CLICK_TESTING && JARVIS_COMBINED_EXPERIMENT
+private actor IntegrationClickModel: LLMProvider {
+    let identifier = "click-scripted"
+    private(set) var turns = 0
+    func complete(messages: [LLMMessage], tools: [LLMTool]) async throws -> LLMResponse {
+        turns += 1
+        if turns == 1 { return LLMResponse(content: nil, toolCalls: [LLMToolCall(id: "click-1", name: "safari_click", arguments: ["role": "AXButton", "title": "Play"])], usage: nil) }
+        return LLMResponse(content: "finished", toolCalls: [], usage: nil)
+    }
+}
+private final class IntegrationClickCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    func increment() { lock.lock(); count += 1; lock.unlock() }
+    var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+}
+final class SafariAgentClickIntegrationTests: XCTestCase {
+    private func runClick(approve: Bool, result: AXError) async throws {
+        let db = try Database(path: ":memory:")
+        try db.migrate()
+        let service = try TaskService(taskRepository: SQLiteTaskRepository(database: db), auditRepository: SQLiteAuditRepository(database: db), policy: Policy())
+        let counter = IntegrationClickCounter()
+        try service.enableExperimentalClickModeForTesting(allowed: true) { _, _ in counter.increment(); return result }
+        let ref = AXUIElementCreateSystemWide()
+        let identity = SafariClickIdentity(pid: 42, window: "window", url: "https://example.com/private", role: "AXButton", title: "Play", enabled: true, requestDigest: "")
+        let candidate = SafariClickCandidate(element: ref, window: ref, launchDate: Date(timeIntervalSince1970: 1), identity: identity)
+        service.installExperimentalClickTargetSelectorForTesting { role, title in
+            guard role == identity.role, title == identity.title else { throw TaskServiceCapabilityError.unavailable }
+            return (identity, SafariClickCapture { [candidate] })
+        }
+        let task = try await service.createTask(title: "click target")
+        let provider = IntegrationClickModel()
+        let session = AgentSession(provider: provider, runner: TaskServiceToolRunner(service: service, taskID: task.id), approvalWaiter: TaskServiceApprovalWaiter(service: service, pollInterval: 0.01, timeout: 2), taskID: task.id)
+        let job = Task { try await session.run(goal: "Click play") }
+        var pending: [PendingApprovalRequest] = []
+        for _ in 0..<200 {
+            pending = try await service.listPendingApprovalRequests(taskID: task.id)
+            if !pending.isEmpty { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let item = try XCTUnwrap(pending.first)
+        XCTAssertEqual(pending.count, 1)
+        XCTAssertEqual(item.target, identity.url)
+        XCTAssertTrue(item.payload.contains("Play"))
+        XCTAssertEqual(counter.value, 0)
+        if approve {
+            if result == .success { try await service.approveExperimentalClick(requestID: item.id, digest: item.digest) }
+            else { do { try await service.approveExperimentalClick(requestID: item.id, digest: item.digest); XCTFail("expected failure") } catch {} }
+        } else { try await service.reject(requestID: item.id) }
+        let outcome = try await job.value
+        if approve && result != .success {
+            guard case .failed(let reason) = outcome else { return XCTFail("failed action must terminate the session") }
+            XCTAssertTrue(reason.contains("unknown"))
+            XCTAssertTrue(service.isExperimentalClickBarrierBlocking)
+            XCTAssertFalse(service.isExperimentalSafariClickEnabled())
+            let turns = await provider.turns
+            XCTAssertEqual(turns, 1, "failure must not trigger another model turn")
+        } else { guard case .completed = outcome else { return XCTFail("expected completion: \(outcome)") } }
+        XCTAssertEqual(counter.value, approve ? 1 : 0)
+    }
+    func testApprovalExecutesOnce() async throws { try await runClick(approve: true, result: .success) }
+    func testRejectionNeverClicks() async throws { try await runClick(approve: false, result: .success) }
+    func testFailedClickTerminatesWithoutRetry() async throws { try await runClick(approve: true, result: .failure) }
 }
 #endif

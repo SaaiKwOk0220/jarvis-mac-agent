@@ -18,6 +18,18 @@ final class ScriptedTaskService: TaskServiceAPI, @unchecked Sendable {
     func isExactBrowserEnabled() -> Bool { lock.withLock { if alternateExactReads { exactEnabled.toggle() }; return exactEnabled } }
     func setExactBrowserEnabled(_ enabled: Bool) throws { lock.withLock { exactEnabled = enabled } }
     private var safariEnabled = false
+    private var clickEnabled = false
+    private var clickRequests: [ToolRequest] = []
+    private var clickTargets: [(String, String)] = []
+    func isExperimentalSafariClickEnabled() -> Bool { lock.withLock { clickEnabled } }
+    func setClickEnabled(_ enabled: Bool) { lock.withLock { clickEnabled = enabled } }
+    var submittedClickRequests: [ToolRequest] { lock.withLock { clickRequests } }
+    var submittedClickTargets: [(String, String)] { lock.withLock { clickTargets } }
+    func submitExperimentalSafariClick(taskID: UUID, role: String, title: String) async throws -> ToolRequest {
+        let request = ToolRequest(taskID: taskID, name: "safari_click_experiment", sideEffect: .localWrite, target: "redacted Safari target", payload: "ticket")
+        lock.withLock { clickRequests.append(request); clickTargets.append((role, title)) }
+        return request
+    }
     func isSafariReadEnabled() -> Bool { lock.withLock { safariEnabled } }
     func setSafariReadEnabled(_ enabled: Bool) throws { lock.withLock { safariEnabled = enabled } }
     private var scriptedDecision: PolicyDecision
@@ -87,6 +99,40 @@ private func shellCall() -> LLMToolCall {
 }
 
 final class TaskServiceToolRunnerTests: XCTestCase {
+    func testExperimentalClickCatalogFollowsBuildAndLivePermission() async throws {
+        let service = ScriptedTaskService()
+        let runner = TaskServiceToolRunner(service: service, taskID: UUID())
+        let call = LLMToolCall(id: "click", name: "safari_click", arguments: ["role": "AXButton", "title": "Play"])
+        XCTAssertFalse(runner.tools().contains { $0.name == "safari_click" })
+        let disabled = try await runner.perform(call)
+        XCTAssertEqual(disabled, .denied("Safari clicking is unavailable"))
+        XCTAssertTrue(service.submittedClickRequests.isEmpty)
+        service.setClickEnabled(true)
+        #if JARVIS_SAFARI_CLICK_EXPERIMENT && (JARVIS_SAFARI_EXPERIMENT_BUILD || JARVIS_COMBINED_EXPERIMENT)
+        XCTAssertTrue(runner.tools().contains { $0.name == "safari_click" })
+        for arguments in [["role": "AXButton"], ["role": "", "title": "Play"], ["role": "AXButton", "title": "Play", "url": "https://evil.example"], ["role": "AXButton", "title": String(repeating: "x", count: 513)]] {
+            let invalid = try await runner.perform(LLMToolCall(id: "invalid", name: "safari_click", arguments: arguments))
+            XCTAssertEqual(invalid, .denied("Invalid Safari click target"))
+        }
+        XCTAssertTrue(service.submittedClickRequests.isEmpty)
+        let outcome = try await runner.perform(call)
+        let request = try XCTUnwrap(service.submittedClickRequests.first)
+        XCTAssertEqual(outcome, .awaitingApproval(requestID: request.id, payloadDigest: request.payloadDigest, description: "Approve the captured Safari target before clicking."))
+        XCTAssertEqual(service.submittedClickRequests.count, 1)
+        XCTAssertEqual(service.submittedClickTargets.first?.0, "AXButton")
+        XCTAssertEqual(service.submittedClickTargets.first?.1, "Play")
+        XCTAssertTrue(service.submittedRequests.isEmpty, "already-pending click must never be submitted again")
+        service.setClickEnabled(false)
+        let revoked = try await runner.perform(call)
+        XCTAssertEqual(revoked, .denied("Safari clicking is unavailable"))
+        XCTAssertEqual(service.submittedClickRequests.count, 1)
+        #else
+        XCTAssertFalse(runner.tools().contains { $0.name == "safari_click" })
+        let blocked = try await runner.perform(call)
+        XCTAssertEqual(blocked, .denied("Safari clicking is unavailable"))
+        XCTAssertTrue(service.submittedClickRequests.isEmpty)
+        #endif
+    }
     func testBrowserToolUsesOnePermissionSnapshotPerCatalog() throws {
         let service = ScriptedTaskService()
         service.setAlternatingExactReads()

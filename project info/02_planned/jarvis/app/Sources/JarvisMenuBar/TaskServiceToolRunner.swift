@@ -139,6 +139,14 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
         if service.isSafariReadEnabled() {
             catalog.insert(LLMTool(name: "safari_read", description: "Capture the user's current focused Safari window and request approval to read its accessibility text. Ask the user to switch to the intended Safari page. The full captured URL is shown only for approval; content is sent to the model after approval. Dynamic pages are not atomic snapshots.", parameters: [:]), at: 0)
         }
+        #if JARVIS_SAFARI_CLICK_EXPERIMENT && (JARVIS_SAFARI_EXPERIMENT_BUILD || JARVIS_COMBINED_EXPERIMENT)
+        if service.isExperimentalSafariClickEnabled() {
+            catalog.insert(LLMTool(name: "safari_click", description: "Request approval to click a unique accessible element in the current focused Safari window. Ask the user to focus the intended page. The captured full URL, role and title are shown for approval. Dynamic page content may change; never retry an unknown result.", parameters: [
+                "role": LLMToolParameter(type: "string", description: "Exact accessibility role, for example AXButton."),
+                "title": LLMToolParameter(type: "string", description: "Exact accessible title of the element.")
+            ]), at: 0)
+        }
+        #endif
         return catalog
     }
 
@@ -149,6 +157,18 @@ public final class TaskServiceToolRunner: AgentToolRunner, Sendable {
     /// output is read back out of the audit timeline. Unknown tool names never
     /// reach the service: they come back as `.denied` so the model can re-plan.
     public func perform(_ call: LLMToolCall) async throws -> AgentToolOutcome {
+        if call.name == "safari_click" {
+            #if JARVIS_SAFARI_CLICK_EXPERIMENT && (JARVIS_SAFARI_EXPERIMENT_BUILD || JARVIS_COMBINED_EXPERIMENT)
+            guard service.isExperimentalSafariClickEnabled() else { return .denied("Safari clicking is unavailable") }
+            guard let role = call.arguments["role"], let title = call.arguments["title"],
+                  !role.isEmpty, role.utf8.count <= 128, !title.isEmpty, title.utf8.count <= 512,
+                  Set(call.arguments.keys) == Set(["role", "title"]) else { return .denied("Invalid Safari click target") }
+            let request = try await service.submitExperimentalSafariClick(taskID: taskID, role: role, title: title)
+            return .awaitingApproval(requestID: request.id, payloadDigest: request.payloadDigest, description: "Approve the captured Safari target before clicking.")
+            #else
+            return .denied("Safari clicking is unavailable")
+            #endif
+        }
         let request: ToolRequest
         if call.name == "safari_read" {
             guard service.isSafariReadEnabled() else { return .denied("Safari reading is unavailable") }

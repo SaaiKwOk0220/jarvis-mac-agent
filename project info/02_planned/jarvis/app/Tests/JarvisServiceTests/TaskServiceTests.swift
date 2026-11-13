@@ -2345,6 +2345,19 @@ extension TaskServiceTests {
         let fixture = try Fixture()
         XCTAssertThrowsError(try fixture.service.enableExperimentalClickModeForTesting(allowed: false) { _, _ in XCTFail("must not execute"); return .success })
     }
+    func testExperimentalClickCapabilityFollowsModeAndDurableBarrier() async throws {
+        let fixture = try Fixture()
+        XCTAssertFalse(fixture.service.isExperimentalSafariClickEnabled())
+        try fixture.service.enableExperimentalClickModeForTesting(allowed: true) { _, _ in .success }
+        XCTAssertTrue(fixture.service.isExperimentalSafariClickEnabled())
+        try fixture.database.write { db in
+            try db.execute(sql: "INSERT INTO experimental_click_barriers (request_id) VALUES (?)", arguments: [UUID().uuidString])
+        }
+        XCTAssertFalse(fixture.service.isExperimentalSafariClickEnabled())
+        let cleanup = fixture.service.disableExperimentalClickMode()
+        _ = try await cleanup.value
+        XCTAssertFalse(fixture.service.isExperimentalSafariClickEnabled())
+    }
     func testExperimentalClickModeCleanupFailureCanBeRetried() async throws {
         let fixture = try Fixture(), counter = ExperimentalClickActionCounter()
         let task = try await fixture.service.createTask(title: "cleanup")
