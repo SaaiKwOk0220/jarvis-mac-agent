@@ -83,6 +83,7 @@ struct VisionImageView: View {
             do {
                 let snapshot = try await Task.detached { try VisionImageSelection.snapshot(url) }.value
                 guard generation == current, !Task.isCancelled else { return }
+                guard NSImage(data: snapshot.data) != nil else { throw VisionError.invalidRequest }
                 selected = snapshot; result = ""
             } catch {
                 guard generation == current, !Task.isCancelled else { return }
