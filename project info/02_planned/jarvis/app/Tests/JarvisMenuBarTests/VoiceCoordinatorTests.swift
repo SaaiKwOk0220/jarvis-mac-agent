@@ -19,12 +19,13 @@ import JarvisLLM
     var permissionContinuation: CheckedContinuation<Bool, Never>?
     var microphoneRequested = false
     var microphoneGranted = true
+    var duringStart: (() throws -> Void)?
     func requestSpeechPermission() async -> Bool {
         if deferPermission { return await withCheckedContinuation { permissionContinuation = $0 } }
         return permissionGranted
     }
     func requestMicrophonePermission() async -> Bool { microphoneRequested = true; return microphoneGranted }
-    func start(onText: @escaping @MainActor @Sendable (String) -> Void, onFailure: @escaping @MainActor @Sendable (String) -> Void, onFinish: @escaping @MainActor @Sendable (Bool) -> Void, onSilence: @escaping @MainActor @Sendable () -> Void) throws { started = true; handler = onText; failureHandler = onFailure; finishHandler = onFinish; silenceHandler = onSilence }
+    func start(onText: @escaping @MainActor @Sendable (String) -> Void, onFailure: @escaping @MainActor @Sendable (String) -> Void, onFinish: @escaping @MainActor @Sendable (Bool) -> Void, onSilence: @escaping @MainActor @Sendable () -> Void) throws { started = true; handler = onText; failureHandler = onFailure; finishHandler = onFinish; silenceHandler = onSilence; try duringStart?() }
     func stop() { stopped = true }
     func finish() { finished = true; onFinish?() }
 }
@@ -1068,6 +1069,30 @@ private final class PCMTestCollector: @unchecked Sendable {
         XCTAssertEqual(voice.transcript, longText)
         XCTAssertTrue(voice.needsConfirmation)
         XCTAssertTrue(submitted.isEmpty)
+    }
+
+    func testSynchronousBackendFailureDoesNotLeaveRecordingActive() async {
+        let backend = FakeVoiceBackend(); let voice = VoiceCoordinator(backend: backend)
+        backend.duringStart = { backend.handler?("已有转写"); backend.failureHandler?("VAD 不可用") }
+        var submitted: [String] = []
+        await voice.start(autoSubmit: { submitted.append($0) })
+        XCTAssertFalse(voice.isRecording)
+        XCTAssertFalse(voice.isFinishing)
+        XCTAssertTrue(voice.needsConfirmation)
+        XCTAssertEqual(voice.transcript, "已有转写")
+        XCTAssertEqual(voice.errorMessage, "VAD 不可用")
+        XCTAssertTrue(submitted.isEmpty)
+    }
+
+    func testThrownStartFailurePreservesPartialAndInvalidatesCallbacks() async {
+        let backend = FakeVoiceBackend(); let voice = VoiceCoordinator(backend: backend)
+        backend.duringStart = { backend.handler?("已有转写"); throw NSError(domain: "test", code: 1) }
+        await voice.start()
+        XCTAssertFalse(voice.isRecording)
+        XCTAssertTrue(voice.needsConfirmation)
+        XCTAssertEqual(voice.transcript, "已有转写")
+        backend.handler?("迟到的转写")
+        XCTAssertEqual(voice.transcript, "已有转写")
     }
 
     func testTwoSuccessiveVoiceTurnsEachFinishOnSilence() async {

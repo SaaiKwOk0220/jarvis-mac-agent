@@ -228,6 +228,7 @@ struct VoiceDraftPrefix {
                 self.diagnosticReason = "检测到停顿"
                 self.finishRecording()
             }
+            guard generation == current else { return }
             isRecording = true
             scheduleStalePartialNotice(generation: current)
             let limit = recordingLimit ?? .seconds(VoiceEndpointSettings.maxRecordingSeconds())
@@ -240,7 +241,10 @@ struct VoiceDraftPrefix {
                 self.finishRecording()
             }
         } catch {
-            backend.stop()
+            guard generation == current else { return }
+            needsConfirmation = !transcript.isEmpty
+            diagnosticReason = "识别失败"
+            stop()
             errorMessage = SpeechFailure.safeMessage(error)
         }
     }
