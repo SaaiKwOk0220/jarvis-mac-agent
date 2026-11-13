@@ -377,7 +377,9 @@ enum VoicePlaybackSettings {
     private nonisolated let completions = SpeechCompletionStore()
     override init() { super.init(); synthesizer.delegate = self }
     func speak(_ text: String, onFinish: @escaping @MainActor @Sendable (Bool) -> Void) {
-        let utterance = AVSpeechUtterance(string: text)
+        let spokenText = SpeechTextFormatter.prepare(text)
+        guard !spokenText.isEmpty else { onFinish(false); return }
+        let utterance = AVSpeechUtterance(string: spokenText)
         let defaults = UserDefaults.standard
         let available = AVSpeechSynthesisVoice.speechVoices().filter { $0.language.lowercased().hasPrefix("zh") }
         let requested = defaults.string(forKey: VoicePlaybackSettings.voiceKey) ?? ""
