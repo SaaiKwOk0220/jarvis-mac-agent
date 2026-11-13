@@ -16,13 +16,14 @@ public struct VisionRequest: Sendable {
 
 /// Errors intentionally omit input, server responses, and network diagnostics.
 public enum VisionError: Error, LocalizedError {
-    case invalidRequest, invalidEndpoint, unavailable, invalidResponse
+    case invalidRequest, invalidEndpoint, unavailable, invalidResponse, busy
     public var errorDescription: String? {
         switch self {
         case .invalidRequest: "图片或提示词为空或超出大小限制。"
         case .invalidEndpoint: "图片理解仅支持本机回环地址。"
         case .unavailable: "本机图片理解服务不可用。"
         case .invalidResponse: "本机图片理解服务返回无效结果。"
+        case .busy: "图片理解服务已有请求正在处理。"
         }
     }
 }
@@ -34,12 +35,21 @@ private final class VisionRedirectBlocker: NSObject, URLSessionTaskDelegate, @un
     }
 }
 
+private final class VisionRequestGate: @unchecked Sendable {
+    static let shared = VisionRequestGate()
+    private let lock = NSLock()
+    private var inFlight = false
+    func begin() -> Bool { lock.lock(); defer { lock.unlock() }; guard !inFlight else { return false }; inFlight = true; return true }
+    func end() { lock.lock(); defer { lock.unlock() }; inFlight = false }
+}
+
 /// An explicit local request; the loopback server must be trusted and may itself forward data.
 /// No image is read or sent until `describe` is called with a user-supplied request.
 public final class OllamaVisionService: @unchecked Sendable {
     private let endpoint: URL
     private let model: String
     private let session: URLSession
+    static let maximumResponseBytes = 1024 * 1024
     public convenience init(baseURL: URL = URL(string: "http://127.0.0.1:11434")!, model: String) throws {
         try self.init(baseURL: baseURL, model: model, configuration: .ephemeral)
     }
@@ -60,19 +70,31 @@ public final class OllamaVisionService: @unchecked Sendable {
         session = URLSession(configuration: configuration, delegate: VisionRedirectBlocker(), delegateQueue: nil)
     }
     public func describe(_ input: VisionRequest) async throws -> String {
+        guard VisionRequestGate.shared.begin() else { throw VisionError.busy }
+        defer { VisionRequestGate.shared.end() }
         struct Message: Encodable { let role: String; let content: String; let images: [String] }
         struct Request: Encodable { let model: String; let messages: [Message]; let stream = false }
-        struct Response: Decodable { struct Message: Decodable { let content: String }; let message: Message }
+        struct Response: Decodable { struct Message: Decodable { let content: String }; let message: Message; let done: Bool }
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
         request.timeoutInterval = 120
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(Request(model: model, messages: [Message(role: "user", content: input.prompt, images: [input.image.base64EncodedString()])]))
-        let data: Data, response: URLResponse
-        do { (data, response) = try await session.data(for: request) }
+        let bytes: URLSession.AsyncBytes, response: URLResponse
+        do { (bytes, response) = try await session.bytes(for: request) }
         catch { if Task.isCancelled || (error as? URLError)?.code == .cancelled { throw CancellationError() }; throw VisionError.unavailable }
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { throw VisionError.unavailable }
-        guard let result = try? JSONDecoder().decode(Response.self, from: data),
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            bytes.task.cancel(); throw VisionError.unavailable
+        }
+        var data = Data()
+        do {
+            for try await byte in bytes {
+                guard data.count < Self.maximumResponseBytes else { bytes.task.cancel(); throw VisionError.invalidResponse }
+                data.append(byte)
+            }
+        } catch let error as VisionError { throw error }
+        catch { bytes.task.cancel(); if Task.isCancelled || (error as? URLError)?.code == .cancelled { throw CancellationError() }; throw VisionError.unavailable }
+        guard let result = try? JSONDecoder().decode(Response.self, from: data), result.done,
               !result.message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw VisionError.invalidResponse }
         return result.message.content
     }

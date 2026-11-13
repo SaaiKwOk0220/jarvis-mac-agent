@@ -20,7 +20,7 @@ final class OllamaVisionTests: XCTestCase {
             let messages = try XCTUnwrap(json["messages"] as? [[String: Any]])
             XCTAssertEqual(messages.first?["content"] as? String, "describe")
             XCTAssertEqual(messages.first?["images"] as? [String], [Data([1, 2, 3]).base64EncodedString()])
-            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(#"{"message":{"content":"a picture"}}"#.utf8))
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(#"{"message":{"content":"a picture"},"done":true}"#.utf8))
         }
         let response = try await service().describe(VisionRequest(prompt: "describe", image: Data([1, 2, 3])))
         XCTAssertEqual(response, "a picture")
@@ -32,6 +32,41 @@ final class OllamaVisionTests: XCTestCase {
         XCTAssertThrowsError(try VisionRequest(prompt: "x", image: Data()))
         XCTAssertThrowsError(try VisionRequest(prompt: "x", image: Data(repeating: 1, count: VisionRequest.maximumImageBytes + 1)))
         XCTAssertThrowsError(try VisionRequest(prompt: "", image: Data([1])))
+    }
+    func testConcurrentRequestsAcrossServiceInstancesAreRejected() async throws {
+        let entered = expectation(description: "first request entered")
+        let release = DispatchSemaphore(value: 0)
+        MockURLProtocol.handler = { request in
+            entered.fulfill()
+            _ = release.wait(timeout: .now() + 3)
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(#"{"message":{"content":"ok"},"done":true}"#.utf8))
+        }
+        let first = try service(), second = try service()
+        let input = try VisionRequest(prompt: "x", image: Data([1]))
+        let active = Task { try await first.describe(input) }
+        await fulfillment(of: [entered], timeout: 2)
+        do { _ = try await second.describe(input); XCTFail("expected busy") }
+        catch VisionError.busy { }
+        release.signal()
+        let result = try await active.value
+        XCTAssertEqual(result, "ok")
+    }
+    func testMissingOrFalseDoneIsRejected() async throws {
+        for payload in [#"{"message":{"content":"partial"}}"#, #"{"message":{"content":"partial"},"done":false}"#] {
+            MockURLProtocol.handler = { request in
+                (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(payload.utf8))
+            }
+            do { _ = try await service().describe(VisionRequest(prompt: "x", image: Data([1]))); XCTFail("expected incomplete result") }
+            catch VisionError.invalidResponse { }
+        }
+    }
+    func testUnboundedResponseWithoutLengthIsRejected() async throws {
+        MockURLProtocol.handler = { request in
+            (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+             Data(repeating: 65, count: OllamaVisionService.maximumResponseBytes + 1))
+        }
+        do { _ = try await service().describe(VisionRequest(prompt: "x", image: Data([1]))); XCTFail("expected size rejection") }
+        catch VisionError.invalidResponse { }
     }
     func testRedirectResponseIsRejected() async throws {
         MockURLProtocol.handler = { request in
