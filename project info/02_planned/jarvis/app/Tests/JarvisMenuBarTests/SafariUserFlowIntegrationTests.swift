@@ -87,9 +87,11 @@ final class SafariUserFlowIntegrationTests: XCTestCase {
 private actor IntegrationClickModel: LLMProvider {
     let identifier = "click-scripted"
     private(set) var turns = 0
+    let retryAfterDenial: Bool
+    init(retryAfterDenial: Bool = false) { self.retryAfterDenial = retryAfterDenial }
     func complete(messages: [LLMMessage], tools: [LLMTool]) async throws -> LLMResponse {
         turns += 1
-        if turns == 1 { return LLMResponse(content: nil, toolCalls: [LLMToolCall(id: "click-1", name: "safari_click", arguments: ["role": "AXButton", "title": "Play"])], usage: nil) }
+        if turns == 1 || retryAfterDenial { return LLMResponse(content: nil, toolCalls: [LLMToolCall(id: "click-1", name: "safari_click", arguments: ["role": "AXButton", "title": "Play"])], usage: nil) }
         return LLMResponse(content: "finished", toolCalls: [], usage: nil)
     }
 }
@@ -100,7 +102,7 @@ private final class IntegrationClickCounter: @unchecked Sendable {
     var value: Int { lock.lock(); defer { lock.unlock() }; return count }
 }
 final class SafariAgentClickIntegrationTests: XCTestCase {
-    private func runClick(approve: Bool, result: AXError) async throws {
+    private func runClick(approve: Bool, result: AXError, disable: Bool = false) async throws {
         let db = try Database(path: ":memory:")
         try db.migrate()
         let service = try TaskService(taskRepository: SQLiteTaskRepository(database: db), auditRepository: SQLiteAuditRepository(database: db), policy: Policy())
@@ -114,7 +116,7 @@ final class SafariAgentClickIntegrationTests: XCTestCase {
             return (identity, SafariClickCapture { [candidate] })
         }
         let task = try await service.createTask(title: "click target")
-        let provider = IntegrationClickModel()
+        let provider = IntegrationClickModel(retryAfterDenial: !approve)
         let session = AgentSession(provider: provider, runner: TaskServiceToolRunner(service: service, taskID: task.id), approvalWaiter: TaskServiceApprovalWaiter(service: service, pollInterval: 0.01, timeout: 2), taskID: task.id)
         let job = Task { try await session.run(goal: "Click play") }
         var pending: [PendingApprovalRequest] = []
@@ -131,7 +133,8 @@ final class SafariAgentClickIntegrationTests: XCTestCase {
         if approve {
             if result == .success { try await service.approveExperimentalClick(requestID: item.id, digest: item.digest) }
             else { do { try await service.approveExperimentalClick(requestID: item.id, digest: item.digest); XCTFail("expected failure") } catch {} }
-        } else { try await service.reject(requestID: item.id) }
+        } else if disable { _ = try await service.disableExperimentalClickMode().value }
+        else { try await service.reject(requestID: item.id) }
         let outcome = try await job.value
         if approve && result != .success {
             guard case .failed(let reason) = outcome else { return XCTFail("failed action must terminate the session") }
@@ -140,11 +143,18 @@ final class SafariAgentClickIntegrationTests: XCTestCase {
             XCTAssertFalse(service.isExperimentalSafariClickEnabled())
             let turns = await provider.turns
             XCTAssertEqual(turns, 1, "failure must not trigger another model turn")
+        } else if !approve {
+            guard case .failed = outcome else { return XCTFail("rejected or disabled click must terminate the session: \(outcome)") }
+            let turns = await provider.turns
+            XCTAssertEqual(turns, 1, "rejection must not trigger another model turn")
+            let remaining = try await service.listPendingApprovalRequests(taskID: task.id)
+            XCTAssertTrue(remaining.isEmpty, "rejection must not create a replacement approval")
         } else { guard case .completed = outcome else { return XCTFail("expected completion: \(outcome)") } }
         XCTAssertEqual(counter.value, approve ? 1 : 0)
     }
     func testApprovalExecutesOnce() async throws { try await runClick(approve: true, result: .success) }
     func testRejectionNeverClicks() async throws { try await runClick(approve: false, result: .success) }
+    func testDisablingClickNeverRetries() async throws { try await runClick(approve: false, result: .success, disable: true) }
     func testFailedClickTerminatesWithoutRetry() async throws { try await runClick(approve: true, result: .failure) }
 }
 #endif

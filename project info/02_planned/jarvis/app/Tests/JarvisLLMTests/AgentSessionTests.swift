@@ -63,6 +63,19 @@ private func shellCall(id: String = "call_0", command: String = "ls") -> LLMTool
 }
 
 final class AgentSessionTests: XCTestCase {
+    func testDeniedSafariClickTerminatesBeforeAnotherModelTurn() async throws {
+        let call = LLMToolCall(id: "click", name: "safari_click", arguments: ["role": "AXButton", "title": "Play"])
+        let provider = ScriptedProvider(responses: [
+            LLMResponse(content: nil, toolCalls: [call], usage: nil),
+            LLMResponse(content: nil, toolCalls: [call], usage: nil)
+        ])
+        let runner = SessionScriptedRunner(tools: [], outcomes: ["safari_click": .denied("Safari clicking is unavailable")])
+        let session = AgentSession(provider: provider, runner: runner, approvalWaiter: ScriptedApprovalWaiter(resolutions: []), taskID: UUID())
+        let result = try await session.run(goal: "click")
+        XCTAssertEqual(result, .failed(reason: "Safari clicking is unavailable"))
+        XCTAssertEqual(provider.callCount, 1)
+        XCTAssertEqual(runner.performedCalls.count, 1)
+    }
 
     func testConversationHistoryIncludesOnlyUserAndAssistantText() async throws {
         let provider = ScriptedProvider(responses: [.init(content: "好", toolCalls: [], usage: nil)])

@@ -104,6 +104,9 @@ public struct AgentSession: Sendable {
                         messages.append(LLMMessage(role: .tool, content: observation, toolCallID: call.id))
                     case .rejected(let reason):
                         onEvent?(.toolCallDenied(name: call.name, reason: reason))
+                        // A refused computer action ends this run: feeding it
+                        // back to the model could cause an automatic retry.
+                        if call.name == "safari_click" { return .failed(reason: "Safari click was rejected: \(reason)") }
                         messages.append(LLMMessage(role: .tool, content: "denied: \(reason)", toolCallID: call.id))
                     case .failed(let reason):
                         return .failed(reason: reason)
@@ -115,6 +118,7 @@ public struct AgentSession: Sendable {
 
                 case .denied(let reason):
                     onEvent?(.toolCallDenied(name: call.name, reason: reason))
+                    if call.name == "safari_click" { return .failed(reason: reason) }
                     messages.append(LLMMessage(role: .tool, content: "denied: \(reason)", toolCallID: call.id))
                 }
             }
